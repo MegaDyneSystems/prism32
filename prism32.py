@@ -1175,6 +1175,48 @@ register_theme("plasma",
     accent="\033[38;5;169m", warn="\033[38;5;226m", err="\033[38;5;196m",
     glow="\033[5;95m", bar="\033[48;5;128m")
 
+# ── Transparent-terminal themes ───────────────────────────────
+register_theme("clear",
+    primary="\x1b[39m", bright="\x1b[1m", dim="\x1b[2m",
+    accent="\x1b[36m", warn="\x1b[33m", err="\x1b[31m",
+    glow="\x1b[5m", bar="")
+
+register_theme("glass",
+    primary="\x1b[38;5;250m", bright="\x1b[1;97m", dim="\x1b[2;38;5;245m",
+    accent="\x1b[38;5;81m", warn="\x1b[38;5;220m", err="\x1b[38;5;203m",
+    glow="\x1b[5;38;5;250m", bar="")
+
+register_theme("ghost",
+    primary="\x1b[38;5;252m", bright="\x1b[1;38;5;255m", dim="\x1b[2;38;5;244m",
+    accent="\x1b[38;5;122m", warn="\x1b[38;5;178m", err="\x1b[38;5;204m",
+    glow="\x1b[5;38;5;252m", bar="")
+
+register_theme("smoke",
+    primary="\x1b[38;5;240m", bright="\x1b[1;38;5;238m", dim="\x1b[2;38;5;245m",
+    accent="\x1b[38;5;67m", warn="\x1b[38;5;130m", err="\x1b[38;5;124m",
+    glow="\x1b[5;38;5;240m", bar="")
+
+# ── Light / white-terminal themes ─────────────────────────────
+register_theme("paper",
+    primary="\x1b[30m", bright="\x1b[1;30m", dim="\x1b[2;30m",
+    accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
+    glow="\x1b[5;30m", bar="")
+
+register_theme("ink",
+    primary="\x1b[34m", bright="\x1b[1;34m", dim="\x1b[2;34m",
+    accent="\x1b[32m", warn="\x1b[33m", err="\x1b[31m",
+    glow="\x1b[5;34m", bar="")
+
+register_theme("daylight",
+    primary="\x1b[36m", bright="\x1b[1;90m", dim="\x1b[2;36m",
+    accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
+    glow="\x1b[5;36m", bar="")
+
+register_theme("slate",
+    primary="\x1b[38;5;238m", bright="\x1b[1;38;5;240m", dim="\x1b[2;38;5;244m",
+    accent="\x1b[34m", warn="\x1b[38;5;130m", err="\x1b[31m",
+    glow="\x1b[5;38;5;238m", bar="")
+
 # ── Model Providers ────────────────────────────────────────────
 
 # ── Provider Registry (built-ins) ──────────────────────
@@ -2596,7 +2638,7 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
    /savecfg             Save config to disk
    /loadcfg             Load config from disk
    /usage               Show API usage (OpenRouter)
-   /theme               Cycle theme (18 built-in themes)
+   /theme               Cycle theme (21 built-in themes)
    /plugins             List loaded plugins
    /update [dir]        Git pull + reinstall from project directory
    /help                This help
@@ -2773,7 +2815,7 @@ def main():
     parser.add_argument("--model", "-m", help="Override model name")
     parser.add_argument("--api", "-a", help="Override API base URL")
     parser.add_argument("--api-key", "-k", help="Set API key (e.g. OpenRouter)")
-    parser.add_argument("--theme", "-t", choices=["phosphor","amber","cyan","vapor","nord","solarized","neon","retro","ice","ocean","sunset","forest","plasma"], help="Color theme")
+    parser.add_argument("--theme", "-t", choices=["phosphor","amber","cyan","vapor","nord","solarized","neon","retro","ice","ocean","sunset","forest","plasma","clear","glass","ghost","smoke","paper","ink","daylight","slate"], help="Color theme")
     parser.add_argument("--slow-cpu", action="store_true", help="Slow CPU mode: disable spinner, batch saves, less overhead")
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
     parser.add_argument("--temperature", type=float, help="AI temperature (0.0-1.0)")

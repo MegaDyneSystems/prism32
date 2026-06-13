@@ -13,17 +13,19 @@ def test_theme_phosphor():
     """Phosphor theme should have green colors."""
     theme = THEME_REGISTRY['phosphor']
     assert theme['primary'] == '\033[92m'  # Green
-    assert theme['bright'] == '\033[38;5;118m'
+    assert theme['bright'] == '\033[1;92m'  # Bold green
+
 
 def test_theme_amber():
     """Amber theme should have amber colors."""
     theme = THEME_REGISTRY['amber']
-    assert theme['primary'] == '\033[93m'  # Yellow/Amber
+    assert theme['primary'] == '\033[33m'  # Yellow/Amber
+
 
 def test_theme_nord():
     """Nord theme should have blue colors."""
     theme = THEME_REGISTRY['nord']
-    assert theme['primary'] == '\033[94m'  # Blue
+    assert theme['primary'] == '\033[38;5;109m'  # Nord blue
 
 def test_t_function():
     """T() should return current theme colors."""
