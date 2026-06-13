@@ -1183,7 +1183,7 @@ register_provider("openai", display_name="OpenAI", api_base="https://api.openai.
 register_provider("anthropic", display_name="Anthropic", api_base="https://api.anthropic.com/v1", model="claude-sonnet-4-20250514", description="Anthropic Claude (requires API key)")
 register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", description="Groq fast inference")
 register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", description="Together AI inference")
-register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="anthropic/claude-sonnet-4-20250514", description="OpenRouter multi-model gateway (set API key via --api-key or /apikey)")
+register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="anthropic/claude-sonnet-4-20250514", description="OpenRouter multi-model gateway (set API key via --api-key or /provider key)")
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)")
 
 
@@ -2221,7 +2221,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, interject_queue=None):
         except urllib.error.HTTPError as e:
             body = e.read().decode()[:500]
             if e.code == 401:
-                last_error = f"[HTTP ERROR 401] Authentication failed. Set a valid API key via /apikey or --api-key"
+                last_error = f"[HTTP ERROR 401] Authentication failed. Set a valid API key via /provider key or --api-key"
                 learn_error(last_error, f"HTTP 401: {body[:100]}")
             else:
                 last_error = f"[HTTP ERROR {e.code}] {body}"
@@ -2551,10 +2551,7 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
 
  {bold}Configuration{reset}
    /agentname <name>    Set the name shown before assistant responses
-   /api <url>           Set API base URL
-   /apikey <key>        Set API key
-   /model [name]        Show/change AI model
-   /provider [name]     Switch provider (add/remove with 'provider add|rm')
+   /provider [name]    Switch provider (add|rm|api|key|list subcommands)
    /stream [on|off]     Toggle streaming AI responses
    /temperature <0-2>   Set AI temperature (default 0.7)
    /thinking <off|l|m|h> Set reasoning effort (off/low/medium/high)
@@ -3026,12 +3023,7 @@ def main():
             print()
             continue
 
-        if cmd == 'providers':
-            cmd_provider_list()
-            print()
-            continue
-
-        if cmd == 'provider':
+        if cmd in ('providers', 'provider'):
             if args_str:
                 parts = args_str.split(None, 1)
                 subcmd = parts[0].lower()
@@ -3052,11 +3044,33 @@ def main():
                         cmd_provider_remove(parts[1])
                     else:
                         print(f"  Usage: provider rm <name>")
+                elif subcmd == 'api':
+                    url = parts[1].strip() if len(parts) > 1 else ""
+                    if url:
+                        Config.API_BASE = url
+                        Config.save_config()
+                        print(f"  {t['bright']}+ API set to: {url}{RST}")
+                    else:
+                        print(f"  Current API: {t['bright']}{Config.API_BASE}{RST}")
+                        print(f"  Usage: provider api <url>")
+                elif subcmd == 'key':
+                    key = parts[1].strip() if len(parts) > 1 else ""
+                    if key:
+                        Config.API_KEY = key
+                        Config.save_config()
+                        mask = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
+                        print(f"  {t['bright']}+ API key set: {mask}{RST}")
+                    else:
+                        has_key = bool(Config.API_KEY)
+                        print(f"  API key: {t['bright']}{'<set>' if has_key else '<not set>'}{RST}")
+                        print(f"  Usage: provider key <key>")
+                elif subcmd in ('list', 'ls'):
+                    cmd_provider_list()
                 else:
                     # Treat as provider name to switch to
                     cmd_provider_set(subcmd)
             else:
-                print(f"  Usage: provider <name> | providers | provider add ... | provider rm ...")
+                cmd_provider_list()
             print()
             continue
 
@@ -3083,17 +3097,6 @@ def main():
                 Config.save_config()
             else:
                 cmd_model_list(history, cmd_log)
-            continue
-
-        if cmd == 'api':
-            if args_str:
-                Config.API_BASE = args_str
-                print(f"  {t['bright']}+ API set to: {Config.API_BASE}{RST}")
-                Config.save_config()
-            else:
-                print(f"  Current API: {t['bright']}{Config.API_BASE}{RST}")
-                print(f"  Usage: api <url>")
-            print()
             continue
 
         if cmd == 'plugins':
@@ -3136,12 +3139,6 @@ def main():
             else:
                 print(f"  Auto-save: {t['bright']}every {Config.AUTO_SAVE_INTERVAL}s{RST}")
             print()
-            continue
-
-        if cmd == 'apikey':
-            if args_str:
-                Config.API_KEY = args_str
-                mask = args_str[:4] + "..." + args_str[-4:] if len(args_str) > 8 else "***"
             continue
 
         if cmd == 'rootpass':
@@ -3281,7 +3278,7 @@ def main():
         if cmd == 'usage':
             if not Config.API_KEY:
                 print(f"  {t['warn']}No API key set. Usage tracking requires a provider API key.{RST}")
-                print(f"  Set via: {t['bright']}apikey <key>{RST}")
+                print(f"  Set via: {t['bright']}/provider key <key>{RST}")
             elif "openrouter" not in Config.API_BASE.lower():
                 print(f"  {t['dim']}Usage tracking is currently only available for OpenRouter.{RST}")
             else:
@@ -3957,7 +3954,7 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
     if not models:
         if "openrouter" in Config.API_BASE.lower() and not Config.API_KEY:
             print(f"\n  {t['warn']}OpenRouter requires an API key.{RST}")
-            print(f"  Set it: {t['bright']}apikey sk-or-v1-...{RST}")
+            print(f"  Set it: {t['bright']}/provider key sk-or-v1-...{RST}")
             print(f"  Or:     {t['bright']}--api-key sk-or-v1-...{RST}")
         else:
             viz.status("No models returned by API. Check connection or API key.", "warning")
