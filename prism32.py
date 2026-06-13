@@ -22,10 +22,10 @@ import atexit
 import math
 import threading
 stdout_lock = threading.Lock()
-import queue
-import select
 import hashlib
 import importlib.util
+import pty
+import select
 try:
     import readline
 except ImportError:
@@ -308,6 +308,7 @@ QUANTUM_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "quantum.json")
 _MEMORY_DIRTY = False
 _MEMORY_FLUSH_COUNTER = 0
 _LAST_INTERJECT = ""
+_CURRENT_SESSION_ID = None
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -948,7 +949,7 @@ class Platform:
 
 class Config:
     API_BASE = "http://127.0.0.1:8080"
-    MODEL = "unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS"
+    MODEL = "qwen/qwen3.7-max"
     API_KEY = ""
     MAX_HISTORY = 2000
     CMD_TIMEOUT = 600
@@ -958,7 +959,7 @@ class Config:
     GOAL_MAX_STEPS = 50
     GOAL_STEP_DELAY = 1
     SESSION_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "sessions")
-    AUTO_SAVE_INTERVAL = 120  # seconds
+    AUTO_SAVE_INTERVAL = 0    # 0 = save-on-interaction instead of timed
     THINKING_EFFORT = ""
     SLOW_CPU = False  # "", "low", "medium", "high"
 
@@ -1177,13 +1178,13 @@ register_theme("plasma",
 # ── Model Providers ────────────────────────────────────────────
 
 # ── Provider Registry (built-ins) ──────────────────────
-register_provider("local", display_name="Local LLaMA (192.168.0.43)", api_base="http://127.0.0.1:8080", model="unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS", description="Local Qwen 3.6 35B on llama.cpp")
+register_provider("local", display_name="Local (llama.cpp)", api_base="http://127.0.0.1:8080", model="qwen-3.7", description="Local llama.cpp server")
 register_provider("ollama", display_name="Ollama (localhost)", api_base="http://localhost:11434/v1", model="qwen3:14b", description="Local Ollama server")
 register_provider("openai", display_name="OpenAI", api_base="https://api.openai.com/v1", model="gpt-4o", description="OpenAI GPT-4o (requires API key)")
 register_provider("anthropic", display_name="Anthropic", api_base="https://api.anthropic.com/v1", model="claude-sonnet-4-20250514", description="Anthropic Claude (requires API key)")
 register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", description="Groq fast inference")
 register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", description="Together AI inference")
-register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="anthropic/claude-sonnet-4-20250514", description="OpenRouter multi-model gateway (set API key via --api-key or /provider key)")
+register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="qwen/qwen3.7-max", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)")
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)")
 
 
@@ -1208,6 +1209,57 @@ DIM  = "\x1b[2m"
 HIDE = "\x1b[?25l"
 SHOW = "\x1b[?25h"
 CLS  = "\x1b[2J\x1b[H"
+
+# ── Persistent footer / scroll region ───────────────────────
+_term_size = os.terminal_size((80, 24))
+
+def update_terminal_size():
+    """Update cached terminal dimensions."""
+    global _term_size
+    try:
+        _term_size = shutil.get_terminal_size()
+    except Exception:
+        pass
+
+def set_scroll_region():
+    """Reserve bottom line for the footer; everything else scrolls above."""
+    h = _term_size.lines
+    if h > 1:
+        sys.stdout.write(f"\x1b[1;{h-1}r")
+    sys.stdout.flush()
+
+def reset_scroll_region():
+    """Reset scrolling region to full screen."""
+    sys.stdout.write("\x1b[r")
+    sys.stdout.flush()
+
+def move_to_footer():
+    """Move cursor to the bottom line (reserved footer)."""
+    sys.stdout.write(f"\x1b[{_term_size.lines};1H")
+    sys.stdout.flush()
+
+def move_to_scroll_bottom():
+    """Move cursor to the last line of the scroll region (just above footer)."""
+    h = _term_size.lines
+    if h > 1:
+        sys.stdout.write(f"\x1b[{h-1};1H")
+    else:
+        sys.stdout.write("\x1b[1;1H")
+    sys.stdout.flush()
+
+def clear_footer():
+    """Clear the footer line."""
+    move_to_footer()
+    sys.stdout.write("\x1b[K")
+    sys.stdout.flush()
+
+def draw_footer(status_bar, spin_char=None):
+    """Draw the footer at the bottom of the screen."""
+    t = T()
+    indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
+    clear_footer()
+    sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
+    sys.stdout.flush()
 
 # ── ANSI Helpers ─────────────────────────────────────────────
 
@@ -1504,87 +1556,46 @@ class ToolVisualizer:
 
 # ── Animated Spinner Thread ─────────────────────────────────
 
-# State for inline bottom-bar spinner (option 1 layout)
+# State for inline bottom-bar spinner
 _BOTTOM_BAR_SPINNER_STATE = {
     "enabled": False,
-    "status_bar": "",
-    "user_input": "",
+    "history": None,
 }
 
-def set_bottom_bar_spinner(status_bar, user_input):
+def set_bottom_bar_spinner(history):
     """Enable inline bottom-bar spinner for the next blocking operation."""
-    _BOTTOM_BAR_SPINNER_STATE["enabled"] = bool(status_bar)
-    _BOTTOM_BAR_SPINNER_STATE["status_bar"] = status_bar
-    _BOTTOM_BAR_SPINNER_STATE["user_input"] = user_input
+    _BOTTOM_BAR_SPINNER_STATE["enabled"] = True
+    _BOTTOM_BAR_SPINNER_STATE["history"] = history
 
 def clear_bottom_bar_spinner():
     _BOTTOM_BAR_SPINNER_STATE["enabled"] = False
-    _BOTTOM_BAR_SPINNER_STATE["status_bar"] = ""
-    _BOTTOM_BAR_SPINNER_STATE["user_input"] = ""
+    _BOTTOM_BAR_SPINNER_STATE["history"] = None
 
 class SpinnerThread(threading.Thread):
-    """Background thread that animates a spinner during blocking API calls
-    and optionally collects interjected messages from stdin.
-    
-    Uses select() to poll stdin without blocking on supported platforms."""
+    """Background thread that animates a spinner in the persistent footer."""
     def __init__(self, message="processing"):
         super().__init__(daemon=True)
         self.message = message
         self._done = threading.Event()
-        self.interjections = queue.Queue()
         self.frames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
 
     def run(self):
-        t = T()
         i = 0
-        can_select = sys.platform != "win32" and hasattr(select, "select")
-        partial = ""
         inline = _BOTTOM_BAR_SPINNER_STATE["enabled"]
-        inline_broken = False
 
         while not self._done.is_set():
-            if can_select:
-                r, _, _ = select.select([sys.stdin], [], [], 0)
-                if r:
-                    try:
-                        data = os.read(sys.stdin.fileno(), 4096)
-                        if data:
-                            txt = data.decode('utf-8', errors='replace')
-                            partial += txt
-                            while '\n' in partial:
-                                line, partial = partial.split('\n', 1)
-                                line = line.strip()
-                                if line:
-                                    self.interjections.put(line)
-                                    t2 = T()
-                                    with stdout_lock:
-                                        if inline and not inline_broken:
-                                            # Interjection while inline: move to below-bar mode
-                                            inline_broken = True
-                                            sys.stdout.write(f"\n  {t2['warn']}⤻ {RST}{line}\n")
-                                        else:
-                                            sys.stdout.write(f"\r\033[K  {t2['warn']}⤻ {RST}{line}\n")
-                                        sys.stdout.flush()
-                    except (IOError, ValueError, OSError):
-                        pass
-
             with stdout_lock:
-                if inline and not inline_broken:
-                    # Redraw the bottom bar line with a spinner frame
+                if inline:
                     char = self.frames[i % len(self.frames)]
-                    status = _BOTTOM_BAR_SPINNER_STATE["status_bar"]
-                    user_text = _BOTTOM_BAR_SPINNER_STATE["user_input"]
-                    # Move up one line, clear it, redraw with spinner
-                    sys.stdout.write(f"\033[1A\r\033[K{status} {t['dim']}{char}{RST} {t['primary']}>{RST} {user_text}")
+                    history = _BOTTOM_BAR_SPINNER_STATE["history"]
+                    draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=char)
                     i += 1
-                elif partial:
-                    vis = partial.replace('\r', '').replace('\n', ' ')[:50]
-                    sys.stdout.write(f"\r\033[K  {t['warn']}✎ {RST}{vis}")
                 else:
+                    t = T()
                     char = self.frames[i % len(self.frames)]
-                    sys.stdout.write(f"\r\033[K {t['dim']}{char} {self.message}...{RST}  {t['glow']}(type to interject){RST}")
+                    sys.stdout.write(f"\r\033[K {t['dim']}{char} {self.message}...{RST}")
+                    sys.stdout.flush()
                     i += 1
-                sys.stdout.flush()
 
             self._done.wait(0.12)
     def stop(self):
@@ -1592,26 +1603,12 @@ class SpinnerThread(threading.Thread):
         self.join(timeout=2)
         with stdout_lock:
             if _BOTTOM_BAR_SPINNER_STATE["enabled"]:
-                # Redraw the bottom bar line with a static indicator and user input,
-                # then move to the next line so the AI response prints below.
-                t = T()
-                status = _BOTTOM_BAR_SPINNER_STATE["status_bar"]
-                user_text = _BOTTOM_BAR_SPINNER_STATE["user_input"]
-                sys.stdout.write(f"\033[1A\r\033[K{status} {t['dim']}░{RST} {t['primary']}>{RST} {user_text}\n")
-                sys.stdout.flush()
+                history = _BOTTOM_BAR_SPINNER_STATE["history"]
+                draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=None)
             else:
                 sys.stdout.write("\r" + " " * 75 + "\r")
                 sys.stdout.flush()
             clear_bottom_bar_spinner()
-
-    def get_interjections(self):
-        msgs = []
-        try:
-            while True:
-                msgs.append(self.interjections.get_nowait())
-        except queue.Empty:
-            pass
-        return msgs
     
 viz = ToolVisualizer()
 # ── Debug / Logging ──────────────────────────────────────────────
@@ -1687,6 +1684,13 @@ def cmd_session_save(session_id, history, cmd_log, name=None):
     viz.status(f"Session saved: {session_id}", "save")
     print(f"   {t['dim']}{path}{RST}")
     return session_id
+
+def save_current_session(history, cmd_log):
+    """Silently save current session state without showing status."""
+    global _CURRENT_SESSION_ID
+    if not _CURRENT_SESSION_ID:
+        _CURRENT_SESSION_ID = generate_session_id("auto")
+    save_session(_CURRENT_SESSION_ID, history, cmd_log)
 
 def cmd_session_load(session_id):
     t = T()
@@ -1849,7 +1853,7 @@ def banner():
     for line in art:
         print(f"  {line}")
     print(f"{RST}")
-    print(f"{d}  v6.2 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.6 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
@@ -1942,16 +1946,47 @@ def display_system_info():
 
 # ── Shell Execution ──────────────────────────────────────────
 
+def _pty_su_root(cmd, timeout=None):
+    """Run command as root via pty-based su (BSD needs a TTY for su)."""
+    password = Config.ROOT_PASS
+    if not password:
+        return "[ERROR] No root password set (use /rootpass)"
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execv("/usr/bin/su", ["su", "root", "-c", cmd])
+    else:
+        time.sleep(0.3)
+        os.write(fd, (password + "\n").encode())
+        time.sleep(0.5)
+        out = b""
+        t_max = timeout or Config.CMD_TIMEOUT
+        deadline = time.time() + t_max
+        try:
+            while True:
+                remaining = max(0.1, deadline - time.time())
+                r, _, _ = select.select([fd], [], [], remaining)
+                if r:
+                    data = os.read(fd, 4096)
+                    if not data:
+                        break
+                    out += data
+                else:
+                    break
+        except:
+            pass
+        try:
+            os.close(fd)
+        except:
+            pass
+        output = out.decode(errors="replace")
+        return output[-4000:] if len(output) > 4000 else output
+
 def run_cmd(cmd, timeout=None):
     if timeout is None:
         timeout = Config.CMD_TIMEOUT
     try:
-        # On BSD (NetBSD, FreeBSD, OpenBSD, macOS), su needs a PTY
-        # Wrap su-based commands with script(1) pseudo-terminal
-        if (Platform.BSD or Platform.MACOS) and 'su' in cmd and ('ROOT_PASS' in cmd or 'root_pass' in cmd):
-            # Escape single quotes and inject via script which provides a TTY
-            escaped = cmd.replace("'", "'\\''")
-            cmd = f"script -q /dev/null sh -c '{escaped}'"
+        if Platform.BSD and Config.ROOT_PASS and ('su' in cmd or 'sudo' in cmd):
+            return _pty_su_root(cmd, timeout)
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
         env={**os.environ, "ROOT_PASS": Config.ROOT_PASS} if Config.ROOT_PASS else None)
         out = result.stdout + result.stderr
@@ -2167,9 +2202,10 @@ CROSS-PLATFORM RULES:
 1. Detect the OS first: uname -s (Linux/Darwin/macOS/NetBSD/FreeBSD/OpenBSD/Windows)
 2. Use the system's actual package manager: apt/apt-get (Debian/Ubuntu), dnf/yum (Fedora/RHEL), pacman (Arch), zypper (openSUSE), apk (Alpine), nix (NixOS), snap/flatpak (universal Linux), brew/port (macOS), pkgin/pkg_add/pkg (BSD), winget/choco/scoop (Windows). Prefer the OS-native manager over universal ones.
 3. Use appropriate network command: ip/ss (Linux), ifconfig/netstat (macOS/BSD), Get-NetAdapter (Windows PowerShell)
-4. For root access on Linux/BSD: echo "$ROOT_PASS" | su -c "command" or use sudo
-5. For root access on macOS: sudo command (will prompt for password)
-6. On Windows, use PowerShell or cmd; avoid Unix-only utilities
+4. For root access on Linux: echo "$ROOT_PASS" | su -c "command" or use sudo
+5. For root access on BSD: su root -c "command" (password injected automatically)
+6. For root access on macOS: sudo command (will prompt for password)
+7. On Windows, use PowerShell or cmd; avoid Unix-only utilities
 
 GENERAL RULES:
 1. ALWAYS run commands to investigate - don't just suggest them
@@ -2179,7 +2215,7 @@ GENERAL RULES:
 5. When a goal is set, keep working until done or max steps reached
 6. Report what you did and what remains after each step"""
 
-def ask_ai(messages, stream=None, retry=2, base_delay=2, interject_queue=None):
+def ask_ai(messages, stream=None, retry=2, base_delay=2):
     '''Resilient AI query with retry, backoff, and history trimming.'''
     # Filter empty messages
     clean_messages = []
@@ -2215,7 +2251,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, interject_queue=None):
             )
             with urllib.request.urlopen(req, timeout=600) as resp:
                 if stream if stream is not None else Config.STREAM:
-                    return stream_response(resp, interject_queue=interject_queue)
+                    return stream_response(resp)
                 data = json.loads(resp.read().decode())
                 return data.get('choices', [{}])[0].get('message', {}).get('content', '')
         except urllib.error.HTTPError as e:
@@ -2251,12 +2287,10 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, interject_queue=None):
     
     return last_error
 
-def stream_response(resp, interject_queue=None):
+def stream_response(resp):
     full = ""
     t = T()
-    can_select = sys.platform != "win32" and hasattr(select, "select")
     reasoning_mode = False
-    partial_input = ""
     agent_prefix_printed = False
     
     for line in resp:
@@ -2292,32 +2326,8 @@ def stream_response(resp, interject_queue=None):
                     sys.stdout.write(f"{t['primary']}{content}{RST}")
                     sys.stdout.flush()
                 full += content
-            
-            # Poll stdin for interject between tokens
-            if can_select and interject_queue is not None:
-                r, _, _ = select.select([sys.stdin], [], [], 0)
-                if r:
-                    try:
-                        data_in = os.read(sys.stdin.fileno(), 4096)
-                        if data_in:
-                            txt = data_in.decode('utf-8', errors='replace')
-                            partial_input += txt
-                            while '\n' in partial_input:
-                                line_in, partial_input = partial_input.split('\n', 1)
-                                line_in = line_in.strip()
-                                if line_in:
-                                    interject_queue.put(line_in)
-                                    t2 = T()
-                                    with stdout_lock:
-                                        sys.stdout.write(f"\n  {t2['warn']}⤻ {RST}{line_in}\n")
-                                        sys.stdout.flush()
-                    except (IOError, ValueError, OSError):
-                        pass
         except json.JSONDecodeError:
             continue
-    
-    if partial_input.strip() and interject_queue:
-        interject_queue.put(partial_input.strip())
     
     with stdout_lock:
         sys.stdout.write(SHOW)
@@ -2435,16 +2445,7 @@ def cmd_goal(goal_text, history, cmd_log):
         spin = None
         try:
             if Config.STREAM:
-                interject_queue = queue.Queue()
-                resp = ask_ai(history, interject_queue=interject_queue)
-                interjects = []
-                while not interject_queue.empty():
-                    interjects.append(interject_queue.get_nowait())
-                for inj in interjects:
-                    if len(history) >= 2 and history[-1]["role"] == "assistant":
-                        history.insert(-1, {"role": "user", "content": f"(interjection: {inj})"})
-                    else:
-                        history.append({"role": "user", "content": f"(interjection: {inj})"})
+                resp = ask_ai(history)
                 print()
             else:
                 spin = SpinnerThread("thinking")
@@ -2762,6 +2763,12 @@ def cmd_export(session_history, filename=None):
 
 def main():
     global _shutdown_flag, _LAST_INTERJECT
+    
+    def _on_resize(sig, frame):
+        update_terminal_size()
+        set_scroll_region()
+    signal.signal(signal.SIGWINCH, _on_resize)
+    
     parser = argparse.ArgumentParser(description="Prism32 - Retro AI Terminal Agent")
     parser.add_argument("--model", "-m", help="Override model name")
     parser.add_argument("--api", "-a", help="Override API base URL")
@@ -2789,6 +2796,7 @@ def main():
         Config.API_KEY = args.api_key
     if args.theme:
         Config.THEME = args.theme
+        Config.save_config()
     if args.temperature is not None:
         Config.TEMPERATURE = args.temperature
     if args.set_timeout is not None:
@@ -2815,6 +2823,7 @@ def main():
     print()
 
     history = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}]
+    _CURRENT_SESSION_ID = None
     _PluginHooks._history = history
     _PluginHooks._extra_context = []
     _PluginHooks.fire_boot()
@@ -2829,29 +2838,29 @@ def main():
     print(f"  {t['dim']}Prism32 MDS terminal ready. Type /help for commands. Talk to the AI naturally.{RST}")
     print(f"  {t['dim']}Prism32 by MegaDyne Systems. Use /goal <task> for autonomous multi-step work.{RST}\n")
 
+    # Set up persistent footer using terminal scroll regions
+    update_terminal_size()
+    set_scroll_region()
+
     while True:
-        # Separator + bottom status bar before input
-        if not Config.SLOW_CPU:
-            print(f"\n {t['dim']}{'─' * 60}{RST}")
-        status_bar = build_status_bar(history=history)
-        prompt_text = f"{status_bar} {t['primary']}>{RST} "
+        draw_footer(build_status_bar(history=history))
         try:
-            user_input = input(rl_prompt(prompt_text)).strip()
-            # ALT+^ recall - if user typed Ctrl+^ (0x1E), recall last interject
-            if user_input and user_input[0] == '\x1e':
-                recall = _LAST_INTERJECT
-                print(f"  {T()['dim']}(recalled: {recall}){RST}")
-                user_input = recall
-            _PluginHooks.fire_message(user_input)
+            user_input = input().strip()
         except (EOFError, KeyboardInterrupt):
             print()
+            reset_scroll_region()
             print(f"  {t['bright']}Shutting down...{RST}")
             break
 
         if not user_input:
             continue
+        _PluginHooks.fire_message(user_input)
         # Clear interject recall on new input
         _LAST_INTERJECT = ""
+
+        # Echo user message in scroll region
+        move_to_scroll_bottom()
+        print(f" {t['primary']}You:{RST} {user_input}")
 
         is_slash = user_input.startswith("/")
         parts = user_input.lstrip("/").split(None, 1)
@@ -2861,6 +2870,7 @@ def main():
         if not is_slash:
             pass
         elif cmd in ("quit", "exit", "q"):
+            save_current_session(history, cmd_log)
             learn_session(len(history), len(cmd_log))
             suggestions = get_memory_suggestions()
             print(f"\n{t['bright']}  == SESSION END =={RST}")
@@ -2871,6 +2881,7 @@ def main():
                 for s in suggestions[:3]:
                     print(f"    {t['dim']}*{RST} {s}")
             print(f"  {t['primary']}Goodbye.   MegaDyne Systems{RST}\n")
+            reset_scroll_region()
             break
 
 
@@ -2878,6 +2889,7 @@ def main():
         if registry.dispatch(cmd, args_str, history, cmd_log):
             learn_command(cmd, success=True, duration=0)
             _PluginHooks.fire_command(cmd, args_str, None)
+            save_current_session(history, cmd_log)
             continue
 
         # ── Built-in commands ──
@@ -2999,6 +3011,7 @@ def main():
             continue
 
         if cmd == 'resume':
+            save_current_session(history, cmd_log)
             data = cmd_session_resume()
             if data:
                 history = data.get("history", [])
@@ -3008,6 +3021,7 @@ def main():
 
         if cmd == 'load':
             if args_str:
+                save_current_session(history, cmd_log)
                 loaded_history, loaded_cmd_log = cmd_session_load(args_str)
                 if loaded_history is not None:
                     history = loaded_history
@@ -3029,7 +3043,6 @@ def main():
                 subcmd = parts[0].lower()
                 
                 if subcmd == 'add':
-                    # provider add name api_base model [description]
                     add_parts = args_str.split(None, 4)
                     if len(add_parts) >= 4:
                         name = add_parts[1]
@@ -3038,7 +3051,25 @@ def main():
                         desc = add_parts[4] if len(add_parts) > 4 else "Custom provider"
                         cmd_provider_add(name, api_base, model, desc)
                     else:
-                        print(f"  Usage: provider add <name> <api_base> <model> [description]")
+                        # Interactive prompt
+                        print(f"\n  {t['bright']}Add a new provider:{RST}")
+                        try:
+                            name = input(rl_prompt(f"  Provider name: ")).strip()
+                            if not name:
+                                print(f"  {t['dim']}Cancelled.{RST}")
+                            else:
+                                api_base = input(rl_prompt(f"  API base URL: ")).strip()
+                                if api_base:
+                                    model = input(rl_prompt(f"  Model name: ")).strip()
+                                    if model:
+                                        desc = input(rl_prompt(f"  Description (optional): ")).strip() or "Custom provider"
+                                        cmd_provider_add(name, api_base, model, desc)
+                                    else:
+                                        print(f"  {t['dim']}Cancelled.{RST}")
+                                else:
+                                    print(f"  {t['dim']}Cancelled.{RST}")
+                        except (EOFError, KeyboardInterrupt):
+                            print(f"\n  {t['dim']}Cancelled.{RST}")
                 elif subcmd in ('rm', 'remove', 'delete'):
                     if len(parts) > 1:
                         cmd_provider_remove(parts[1])
@@ -3070,7 +3101,50 @@ def main():
                     # Treat as provider name to switch to
                     cmd_provider_set(subcmd)
             else:
-                cmd_provider_list()
+                # No args → interactive provider selector
+                provider_names = sorted(PROVIDER_REGISTRY.keys())
+                print(f"\n  {t['bright']}Select a provider:{RST}")
+                print(f"  {t['dim']}{'─' * 50}{RST}")
+                for i, pname in enumerate(provider_names, 1):
+                    prov = PROVIDER_REGISTRY[pname]
+                    marker = f"{t['bright']}*{RST}" if pname == Config.PROVIDER else " "
+                    label = prov.get('display_name', prov.get('name', pname))
+                    print(f"  {marker} {t['primary']}{i:>2}.{RST} {label}")
+                print(f"  {t['dim']}{'─' * 50}{RST}")
+                print(f"  {t['primary']}  c.{RST} Custom (enter your own)")
+                print(f"  {t['primary']}  q.{RST} Cancel")
+                try:
+                    sel = input(rl_prompt(f"  {t['bright']}choice{RST} {t['primary']}>{RST} ")).strip().lower()
+                    if sel == 'q' or not sel:
+                        print(f"  {t['dim']}Cancelled.{RST}")
+                    elif sel == 'c':
+                        print(f"\n  {t['bright']}Custom provider:{RST}")
+                        cname = input(rl_prompt(f"  Provider name: ")).strip()
+                        if cname:
+                            cbase = input(rl_prompt(f"  API base URL: ")).strip()
+                            if cbase:
+                                cmodel = input(rl_prompt(f"  Model name: ")).strip()
+                                if cmodel:
+                                    cdesc = input(rl_prompt(f"  Description (optional): ")).strip() or "Custom provider"
+                                    cmd_provider_add(cname, cbase, cmodel, cdesc)
+                                    cmd_provider_set(cname)
+                                else:
+                                    print(f"  {t['dim']}Cancelled.{RST}")
+                            else:
+                                print(f"  {t['dim']}Cancelled.{RST}")
+                        else:
+                            print(f"  {t['dim']}Cancelled.{RST}")
+                    else:
+                        try:
+                            idx = int(sel) - 1
+                            if 0 <= idx < len(provider_names):
+                                cmd_provider_set(provider_names[idx])
+                            else:
+                                print(f"  {t['dim']}Invalid choice.{RST}")
+                        except ValueError:
+                            print(f"  {t['dim']}Invalid choice.{RST}")
+                except (EOFError, KeyboardInterrupt):
+                    print(f"\n  {t['dim']}Cancelled.{RST}")
             print()
             continue
 
@@ -3116,6 +3190,7 @@ def main():
             themes = list(THEME_REGISTRY.keys())
             idx = (themes.index(Config.THEME) + 1) % len(themes)
             Config.THEME = themes[idx]
+            Config.save_config()
             t = T()
             print(f"  {t['bright']}+ Theme: {Config.THEME}{RST}\n")
             continue
@@ -3146,7 +3221,7 @@ def main():
                 Config.ROOT_PASS = args_str
                 Config.save_config()
                 print(f"  {t['bright']}+ Root password stored.{RST}")
-                print(f"  {t['dim']}  Available as \\$ROOT_PASS in shell commands. AI can use: echo \\\"\\$ROOT_PASS\\\" | su -c{RST}")
+                print(f"  {t['dim']}  Available as \\$ROOT_PASS in shell commands. AI can use: echo \\\"\\$ROOT_PASS\\\" | su -c (Linux) or su root -c (BSD){RST}")
             else:
                 has = bool(Config.ROOT_PASS)
                 print(f"  Root password: {t['bright']}{'<set>' if has else '<not set>'}{RST}")
@@ -3722,16 +3797,7 @@ def main():
                 else:
                     history.append({"role": "user", "content": args_str})
                     if Config.STREAM:
-                        interject_queue = queue.Queue()
-                        resp = ask_ai(history, interject_queue=interject_queue)
-                        interjects = []
-                        while not interject_queue.empty():
-                            interjects.append(interject_queue.get_nowait())
-                        for inj in interjects:
-                            if len(history) >= 2 and history[-1]["role"] == "assistant":
-                                history.insert(-1, {"role": "user", "content": f"(interjection: {inj})"})
-                            else:
-                                history.append({"role": "user", "content": f"(interjection: {inj})"})
+                        resp = ask_ai(history)
                     else:
                         resp = ask_ai(history, stream=False)
                     commands = extract_blocks(resp, 'execute')
@@ -3762,44 +3828,21 @@ def main():
             spin = None
             try:
                 if Config.STREAM:
-                    interject_queue = queue.Queue()
-                    resp = ask_ai(history, interject_queue=interject_queue)
-                    interjects = []
-                    while not interject_queue.empty():
-                        interjects.append(interject_queue.get_nowait())
-                    for inj in interjects:
-                        # _LAST_INTERJECT already declared global
-                        if inj:
-                            _LAST_INTERJECT = inj
-                        if len(history) >= 2 and history[-1]["role"] == "assistant":
-                            history.insert(-1, {"role": "user", "content": f"(interjection: {inj})"})
-                        else:
-                            history.append({"role": "user", "content": f"(interjection: {inj})"})
+                    resp = ask_ai(history)
                     print()
                 else:
-                    status_base = build_status_bar(history=history, include_indicator=False)
-                    set_bottom_bar_spinner(status_base, user_input)
+                    set_bottom_bar_spinner(history)
                     spin = SpinnerThread("thinking")
                     spin.start()
                     resp = ask_ai(history)
-                    # Collect interjects captured during non-stream AI call
-                    if spin and spin.interjections:
-                        nq = spin.get_interjections()
-                        if nq:
-                            # _LAST_INTERJECT already declared global
-                            for nqi in nq:
-                                if nqi:
-                                    _LAST_INTERJECT = nqi
-                            # Insert after last assistant message
-                            hist_last = len(history)
-                            for nqi in nq:
-                                if nqi.strip():
-                                    history.insert(-1, {"role": "user", "content": f"(interjection: {nqi.strip()})"})
             except KeyboardInterrupt:
                 resp = None
             finally:
                 if spin is not None:
                     spin.stop()
+                    # After spinner, cursor is on footer line; move to scroll region
+                    move_to_scroll_bottom()
+                    print()
             if not resp or resp.startswith('['):
                 box("AI ERROR", resp or "No response", "err")
                 break
@@ -3840,18 +3883,13 @@ def main():
             history = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
         history = trim_history(history, 220000)
 
-        # Auto-save session periodically
-        if not hasattr(main, '_last_save'):
-            main._last_save = 0
-        if time.time() - main._last_save > Config.AUTO_SAVE_INTERVAL and len(history) > 5:
-            auto_id = generate_session_id("auto")
-            save_session(auto_id, history, cmd_log)
-            viz.status(f"Auto-saved: {auto_id}", "save")
-            main._last_save = time.time()
+        # Save session after each interaction
+        save_current_session(history, cmd_log)
 
         sys.stdout.write("\r\033[K")
         sys.stdout.flush()
 
+    reset_scroll_region()
     print(SHOW)
 
 # ── Model Selector ──────────────────────────────────────────
@@ -4080,10 +4118,24 @@ def cmd_provider_set(provider_name):
     Config.PROVIDER = provider_name
     Config.API_BASE = prov["api_base"]
     Config.MODEL = prov["model"]
+    Config.save_config()
     
     viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
     print(f"   {t['dim']}API: {Config.API_BASE}{RST}")
     print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
+    
+    needs_key = not Config.API_KEY and not prov.get("default_key")
+    is_openai = "openai" in provider_name or "openrouter" in provider_name
+    if needs_key and is_openai:
+        print(f"   {t['warn']}This provider requires an API key.{RST}")
+        try:
+            key = input(rl_prompt(f"   API key (or Enter to skip): ")).strip()
+            if key:
+                Config.API_KEY = key
+                Config.save_config()
+                print(f"   {t['bright']}+ API key set.{RST}")
+        except (EOFError, KeyboardInterrupt):
+            print()
     return True
 
 def cmd_provider_add(name, api_base, model, description="Custom provider"):
