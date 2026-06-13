@@ -1,0 +1,16 @@
+__pycache__/
+*.pyc
+*.pyo
+*.session_*.txt
+.DS_Store
+*.swp
+*.swo
+*~
+.prism32/
+config.json
+errorlog.txt
+install.log
+*.bak
+*.bak.*
+*.tmp
+.env
