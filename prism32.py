@@ -2510,15 +2510,11 @@ def stream_response(resp):
             _interjection_stop()
             with stdout_lock:
                 sys.stdout.write(SHOW)
-            move_to_scroll_bottom()
-            print()
             return full
     
     _interjection_stop()
     with stdout_lock:
         sys.stdout.write(SHOW)
-    move_to_scroll_bottom()
-    print()
     return full
 def extract_blocks(text, tag):
     _re = _RE_EXEC_BLOCK if tag == 'execute' else _RE_ASK_BLOCK
@@ -4060,7 +4056,7 @@ def main():
 
             if commands:
                 clean = clean_response(resp)
-                if clean and iteration == 0:
+                if clean and iteration == 0 and not Config.STREAM:
                     box("AI ANALYSIS", clean, "accent")
 
                 for c in commands:
@@ -4080,8 +4076,9 @@ def main():
                         history.append({"role": "user", "content": continuation})
             else:
                 clean = clean_response(resp)
-                t2 = T()
-                print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
+                if not Config.STREAM:
+                    t2 = T()
+                    print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
                 print()
                 history.append({"role": "assistant", "content": resp})
                 break
