@@ -349,7 +349,33 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      | QUIT         | TERMINATE THE PROGRAM                     |
      +----------------------------------------------------------+
 
-4.7  SLASH COMMANDS
+4.7  AUTOMATION
+
++----------------------------------------------------------+
+      | COMMAND          | FUNCTION                              |
+      |------------------+---------------------------------------|
+      | AUTO <TEXT>      | CREATE AUTOMATION FROM NATURAL LANGUAGE|
+      | AUTO LIST        | LIST ALL AUTOMATIONS                  |
+      | AUTO SHOW <ID>   | SHOW AUTOMATION DETAILS               |
+      | AUTO DELETE <ID> | DELETE AN AUTOMATION                  |
+      | AUTO PAUSE <ID>  | PAUSE AN AUTOMATION                   |
+      | AUTO RESUME <ID> | RESUME A PAUSED AUTOMATION            |
+      | AUTO RUN <ID>    | EXECUTE AN AUTOMATION IMMEDIATELY     |
+      +----------------------------------------------------------+
+
+     AUTOMATIONS ARE SCHEDULED OR ONE-SHOT TASKS THAT RUN
+     AUTONOMOUSLY VIA A BACKGROUND DAEMON THREAD CHECKING
+     EVERY 30 SECONDS.  SCHEDULED TASKS REPEAT AT A FIXED
+     INTERVAL.  ONE-SHOT TASKS FIRE ONCE AND COMPLETE.
+     WHEN TRIGGERED, A SUBAGENT IS SPAWNED TO EXECUTE THE
+     TASK DESCRIPTION USING THE AI.
+
+     EXAMPLES:
+       /auto check my email every morning
+       /auto write a CNN top stories report in 3 days
+       /auto scan my network for open ports every hour
+
+4.8  SLASH COMMANDS
 
            /HELP         /QUIT         /GOAL      /THEME
            /MODEL        /PROVIDER     /PLUGINS   /DEBUG
@@ -357,6 +383,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
            /THINKING     /MAXSTEPS     /SAVECFG   /LOADCFG
            /IMAGE        /SOUL         /AGENTNAME /ROOTPASS
            /STREAM       /TEMPERATURE  /TIMEOUT   /AUTOSAVE
+           /AUTO
 
 
                                                                PAGE 9

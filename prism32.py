@@ -531,6 +531,9 @@ def ltm_delete(mid):
 
 # ── Skill System (repeatable workflows/automations) ──────────
 SKILLS_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "skills")
+AUTOMATIONS_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "automations")
+
+_AUTOMATION_SCHEDULER_RUNNING = False
 
 def _skill_path(name):
     return os.path.join(SKILLS_DIR, f"{name}.json")
@@ -638,6 +641,342 @@ def _prompt_skill_wizard():
     except (KeyboardInterrupt, EOFError):
         print(f"\n  {t['warn']}Cancelled.{RST}")
         return None
+
+# ── Automation System (scheduled / one-shot tasks) ────────────
+_AUTO_LOCK = threading.Lock()
+
+def _auto_path(aid):
+    return os.path.join(AUTOMATIONS_DIR, f"{aid}.json")
+
+def _auto_generate_id(description):
+    h = hashlib.md5((description + str(time.time())).encode()).hexdigest()[:8]
+    return f"auto_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{h}"
+
+def _auto_default(description, task, auto_type, interval=None, due_at=None):
+    now = datetime.now()
+    nxt = None
+    if auto_type == "scheduled" and interval:
+        nxt = (now.timestamp() + interval * 60)
+    elif auto_type == "oneshot" and due_at:
+        nxt = due_at
+    return {
+        "id": _auto_generate_id(description),
+        "type": auto_type,
+        "description": description,
+        "task": task,
+        "interval_minutes": interval,
+        "due_at": due_at,
+        "next_run": nxt,
+        "last_run": None,
+        "last_result": None,
+        "last_success": None,
+        "status": "active",
+        "run_count": 0,
+        "created_at": now.isoformat(),
+        "history": [],
+    }
+
+def automation_save(auto):
+    os.makedirs(AUTOMATIONS_DIR, exist_ok=True)
+    with _AUTO_LOCK:
+        with open(_auto_path(auto["id"]), "w") as f:
+            json.dump(auto, f, indent=2)
+
+def automation_load(aid):
+    try:
+        with open(_auto_path(aid)) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+def automation_list():
+    os.makedirs(AUTOMATIONS_DIR, exist_ok=True)
+    results = []
+    for fname in sorted(os.listdir(AUTOMATIONS_DIR)):
+        if not fname.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(AUTOMATIONS_DIR, fname)) as f:
+                results.append(json.load(f))
+        except (json.JSONDecodeError, OSError):
+            continue
+    return results
+
+def automation_delete(aid):
+    path = _auto_path(aid)
+    if os.path.exists(path):
+        os.remove(path)
+        return True
+    return False
+
+def _extract_schedule_text(text):
+    """Extract schedule portion from a natural language string by searching for known patterns."""
+    t = text.strip().lower()
+    
+    # Try to find "every <daypart>" pattern
+    for phrase in ["every morning", "every afternoon", "every evening", "every night", "every midnight",
+                    "every hour", "hourly", "every monday", "every tuesday", "every wednesday",
+                    "every thursday", "every friday", "every saturday", "every sunday"]:
+        if phrase in t:
+            return phrase
+    
+    # Try to find "every X minutes/hours/days" pattern
+    m = re.search(r'every\s+\d+\s+(min|minute|minutes|hour|hours|day|days)\b', t)
+    if m:
+        return m.group(0)
+    
+    # Try to find "in X minutes/hours/days" pattern
+    m = re.search(r'in\s+\d+\s+(min|minute|minutes|hour|hours|day|days)\b', t)
+    if m:
+        return m.group(0)
+    
+    # Try "tomorrow" or "tomorrow at..."
+    m = re.search(r'tomorrow(?:\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)?', t)
+    if m:
+        return m.group(0)
+    
+    # Try "now", "immediately", "asap"
+    if t.endswith("now") or t.endswith("immediately") or t.endswith("asap"):
+        return "now"
+    
+    return t
+
+def _parse_schedule_text(text):
+    """Parse natural language schedule into (auto_type, interval_minutes, due_timestamp, description)."""
+    text = text.strip().lower()
+    now = time.time()
+    
+    # "every X minutes" / "every X hours" / "every X days"
+    m = re.match(r'every\s+(\d+)\s+(min|minute|minutes|hour|hours|day|days)\s*$', text)
+    if m:
+        num = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("min"):
+            return ("scheduled", num, None, text)
+        elif unit.startswith("hour"):
+            return ("scheduled", num * 60, None, text)
+        else:
+            return ("scheduled", num * 1440, None, text)
+    
+    # "every morning" → daily at 7:00
+    if text == "every morning":
+        nxt = int(now) - int(now) % 86400 + 25200  # today 07:00
+        if nxt <= now:
+            nxt += 86400
+        return ("scheduled", 1440, nxt, "daily at 7:00 AM")
+    
+    # "every afternoon" → daily at 13:00
+    if text == "every afternoon":
+        nxt = int(now) - int(now) % 86400 + 46800
+        if nxt <= now:
+            nxt += 86400
+        return ("scheduled", 1440, nxt, "daily at 1:00 PM")
+    
+    # "every evening" → daily at 18:00
+    if text == "every evening":
+        nxt = int(now) - int(now) % 86400 + 64800
+        if nxt <= now:
+            nxt += 86400
+        return ("scheduled", 1440, nxt, "daily at 6:00 PM")
+    
+    # "every night" / "every midnight" → daily at 0:00
+    if text in ("every night", "every midnight"):
+        nxt = int(now) - int(now) % 86400
+        if nxt <= now:
+            nxt += 86400
+        return ("scheduled", 1440, nxt, "daily at midnight")
+    
+    # "every hour" / "hourly"
+    if text in ("every hour", "hourly"):
+        nxt = int(now) - int(now) % 3600 + 3600
+        return ("scheduled", 60, nxt, "every hour")
+    
+    # "every <weekday>" → weekly
+    day_names = {"monday":0,"tuesday":1,"wednesday":2,"thursday":3,"friday":4,"saturday":5,"sunday":6}
+    m = re.match(r'every\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*$', text)
+    if m:
+        target_wd = day_names[m.group(1)]
+        current_wd = datetime.fromtimestamp(now).weekday()
+        days_ahead = (target_wd - current_wd) % 7
+        if days_ahead == 0:
+            days_ahead = 7
+        nxt = int(now) - int(now) % 86400 + days_ahead * 86400 + 32400  # 9:00 AM
+        return ("scheduled", 10080, nxt, f"weekly on {m.group(1).title()} at 9:00 AM")
+    
+    # "in X minutes" / "in X hours" / "in X days"
+    m = re.match(r'in\s+(\d+)\s+(min|minute|minutes|hour|hours|day|days)\s*$', text)
+    if m:
+        num = int(m.group(1))
+        unit = m.group(2)
+        if unit.startswith("min"):
+            return ("oneshot", None, now + num * 60, text)
+        elif unit.startswith("hour"):
+            return ("oneshot", None, now + num * 3600, text)
+        else:
+            return ("oneshot", None, now + num * 86400, text)
+    
+    # "tomorrow" / "tomorrow at <time>"
+    m = re.match(r'tomorrow(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?', text)
+    if m:
+        tomorrow = int(now) - int(now) % 86400 + 86400
+        if m.group(1):
+            hour = int(m.group(1))
+            minute = int(m.group(2) or 0)
+            if m.group(3) == "pm" and hour < 12:
+                hour += 12
+            if m.group(3) == "am" and hour == 12:
+                hour = 0
+            nxt = tomorrow + hour * 3600 + minute * 60
+        else:
+            nxt = tomorrow + 32400  # default 9:00 AM
+        return ("oneshot", None, nxt, text)
+    
+    # "now" → immediate one-shot
+    if text in ("now", "immediately", "asap"):
+        return ("oneshot", None, now, "immediately")
+    
+    return None
+
+def automation_parse_nl(user_text):
+    """Parse natural language into automation fields using a compact AI call."""
+    sys_msg = {"role": "system", "content": (
+        "You extract automation parameters from user requests. "
+        "Return ONLY valid JSON with these fields: "
+        '{"type":"scheduled"|"oneshot", "description":"...", "task":"...", '
+        '"schedule_text":"..."}. '
+        "Examples:\n"
+        '- "check my email every morning" → {"type":"scheduled", '
+        '"description":"Check email daily", "task":"Check email and report new messages", '
+        '"schedule_text":"every morning"}\n'
+        '- "write a report with CNN top stories in 3 days" → {"type":"oneshot", '
+        '"description":"Write CNN report", "task":"Scrape CNN top stories and write a report", '
+        '"schedule_text":"in 3 days"}\n'
+        "- Extract the actionable task clearly. Keep descriptions short."
+    )}
+    usr_msg = {"role": "user", "content": user_text}
+    t = T()
+    saved_stream = Config.STREAM
+    Config.STREAM = False
+    try:
+        resp = ask_ai([sys_msg, usr_msg], stream=False)
+    finally:
+        Config.STREAM = saved_stream
+    if not resp or resp.startswith("["):
+        return None
+    json_match = re.search(r'\{.*\}', resp, re.DOTALL)
+    if not json_match:
+        return None
+    try:
+        parsed = json.loads(json_match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return parsed
+
+def automation_create_from_nl(user_text):
+    """Full workflow: parse NL, resolve schedule, create automation."""
+    parsed = automation_parse_nl(user_text)
+    
+    if parsed:
+        auto_type = parsed.get("type", "oneshot")
+        description = parsed.get("description", user_text[:80])
+        task = parsed.get("task", user_text)
+        schedule_text = parsed.get("schedule_text", "")
+    else:
+        auto_type = "oneshot"
+        description = user_text[:80]
+        task = user_text
+        schedule_text = user_text
+    
+    # Try to match schedule_text against rule-based patterns
+    result = _parse_schedule_text(schedule_text)
+    
+    if not result and not parsed:
+        # Fallback: try to find a schedule pattern within the full text
+        schedule_text = _extract_schedule_text(user_text)
+        result = _parse_schedule_text(schedule_text)
+    
+    if result:
+        ptype, interval, due_ts, sched_desc = result
+    else:
+        # Default: one-shot, 24h from now
+        ptype, interval, due_ts = "oneshot", None, time.time() + 86400
+        sched_desc = schedule_text
+    
+    auto = _auto_default(description, task, ptype, interval, due_ts)
+    automation_save(auto)
+    return auto
+
+def _automation_next_run(auto):
+    """Calculate and update next_run for a scheduled automation."""
+    if auto["status"] != "active":
+        return None
+    if auto["type"] == "oneshot" and auto["run_count"] > 0:
+        auto["status"] = "completed"
+        automation_save(auto)
+        return None
+    if auto["type"] == "scheduled" and auto.get("interval_minutes"):
+        auto["next_run"] = time.time() + auto["interval_minutes"] * 60
+        automation_save(auto)
+        return auto["next_run"]
+    return None
+
+def automation_execute(auto_id):
+    """Execute an automation task. Called from scheduler thread."""
+    auto = automation_load(auto_id)
+    if not auto or auto["status"] != "active":
+        return
+    
+    with stdout_lock:
+        t = T()
+        print(f"\n {t['bright']}[AUTO] Executing: {auto['description']}{RST}")
+    
+    sa = SubAgent(auto["task"], max_steps=Config.GOAL_MAX_STEPS)
+    sa.run()
+    
+    auto = automation_load(auto_id)
+    if not auto:
+        return
+    auto["last_run"] = time.time()
+    auto["last_result"] = (sa.result or "")[:500]
+    auto["last_success"] = sa.result is not None
+    auto["run_count"] = auto.get("run_count", 0) + 1
+    history_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "success": sa.result is not None,
+        "snippet": (sa.result or "")[:200],
+    }
+    auto.setdefault("history", []).append(history_entry)
+    if auto["type"] == "oneshot":
+        auto["status"] = "completed"
+    _automation_next_run(auto)
+    automation_save(auto)
+    
+    with stdout_lock:
+        if sa.result:
+            print(f" {t['ok']}[AUTO] Completed: {auto['description']}{RST}")
+        else:
+            print(f" {t['err']}[AUTO] Failed: {auto['description']}{RST}")
+
+def _automation_scheduler_loop():
+    """Daemon thread: check for due automations every 30s."""
+    global _AUTOMATION_SCHEDULER_RUNNING
+    _AUTOMATION_SCHEDULER_RUNNING = True
+    while not _shutdown_flag:
+        time.sleep(30)
+        if _shutdown_flag:
+            break
+        try:
+            all_autos = automation_list()
+            now_ts = time.time()
+            for auto in all_autos:
+                if auto.get("status") != "active":
+                    continue
+                nxt = auto.get("next_run")
+                if nxt and nxt <= now_ts:
+                    automation_execute(auto["id"])
+        except Exception:
+            pass
+    _AUTOMATION_SCHEDULER_RUNNING = False
 
 def learn_command(cmd_name, success=True, duration=0):
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -2892,15 +3231,23 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
    /quantum [k]:[v]     View/write shared session context
 
  {bold}Memory & Skills{reset}
-   /remember <text>     Store in long-term memory
-   /recall <query>      Search long-term memory
-   /forget <id>         Delete a memory
-   /memories            List recent long-term memories
-   /skill-create        Guided wizard to create a skill
-   /skill-list          List all saved skills
-   /skill-load <name>   Load a skill into AI context
-   /skill-delete <name> Delete a saved skill
-   """
+    /remember <text>     Store in long-term memory
+    /recall <query>      Search long-term memory
+    /forget <id>         Delete a memory
+    /memories            List recent long-term memories
+    /skill-create        Guided wizard to create a skill
+    /skill-list          List all saved skills
+    /skill-load <name>   Load a skill into AI context
+    /skill-delete <name> Delete a saved skill
+
+ {bold}Automation{reset}
+    /auto <text>         Create automation from natural language
+    /auto list           List all automations
+    /auto show <id>      Show automation details
+    /auto delete <id>    Delete an automation
+    /auto pause <id>     Pause an automation
+    /auto resume <id>    Resume a paused automation
+    """
 
 
  
@@ -3115,6 +3462,8 @@ def main():
     _PluginHooks._extra_context = []
     _PluginHooks.fire_boot()
     _PluginHooks.start_tick(interval=5)
+    _auto_scheduler_thread = threading.Thread(target=_automation_scheduler_loop, daemon=True)
+    _auto_scheduler_thread.start()
     cmd_log = []
 
     if args.goal:
@@ -3586,6 +3935,124 @@ def main():
             # Rebuild history system prompt to include soul changes
             if history:
                 history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
+            continue
+
+        # ── Automation command ──
+        if cmd == 'auto':
+            t = T()
+            parts = args_str.split(None, 1)
+            subcmd = parts[0].lower() if parts and parts[0] else ""
+            subargs = parts[1] if len(parts) > 1 else ""
+
+            if subcmd == 'list' or (not subcmd and not args_str):
+                all_autos = automation_list()
+                if not all_autos:
+                    print(f"  {t['dim']}No automations.{RST}\n")
+                    continue
+                print(f"\n {t['bright']}AUTOMATIONS{RST}")
+                print(f" {t['dim']}{'─'*66}{RST}")
+                for a in all_autos:
+                    sid = a['id'][:30]
+                    desc = a.get('description', '(no desc)')[:40]
+                    st = a.get('status', 'unknown')
+                    nxt = a.get('next_run')
+                    nxt_str = datetime.fromtimestamp(nxt).strftime('%m/%d %H:%M') if nxt else '-'
+                    runs = a.get('run_count', 0)
+                    st_color = t['ok'] if st == 'active' else (t['warn'] if st == 'paused' else t['dim'])
+                    print(f" {t['primary']}{desc}{RST}")
+                    print(f"   {t['dim']}{sid}  |  {st_color}{st}{RST}  |  next: {nxt_str}  |  runs: {runs}{RST}")
+                print(f" {t['dim']}{'─'*66}{RST}")
+                print(f" {t['dim']}Total: {len(all_autos)} automations{RST}\n")
+                continue
+
+            if subcmd == 'show':
+                auto = automation_load(subargs) if subargs else None
+                if not auto:
+                    print(f"  {t['err']}Automation not found: {subargs}{RST}\n")
+                    continue
+                print(f"\n {t['bright']}AUTOMATION DETAIL{RST}")
+                print(f" {t['dim']}ID:          {auto['id']}{RST}")
+                print(f" {t['primary']}Description: {auto.get('description', '')}{RST}")
+                print(f" Task:       {auto.get('task', '')[:80]}")
+                print(f" Type:       {auto.get('type', '')}")
+                print(f" Status:     {auto.get('status', '')}")
+                if auto.get('interval_minutes'):
+                    print(f" Interval:   {auto['interval_minutes']} min")
+                if auto.get('next_run'):
+                    print(f" Next run:   {datetime.fromtimestamp(auto['next_run']).strftime('%Y-%m-%d %H:%M:%S')}")
+                if auto.get('last_run'):
+                    print(f" Last run:   {datetime.fromtimestamp(auto['last_run']).strftime('%Y-%m-%d %H:%M:%S')}")
+                if auto.get('last_success') is not None:
+                    print(f" Success:    {auto['last_success']}")
+                if auto.get('last_result'):
+                    print(f" Result:     {auto['last_result'][:200]}")
+                print(f" Runs:       {auto.get('run_count', 0)}")
+                print()
+                continue
+
+            if subcmd == 'delete':
+                if automation_delete(subargs):
+                    print(f"  {t['ok']}Automation deleted: {subargs}{RST}\n")
+                else:
+                    print(f"  {t['err']}Not found: {subargs}{RST}\n")
+                continue
+
+            if subcmd == 'pause':
+                auto = automation_load(subargs) if subargs else None
+                if not auto:
+                    print(f"  {t['err']}Automation not found: {subargs}{RST}\n")
+                    continue
+                auto['status'] = 'paused'
+                automation_save(auto)
+                print(f"  {t['warn']}Automation paused: {auto.get('description', subargs)}{RST}\n")
+                continue
+
+            if subcmd == 'resume':
+                auto = automation_load(subargs) if subargs else None
+                if not auto:
+                    print(f"  {t['err']}Automation not found: {subargs}{RST}\n")
+                    continue
+                auto['status'] = 'active'
+                if auto['type'] == 'oneshot' and auto.get('last_run'):
+                    auto['next_run'] = None
+                elif auto['type'] == 'scheduled' and auto.get('interval_minutes'):
+                    last = auto.get('last_run') or time.time()
+                    auto['next_run'] = last + auto['interval_minutes'] * 60
+                automation_save(auto)
+                print(f"  {t['ok']}Automation resumed: {auto.get('description', subargs)}{RST}\n")
+                continue
+
+            if subcmd in ('run', 'execute'):
+                auto = automation_load(subargs) if subargs else None
+                if not auto:
+                    print(f"  {t['err']}Automation not found: {subargs}{RST}\n")
+                    continue
+                print(f"  {t['bright']}+ Running automation: {auto.get('description', subargs)}{RST}")
+                threading.Thread(target=automation_execute, args=(subargs,), daemon=True).start()
+                continue
+
+            # If no subcommand matched, treat as natural language creation
+            if args_str:
+                print(f"  {t['dim']}Parsing automation from natural language...{RST}")
+                auto = automation_create_from_nl(args_str)
+                if auto:
+                    nxt_str = ""
+                    if auto.get('next_run'):
+                        nxt_str = f" next run: {datetime.fromtimestamp(auto['next_run']).strftime('%Y-%m-%d %H:%M:%S')}"
+                    print(f"  {t['ok']}Automation created: {auto.get('description', '')}{RST}")
+                    print(f"    {t['dim']}Type: {auto['type']}  |  ID: {auto['id']}{nxt_str}{RST}\n")
+                else:
+                    print(f"  {t['err']}Failed to parse automation. Try being more specific.{RST}\n")
+            else:
+                print(f"  Usage: /auto <describe what to automate>")
+                print(f"         /auto list")
+                print(f"         /auto show <id>")
+                print(f"         /auto delete <id>")
+                print(f"         /auto pause|resume <id>")
+                print(f"         /auto run <id>")
+                print(f"  Examples:")
+                print(f"    /auto check my email every morning")
+                print(f"    /auto write a CNN report in 3 days")
             continue
 
         if cmd in ('image', 'img'):
