@@ -310,6 +310,12 @@ _MEMORY_FLUSH_COUNTER = 0
 _LAST_INTERJECT = ""
 _CURRENT_SESSION_ID = None
 
+# ── Interjection state ────────────────────────────────────────
+_INTERJECTION_ACTIVE = False
+_INTERJECTION_BUF = ""
+_INTERJECTION_RESULT = None
+_SAVED_TERMIOS = None
+
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
     if _MEMORY_DIRTY:
@@ -1302,6 +1308,81 @@ def draw_footer(status_bar, spin_char=None):
     clear_footer()
     sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
     sys.stdout.flush()
+
+# ── Interjection (type while AI streams) ─────────────────────
+
+def _interjection_start():
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS
+    _INTERJECTION_ACTIVE = False
+    _INTERJECTION_BUF = ""
+    _INTERJECTION_RESULT = None
+    _SAVED_TERMIOS = None
+    if sys.platform == 'win32':
+        return
+    try:
+        import termios
+        fd = sys.stdin.fileno()
+        _SAVED_TERMIOS = termios.tcgetattr(fd)
+        new = termios.tcgetattr(fd)
+        new[3] = new[3] & ~(termios.ECHO | termios.ICANON)
+        new[6][termios.VMIN] = 1
+        new[6][termios.VTIME] = 0
+        termios.tcsetattr(fd, termios.TCSADRAIN, new)
+        _INTERJECTION_ACTIVE = True
+    except Exception:
+        _INTERJECTION_ACTIVE = False
+
+def _interjection_stop():
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS
+    _INTERJECTION_ACTIVE = False
+    _INTERJECTION_BUF = ""
+    _INTERJECTION_RESULT = None
+    if _SAVED_TERMIOS is not None:
+        try:
+            import termios
+            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERMIOS)
+        except Exception:
+            pass
+        _SAVED_TERMIOS = None
+
+def _interjection_poll():
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT
+    if not _INTERJECTION_ACTIVE:
+        return None
+    try:
+        import select
+        fd = sys.stdin.fileno()
+        if not select.select([fd], [], [], 0)[0]:
+            return None
+        data = os.read(fd, 4096)
+        if not data:
+            return None
+        text = data.decode('utf-8', errors='replace')
+        for ch in text:
+            if ch in ('\n', '\r'):
+                result = _INTERJECTION_BUF
+                _INTERJECTION_BUF = ""
+                _INTERJECTION_RESULT = result
+                return result
+            elif ord(ch) == 3:
+                raise KeyboardInterrupt
+            elif ch in ('\x7f', '\b'):
+                _INTERJECTION_BUF = _INTERJECTION_BUF[:-1]
+            elif ord(ch) >= 32:
+                _INTERJECTION_BUF += ch
+        _draw_interjection_footer()
+    except Exception:
+        pass
+    return None
+
+def _draw_interjection_footer():
+    global _INTERJECTION_BUF
+    t = T()
+    buf = _INTERJECTION_BUF
+    with stdout_lock:
+        clear_footer()
+        sys.stdout.write(f" {t['bright']}interject>{RST} {buf}")
+        sys.stdout.flush()
 
 # ── ANSI Helpers ─────────────────────────────────────────────
 
@@ -2370,7 +2451,16 @@ def stream_response(resp):
                 full += content
         except json.JSONDecodeError:
             continue
+
+        inj = _interjection_poll()
+        if inj is not None:
+            _interjection_stop()
+            with stdout_lock:
+                sys.stdout.write(SHOW)
+            print()
+            return full
     
+    _interjection_stop()
     with stdout_lock:
         sys.stdout.write(SHOW)
     print()
@@ -3870,6 +3960,7 @@ def main():
             spin = None
             try:
                 if Config.STREAM:
+                    _interjection_start()
                     resp = ask_ai(history)
                     print()
                 else:
@@ -3885,6 +3976,17 @@ def main():
                     # After spinner, cursor is on footer line; move to scroll region
                     move_to_scroll_bottom()
                     print()
+                _interjection_stop()
+
+            # Handle interjection (user typed while AI was streaming)
+            if _INTERJECTION_RESULT is not None:
+                inj = _INTERJECTION_RESULT
+                _INTERJECTION_RESULT = None
+                if resp:
+                    history.append({"role": "assistant", "content": resp})
+                history.append({"role": "user", "content": inj})
+                print(f" {T()['primary']}You:{RST} {inj}")
+                continue
             if not resp or resp.startswith('['):
                 box("AI ERROR", resp or "No response", "err")
                 break
