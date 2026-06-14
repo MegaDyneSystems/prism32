@@ -3189,6 +3189,7 @@ def stream_response(resp):
     t = T()
     reasoning_mode = False
     agent_prefix_printed = False
+    stream_color = None
     
     with stdout_lock:
         move_to_scroll_bottom()
@@ -3211,7 +3212,10 @@ def stream_response(resp):
                     if not agent_prefix_printed:
                         sys.stdout.write(f" {t['accent']}<{Config.AGENT_NAME}>:{RST} ")
                         agent_prefix_printed = True
-                    sys.stdout.write(f"{t['dim']}{reasoning}{RST}")
+                    if stream_color != "reasoning":
+                        sys.stdout.write(t['dim'])
+                        stream_color = "reasoning"
+                    sys.stdout.write(reasoning)
                     sys.stdout.flush()
                 full += reasoning
                 reasoning_mode = True
@@ -3222,9 +3226,13 @@ def stream_response(resp):
                         sys.stdout.write(f" {t['primary']}<{Config.AGENT_NAME}>:{RST} ")
                         agent_prefix_printed = True
                     if reasoning_mode:
-                        sys.stdout.write(f"\n{t['primary']}")
+                        sys.stdout.write(f"{RST}\n{t['primary']}")
                         reasoning_mode = False
-                    sys.stdout.write(f"{t['primary']}{content}{RST}")
+                        stream_color = "content"
+                    elif stream_color != "content":
+                        sys.stdout.write(t['primary'])
+                        stream_color = "content"
+                    sys.stdout.write(content)
                     sys.stdout.flush()
                 full += content
         except json.JSONDecodeError:
@@ -3234,12 +3242,12 @@ def stream_response(resp):
         if inj is not None:
             _interjection_stop()
             with stdout_lock:
-                sys.stdout.write(SHOW)
+                sys.stdout.write(RST + SHOW)
             return full
     
     _interjection_stop()
     with stdout_lock:
-        sys.stdout.write(SHOW)
+        sys.stdout.write(RST + SHOW)
     return full
 def extract_blocks(text, tag):
     _re = _RE_EXEC_BLOCK if tag == 'execute' else _RE_ASK_BLOCK
