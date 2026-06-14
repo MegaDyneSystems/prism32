@@ -311,6 +311,7 @@ def load_plugins():
 
 MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "memory.json")
 QUANTUM_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "quantum.json")
+SOUL_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "soul.md")
 
 _MEMORY_DIRTY = False
 _MEMORY_FLUSH_COUNTER = 0
@@ -377,6 +378,22 @@ def save_memory(memory):
             json.dump(memory, f, indent=2)
     except Exception:
         pass
+
+# ── Soul (persistent custom rules) ────────────────────────────
+
+def read_soul():
+    """Read the soul.md file. Returns empty string if not found."""
+    try:
+        with open(SOUL_FILE, 'r', encoding='utf-8') as f:
+            return f.read().strip()
+    except (FileNotFoundError, IOError):
+        return ""
+
+def write_soul(text):
+    """Write text to soul.md file."""
+    os.makedirs(os.path.dirname(SOUL_FILE), exist_ok=True)
+    with open(SOUL_FILE, 'w', encoding='utf-8') as f:
+        f.write(text.strip() + "\n")
 
 # ── File-Cabinet Long-Term Memory (6,000 files) ─────────────
 LONGTERM_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "longterm")
@@ -2613,12 +2630,14 @@ def build_context():
     extra = ""
     if _PluginHooks._extra_context:
         extra = "\n" + "\n".join(_PluginHooks._extra_context) + "\n"
+    soul = read_soul()
+    soul_block = f"\nCUSTOM RULES (soul.md):\n{soul}\n" if soul else ""
     return (
         f"System: {info.get('os', '')} {info.get('arch', '')}\n"
         f"CPU: {info.get('cpu', '')}\nRAM: {info.get('ram', '')}\n"
         f"Disk: {info.get('disk', '')}\nIP: {info.get('ip', '')}\n"
         f"Uptime: {info.get('uptime', '')}\nCWD: {os.getcwd()}\n"
-        f"Memory:{mem}\n{extra}"
+        f"Memory:{mem}\n{extra}{soul_block}"
     )
 
 # ── User Interaction (ask / interject) ──────────────────────
@@ -2860,6 +2879,7 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
    /usage               Show API usage (OpenRouter)
    /theme               Cycle theme (21 built-in themes)
    /plugins             List loaded plugins
+   /soul [show|set|...]  Manage persistent custom rules (soul.md)
    /update [dir]        Git pull + reinstall from project directory
    /help                This help
    /quit                Exit
@@ -3505,6 +3525,67 @@ def main():
                 print(f"  Agent name: {t['bright']}{Config.AGENT_NAME}{RST}")
                 print(f"  Usage: agentname <name>")
             print()
+            continue
+
+        if cmd == 'soul':
+            parts = args_str.split(None, 1)
+            subcmd = parts[0].lower() if parts else ""
+            subarg = parts[1] if len(parts) > 1 else ""
+            if subcmd == 'show' or not subcmd:
+                content = read_soul()
+                print(f"\n {t['bright']}Soul (persistent rules){RST}")
+                print(f" {t['dim']}{'─' * 60}{RST}")
+                if content:
+                    print(f" {content}")
+                else:
+                    print(f" {t['dim']}(empty){RST}")
+                print(f" {t['dim']}{'─' * 60}{RST}")
+                print(f" {t['dim']}File: {SOUL_FILE}{RST}")
+            elif subcmd == 'set':
+                if subarg:
+                    write_soul(subarg)
+                    print(f"  {t['bright']}+ Soul updated.{RST}")
+                else:
+                    print(f"  Usage: soul set <rules text>")
+            elif subcmd == 'append':
+                if subarg:
+                    existing = read_soul()
+                    write_soul(existing + ("\n" if existing else "") + subarg)
+                    print(f"  {t['bright']}+ Soul appended.{RST}")
+                else:
+                    print(f"  Usage: soul append <rules text>")
+            elif subcmd == 'clear':
+                write_soul("")
+                print(f"  {t['bright']}+ Soul cleared.{RST}")
+            elif subcmd == 'edit':
+                import tempfile, subprocess
+                content = read_soul()
+                editor = os.environ.get('EDITOR', 'nano')
+                with tempfile.NamedTemporaryFile(mode='w', suffix='.md', delete=False, encoding='utf-8') as f:
+                    f.write(content)
+                    tmppath = f.name
+                try:
+                    subprocess.run([editor, tmppath], check=True)
+                    with open(tmppath, 'r', encoding='utf-8') as f:
+                        new_content = f.read().strip()
+                    if new_content != content:
+                        write_soul(new_content)
+                        print(f"  {t['bright']}+ Soul updated.{RST}")
+                    else:
+                        print(f"  {t['dim']}(no changes){RST}")
+                except Exception as e:
+                    print(f"  {t['err']}Edit failed: {e}{RST}")
+                finally:
+                    try:
+                        os.unlink(tmppath)
+                    except Exception:
+                        pass
+            else:
+                print(f"  Usage: soul [show|set <text>|append <text>|clear|edit]")
+            print()
+            # Rebuild history system prompt to include soul changes
+            if history:
+                history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
             continue
 
         if cmd in ('image', 'img'):
