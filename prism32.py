@@ -322,6 +322,7 @@ _INTERJECTION_BUF = ""
 _INTERJECTION_RESULT = None
 _SAVED_TERMIOS = None
 _INTERJECTION_HAS_TYPED = False
+_INTERJECTION_ESCAPE = False
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -1350,12 +1351,13 @@ def draw_footer(status_bar, spin_char=None):
 # ── Interjection (type while AI streams) ─────────────────────
 
 def _interjection_start():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
     _INTERJECTION_RESULT = None
     _SAVED_TERMIOS = None
     _INTERJECTION_HAS_TYPED = False
+    _INTERJECTION_ESCAPE = False
     if sys.platform == 'win32':
         return
     try:
@@ -1372,10 +1374,11 @@ def _interjection_start():
         _INTERJECTION_ACTIVE = False
 
 def _interjection_stop():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
     _INTERJECTION_HAS_TYPED = False
+    _INTERJECTION_ESCAPE = False
     if _SAVED_TERMIOS is not None:
         try:
             import termios
@@ -1387,7 +1390,7 @@ def _interjection_stop():
         clear_footer()
 
 def _interjection_poll():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE
     if not _INTERJECTION_ACTIVE:
         return None
     if select is None:
@@ -1403,6 +1406,11 @@ def _interjection_poll():
                 return None
             text = data.decode('utf-8', errors='replace')
             for ch in text:
+                if _INTERJECTION_ESCAPE:
+                    b = ord(ch)
+                    if 0x40 <= b <= 0x7E or ch == '~':
+                        _INTERJECTION_ESCAPE = False
+                    continue
                 if ch in ('\n', '\r'):
                     result = _INTERJECTION_BUF
                     _INTERJECTION_BUF = ""
@@ -1412,6 +1420,8 @@ def _interjection_poll():
                     raise KeyboardInterrupt
                 elif ch in ('\x7f', '\b'):
                     _INTERJECTION_BUF = _INTERJECTION_BUF[:-1]
+                elif ord(ch) == 27:
+                    _INTERJECTION_ESCAPE = True
                 elif ord(ch) >= 32:
                     _INTERJECTION_BUF += ch
                     _INTERJECTION_HAS_TYPED = True
