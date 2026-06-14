@@ -2484,6 +2484,7 @@ def stream_response(resp):
             
             if reasoning:
                 with stdout_lock:
+                    move_to_scroll_bottom()
                     if not agent_prefix_printed:
                         sys.stdout.write(f" {t['accent']}<{Config.AGENT_NAME}>:{RST} ")
                         agent_prefix_printed = True
@@ -2493,6 +2494,7 @@ def stream_response(resp):
             
             if content:
                 with stdout_lock:
+                    move_to_scroll_bottom()
                     if not agent_prefix_printed:
                         sys.stdout.write(f" {t['primary']}<{Config.AGENT_NAME}>:{RST} ")
                         agent_prefix_printed = True
