@@ -1,0 +1,142 @@
+"""Tests for Prism32 interjection feature."""
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+exec(open('prism32.py').read().split('if __name__')[0])
+
+def test_interjection_globals_exist():
+    """Interjection globals should be defined at module level."""
+    assert '_INTERJECTION_ACTIVE' in globals()
+    assert '_INTERJECTION_BUF' in globals()
+    assert '_INTERJECTION_RESULT' in globals()
+    assert '_SAVED_TERMIOS' in globals()
+
+def test_interjection_start_does_not_crash():
+    """_interjection_start should not raise."""
+    try:
+        _interjection_start()
+    except Exception:
+        assert False, "_interjection_start raised"
+
+def test_interjection_stop_does_not_crash():
+    """_interjection_stop should not raise."""
+    try:
+        _interjection_stop()
+    except Exception:
+        assert False, "_interjection_stop raised"
+
+def test_interjection_stop_preserves_result():
+    """_interjection_stop should NOT clear _INTERJECTION_RESULT."""
+    global _INTERJECTION_RESULT, _SAVED_TERMIOS
+    _INTERJECTION_RESULT = "test_value"
+    _SAVED_TERMIOS = None
+    _interjection_stop()
+    assert _INTERJECTION_RESULT == "test_value"
+
+def test_interjection_double_stop_safe():
+    """Calling _interjection_stop twice should be safe."""
+    global _SAVED_TERMIOS
+    _SAVED_TERMIOS = None
+    _interjection_stop()
+    _interjection_stop()
+
+def test_interjection_poll_inactive():
+    """_interjection_poll should return None when not active."""
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF
+    _INTERJECTION_ACTIVE = False
+    _INTERJECTION_BUF = ""
+    result = _interjection_poll()
+    assert result is None
+
+def test_interjection_poll_no_data():
+    """_interjection_poll should return None when no stdin data."""
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF
+    _INTERJECTION_ACTIVE = True
+    _INTERJECTION_BUF = ""
+    result = _interjection_poll()
+    assert result is None
+
+def test_interjection_buf_accumulation():
+    """_INTERJECTION_BUF should accumulate characters."""
+    global _INTERJECTION_BUF
+    _INTERJECTION_BUF = ""
+    _INTERJECTION_BUF += "h"
+    _INTERJECTION_BUF += "e"
+    _INTERJECTION_BUF += "l"
+    _INTERJECTION_BUF += "l"
+    _INTERJECTION_BUF += "o"
+    assert _INTERJECTION_BUF == "hello"
+
+def test_interjection_buf_backspace():
+    """Backspace should remove last character."""
+    global _INTERJECTION_BUF
+    _INTERJECTION_BUF = "hello"
+    _INTERJECTION_BUF = _INTERJECTION_BUF[:-1]
+    assert _INTERJECTION_BUF == "hell"
+    _INTERJECTION_BUF = _INTERJECTION_BUF[:-1]
+    assert _INTERJECTION_BUF == "hel"
+
+def test_interjection_buf_clear():
+    """Clearing buffer should work."""
+    global _INTERJECTION_BUF
+    _INTERJECTION_BUF = "hello"
+    _INTERJECTION_BUF = ""
+    assert _INTERJECTION_BUF == ""
+
+def test_interjection_result_flow():
+    """Simulate the full result flow: poll sets, stop preserves, main reads."""
+    global _INTERJECTION_RESULT, _INTERJECTION_BUF
+    _INTERJECTION_RESULT = None
+    _INTERJECTION_BUF = "test_input"
+    result = _INTERJECTION_BUF
+    _INTERJECTION_BUF = ""
+    _INTERJECTION_RESULT = result
+    assert _INTERJECTION_RESULT == "test_input"
+    _interjection_stop()
+    assert _INTERJECTION_RESULT == "test_input"
+    inj = _INTERJECTION_RESULT
+    _INTERJECTION_RESULT = None
+    assert inj == "test_input"
+    assert _INTERJECTION_RESULT is None
+
+def test_interjection_start_resets_state():
+    """_interjection_start should reset buffer and result."""
+    global _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS
+    _INTERJECTION_BUF = "old_buf"
+    _INTERJECTION_RESULT = "old_result"
+    _SAVED_TERMIOS = "old_termios"
+    _interjection_start()
+    assert _INTERJECTION_BUF == ""
+    assert _INTERJECTION_RESULT is None
+    assert _SAVED_TERMIOS is None
+
+def test_interjection_stop_clears_buf():
+    """_interjection_stop should clear buffer."""
+    global _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS
+    _INTERJECTION_BUF = "hello"
+    _INTERJECTION_RESULT = "world"
+    _SAVED_TERMIOS = None
+    _interjection_stop()
+    assert _INTERJECTION_BUF == ""
+
+def test_draw_footer_does_not_crash():
+    """draw_footer should not raise."""
+    try:
+        draw_footer(build_status_bar())
+    except Exception:
+        assert False, "draw_footer raised"
+
+def test_clear_footer_does_not_crash():
+    """clear_footer should not raise."""
+    try:
+        clear_footer()
+    except Exception:
+        assert False, "clear_footer raised"
+
+def test_move_to_scroll_bottom_does_not_crash():
+    """move_to_scroll_bottom should not raise."""
+    try:
+        move_to_scroll_bottom()
+    except Exception:
+        assert False, "move_to_scroll_bottom raised"

@@ -1336,7 +1336,6 @@ def _interjection_stop():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
-    _INTERJECTION_RESULT = None
     if _SAVED_TERMIOS is not None:
         try:
             import termios
@@ -1344,6 +1343,8 @@ def _interjection_stop():
         except Exception:
             pass
         _SAVED_TERMIOS = None
+    with stdout_lock:
+        clear_footer()
 
 def _interjection_poll():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT
@@ -3989,6 +3990,7 @@ def main():
                 history.append({"role": "user", "content": inj})
                 move_to_scroll_bottom()
                 print(f" {T()['primary']}You:{RST} {inj}")
+                save_current_session(history, cmd_log)
                 continue
             if not resp or resp.startswith('['):
                 box("AI ERROR", resp or "No response", "err")
