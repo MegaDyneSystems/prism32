@@ -3161,6 +3161,9 @@ def stream_response(resp):
     reasoning_mode = False
     agent_prefix_printed = False
     
+    with stdout_lock:
+        move_to_scroll_bottom()
+    
     for line in resp:
         line = line.decode('utf-8', errors='ignore').strip()
         if not line or not line.startswith('data: '):
@@ -3176,7 +3179,6 @@ def stream_response(resp):
             
             if reasoning:
                 with stdout_lock:
-                    move_to_scroll_bottom()
                     if not agent_prefix_printed:
                         sys.stdout.write(f" {t['accent']}<{Config.AGENT_NAME}>:{RST} ")
                         agent_prefix_printed = True
@@ -3187,7 +3189,6 @@ def stream_response(resp):
             
             if content:
                 with stdout_lock:
-                    move_to_scroll_bottom()
                     if not agent_prefix_printed:
                         sys.stdout.write(f" {t['primary']}<{Config.AGENT_NAME}>:{RST} ")
                         agent_prefix_printed = True
