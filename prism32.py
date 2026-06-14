@@ -20,6 +20,7 @@ from datetime import datetime
 import platform
 import atexit
 import math
+import base64
 import threading
 stdout_lock = threading.Lock()
 import hashlib
@@ -2832,6 +2833,7 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
    /find <pattern>      Find files by name pattern
    /grep <pat> <file>   Search in file
    /git                 Git status + diff summary
+   /image <path> [txt]  Send image (file or URL) to AI
 
  {bold}System{reset}
    /sysinfo             System information
@@ -3505,6 +3507,15 @@ def main():
             print()
             continue
 
+        if cmd in ('image', 'img'):
+            img_content = cmd_image(args_str)
+            if img_content:
+                history.append({"role": "user", "content": img_content})
+            else:
+                print()
+                continue
+            # fall through to AI interaction
+
         if cmd == 'temperature':
             if args_str:
                 try:
@@ -4086,7 +4097,8 @@ def main():
             print()
             continue
         # ── Default AI interaction ──
-        history.append({"role": "user", "content": user_input})
+        if not (history and isinstance(history[-1].get("content"), list)):
+            history.append({"role": "user", "content": user_input})
         max_iter = 9999
 
         for iteration in range(max_iter):
@@ -4439,6 +4451,60 @@ def cmd_provider_remove(name):
         viz.status(f"Removed provider: {name}", "success")
     else:
         viz.status(f"Provider not found: {name}", "error")
+
+# ── Image / Multimodal Input ──────────────────────────────────
+
+def cmd_image(args_str):
+    """Load an image from file or URL and return multimodal content list.
+    Returns None on error, or a content list suitable for OpenAI API messages."""
+    if not args_str:
+        t = T()
+        print(f"  {t['dim']}Usage: image <file_or_url> [prompt text]{RST}")
+        print(f"  {t['dim']}  Loads an image and sends it to the AI with optional prompt.{RST}")
+        return None
+    
+    parts = args_str.split(None, 1)
+    path = parts[0]
+    prompt = parts[1] if len(parts) > 1 else "What's in this image?"
+    t = T()
+    
+    try:
+        if path.startswith(('http://', 'https://')):
+            print(f"  {t['dim']}Downloading image...{RST}")
+            with urllib.request.urlopen(path, timeout=30) as r:
+                data = r.read()
+            ext = os.path.splitext(path.split('?')[0])[1].lower()
+        else:
+            path = os.path.expanduser(path)
+            if not os.path.isfile(path):
+                print(f"  {t['err']}File not found: {path}{RST}")
+                return None
+            with open(path, 'rb') as f:
+                data = f.read()
+            ext = os.path.splitext(path)[1].lower()
+        
+        mime_map = {
+            '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+            '.png': 'image/png', '.gif': 'image/gif',
+            '.webp': 'image/webp', '.bmp': 'image/bmp',
+            '.tiff': 'image/tiff', '.tif': 'image/tiff',
+        }
+        mime = mime_map.get(ext, 'image/png')
+        b64 = base64.b64encode(data).decode('ascii')
+        data_uri = f"data:{mime};base64,{b64}"
+        
+        size_mb = len(data) / (1024 * 1024)
+        print(f"  {t['bright']}+ Image: {os.path.basename(path)} ({size_mb:.1f} MB){RST}")
+        if size_mb > 20:
+            print(f"  {t['warn']}Large image may exceed model context limits{RST}")
+        
+        return [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": data_uri}}
+        ]
+    except Exception as e:
+        print(f"  {t['err']}Error loading image: {e}{RST}")
+        return None
 
 if __name__ == '__main__':
     main()
