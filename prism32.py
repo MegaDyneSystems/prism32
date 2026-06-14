@@ -1662,8 +1662,8 @@ def T():
 def _clear_theme_cache():
     _T_CACHE.clear()
 
-_RE_ANSI = re.compile(r'\x1b\[[0-9;]*[a-zA-Z]')
-_RE_STRIP_ANSI = re.compile(r'\x1b\[[0-9;]*m')
+_RE_ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
+_RE_STRIP_ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
 _RE_EXEC_BLOCK = re.compile(r'```execute\n(.*?)```', re.DOTALL)
 _RE_ASK_BLOCK = re.compile(r'```ask\n(.*?)```', re.DOTALL)
 
@@ -1673,6 +1673,15 @@ DIM  = "\x1b[2m"
 HIDE = "\x1b[?25l"
 SHOW = "\x1b[?25h"
 CLS  = "\x1b[2J\x1b[H"
+
+def _no_braces(s):
+    """Escape curly braces so content can be safely used in f-strings."""
+    if '{' in s or '}' in s:
+        return s.replace('{', '{{').replace('}', '}}')
+    return s
+
+def strip_ansi(text):
+    return _RE_ANSI.sub('', text)
 
 def _supports_ansi():
     """Check if terminal supports ANSI escape codes."""
@@ -1919,14 +1928,12 @@ def build_status_bar(spin_char=None, history=None, include_indicator=True):
 
 def _wrap_line(line, cw):
     """Word-wrap a single line to fit within cw columns, preserving ANSI codes."""
-    safe = line.replace('{', '').replace('}', '')
-    visible = strip_ansi(safe)
+    visible = strip_ansi(line)
     if len(visible) <= cw:
         return [line]
 
-    # Word-wrap: split on spaces, accumulate until width exceeded
     chunks = []
-    words = safe.split(' ')
+    words = line.split(' ')
     current = ''
     for word in words:
         test = current + (' ' if current else '') + word
@@ -1947,19 +1954,18 @@ def box(title, content, color_key="primary", width=62):
     iw = width - 2
     cw = width - 4
     print(f"{c}{'+' + '='*iw + '+'}{RST}")
-    print(f"{c}|{RST} {c}{BOLD}{str(title):<{cw}}{RST} {c}|{RST}")
+    title_clean = strip_ansi(str(title))
+    print(f"{c}|{RST} {c}{BOLD}{title_clean:<{cw}}{RST} {c}|{RST}")
     print(f"{c}|{'-'*iw}|{RST}")
     for raw_line in raw_lines:
         wrapped = _wrap_line(raw_line, cw)
         for chunk in wrapped:
-            safe = chunk.replace('{', '').replace('}', '')
-            vis = len(strip_ansi(safe))
+            vis = len(strip_ansi(chunk))
             pad = cw - vis
             if pad < 0:
-                safe = safe[:cw]
-                vis = cw
+                chunk = chunk[:cw]
                 pad = 0
-            print(f"{c}|{RST} {safe}{' '*pad} {c}|{RST}")
+            print(f"{c}|{RST} {chunk}{' '*pad} {c}|{RST}")
     print(f"{c}{'+' + '='*iw + '+'}{RST}")
 
 def progress_bar(current, total, label="", width=40, color_key="primary"):
