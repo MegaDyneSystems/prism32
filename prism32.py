@@ -1942,8 +1942,10 @@ def _interjection_stop():
             pass
         _SAVED_TERMIOS = None
     with stdout_lock:
+        sys.stdout.write("\x1b[s")
         clear_footer()
-        move_to_scroll_bottom()
+        sys.stdout.write("\x1b[u")
+        sys.stdout.flush()
 
 def _interjection_poll():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
@@ -2034,6 +2036,7 @@ def _draw_interjection_footer():
     buf = _INTERJECTION_BUF
     cur = _INTERJECTION_CURSOR
     with stdout_lock:
+        sys.stdout.write("\x1b[s")
         if buf or _INTERJECTION_HAS_TYPED:
             t = T()
             clear_footer()
@@ -2042,9 +2045,10 @@ def _draw_interjection_footer():
             move_back = len(buf) - cur
             if move_back > 0:
                 sys.stdout.write(f"\x1b[{move_back}D")
-            sys.stdout.flush()
         else:
             draw_footer(build_status_bar())
+        sys.stdout.write("\x1b[u")
+        sys.stdout.flush()
 
 # ── ANSI Helpers ─────────────────────────────────────────────
 
