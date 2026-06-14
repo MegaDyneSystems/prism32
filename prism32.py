@@ -795,6 +795,22 @@ class Platform:
             'riscv64': 'RISC-V 64',
             'riscv32': 'RISC-V 32',
             'riscv': 'RISC-V',
+            'ppc': 'PowerPC',
+            'ppc64': 'PowerPC 64',
+            'ppc64le': 'PowerPC 64 LE',
+            'powerpc': 'PowerPC',
+            'powerpc64': 'PowerPC 64',
+            'mips': 'MIPS',
+            'mips64': 'MIPS64',
+            'mipsel': 'MIPS LE',
+            'sparc': 'SPARC',
+            'sparc64': 'SPARC 64',
+            's390': 'S/390',
+            's390x': 'S/390x',
+            'alpha': 'Alpha',
+            'hppa': 'PA-RISC',
+            'parisc': 'PA-RISC',
+            'ia64': 'Itanium',
         }
         return arch_map.get(machine, machine)
     
