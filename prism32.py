@@ -87,6 +87,21 @@ class CommandRegistry:
             return True
         return False
 
+    def dispatch_capture(self, name, args_str):
+        """Dispatch a command and return its output as a string (for AI use)."""
+        import io
+        cmd = self.get(name)
+        if not cmd:
+            return None
+        old_stdout = sys.stdout
+        sys.stdout = io.StringIO()
+        try:
+            cmd.handler(args_str, [], [])
+            result = sys.stdout.getvalue()
+        finally:
+            sys.stdout = old_stdout
+        return result
+
 registry = CommandRegistry()
 
 # ── Provider Registry (extensible) ─────────────────────────
@@ -2603,6 +2618,20 @@ def _pty_su_root(cmd, timeout=None):
         output = out.decode(errors="replace")
         return output[-4000:] if len(output) > 4000 else output
 
+def _cmd_succeeded(result):
+    """Check if a command result indicates success."""
+    low = (result or "").lower()[:60]
+    return not any(w in low for w in ["error", "blocked", "timeout", "failed", "not found"])
+
+def _try_plugin_cmd(c):
+    """Check if c is a plugin command and dispatch it, returning result or None."""
+    c_stripped = c.strip()
+    cmd_name = c_stripped.split(None, 1)[0].lower()
+    cmd_args = c_stripped.split(None, 1)[1] if ' ' in c_stripped else ""
+    if registry.get(cmd_name):
+        return registry.dispatch_capture(cmd_name, cmd_args)
+    return None
+
 def run_cmd(cmd, timeout=None):
     if timeout is None:
         timeout = Config.CMD_TIMEOUT
@@ -2742,8 +2771,12 @@ class SubAgent:
                     clean = clean_response(resp)
                     for c in commands:
                         c = c.strip()
-                        result = run_cmd(c)
-                        success = "error" not in result.lower()[:50] and "blocked" not in result.lower()
+                        plugin_result = _try_plugin_cmd(c)
+                        if plugin_result is not None:
+                            result = plugin_result.strip()
+                        else:
+                            result = run_cmd(c)
+                        success = _cmd_succeeded(result)
                         cmd_result(c, result, success)
                         msg = f"Executed: {c}\nResult:\n{result[:1500]}"
                         self._history.append({"role": "user", "content": f"{msg}\n\nCommand output above. Continue with task or give final answer."})
@@ -2999,12 +3032,20 @@ def build_context():
         extra = "\n" + "\n".join(_PluginHooks._extra_context) + "\n"
     soul = read_soul()
     soul_block = f"\nCUSTOM RULES (soul.md):\n{soul}\n" if soul else ""
+    
+    # List available plugin commands that the AI can invoke via execute blocks
+    plugin_cmds = [cmd.name for cmd in registry.all()
+                   if cmd.name not in ("help", "quit", "goal")]
+    plugin_block = ""
+    if plugin_cmds:
+        plugin_block = f"\nAvailable plugin commands (use in ```execute blocks): {', '.join(sorted(plugin_cmds))}\n"
+    
     return (
         f"System: {info.get('os', '')} {info.get('arch', '')}\n"
         f"CPU: {info.get('cpu', '')}\nRAM: {info.get('ram', '')}\n"
         f"Disk: {info.get('disk', '')}\nIP: {info.get('ip', '')}\n"
         f"Uptime: {info.get('uptime', '')}\nCWD: {os.getcwd()}\n"
-        f"Memory:{mem}\n{extra}{soul_block}"
+        f"Memory:{mem}\n{extra}{soul_block}{plugin_block}"
     )
 
 # ── User Interaction (ask / interject) ──────────────────────
@@ -3142,7 +3183,7 @@ def cmd_goal(goal_text, history, cmd_log):
                 c = c.strip()
                 viz.tool_call("execute", c)
                 result = run_cmd(c)
-                success = "error" not in result.lower()[:50] and "blocked" not in result.lower()
+                success = _cmd_succeeded(result)
                 viz.tool_result(success, result[:100])
                 cmd_result(c, result, success)
                 learn_command(c, success=success)
@@ -4670,8 +4711,12 @@ def main():
                         for c in commands:
                             c = c.strip()
                             print(f"\n  {T()['warn']}>{c}{RST}")
-                            result = run_cmd(c)
-                            success = "error" not in result.lower()[:50] and "blocked" not in result.lower()
+                            plugin_result = _try_plugin_cmd(c)
+                            if plugin_result is not None:
+                                result = plugin_result.strip()
+                            else:
+                                result = run_cmd(c)
+                            success = _cmd_succeeded(result)
                             cmd_result(c, result, success)
                             cmd_log.append(("ai", c))
                             history.append({"role": "assistant", "content": f"Ran: {c}\n{result[:800]}"})
@@ -4739,8 +4784,12 @@ def main():
                 for c in commands:
                     c = c.strip()
                     viz.tool_call("execute", c)
-                    result = run_cmd(c)
-                    success = "error" not in result.lower()[:50] and "blocked" not in result.lower()
+                    plugin_result = _try_plugin_cmd(c)
+                    if plugin_result is not None:
+                        result = plugin_result.strip()
+                    else:
+                        result = run_cmd(c)
+                    success = _cmd_succeeded(result)
                     viz.tool_result(success, result[:100])
                     cmd_result(c, result, success)
                     cmd_log.append(("ai", c))
