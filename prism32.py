@@ -1943,6 +1943,7 @@ def _interjection_stop():
         _SAVED_TERMIOS = None
     with stdout_lock:
         clear_footer()
+        move_to_scroll_bottom()
 
 def _interjection_poll():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
