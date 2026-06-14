@@ -2625,6 +2625,7 @@ def cmd_goal(goal_text, history, cmd_log):
         spin = None
         try:
             if Config.STREAM:
+                move_to_scroll_bottom()
                 resp = ask_ai(history)
                 print()
             else:
@@ -4013,6 +4014,7 @@ def main():
             spin = None
             try:
                 if Config.STREAM:
+                    move_to_scroll_bottom()
                     _interjection_start()
                     resp = ask_ai(history)
                     print()
