@@ -319,10 +319,15 @@ _CURRENT_SESSION_ID = None
 # ── Interjection state ────────────────────────────────────────
 _INTERJECTION_ACTIVE = False
 _INTERJECTION_BUF = ""
+_INTERJECTION_CURSOR = 0
 _INTERJECTION_RESULT = None
 _SAVED_TERMIOS = None
 _INTERJECTION_HAS_TYPED = False
 _INTERJECTION_ESCAPE = False
+_INTERJECTION_ESCAPE_BUF = ""
+_INTERJECTION_HISTORY = []
+_INTERJECTION_HISTORY_IDX = -1
+_INTERJECTION_SAVED_BUF = ""
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -1351,13 +1356,17 @@ def draw_footer(status_bar, spin_char=None):
 # ── Interjection (type while AI streams) ─────────────────────
 
 def _interjection_start():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
+    _INTERJECTION_CURSOR = 0
     _INTERJECTION_RESULT = None
     _SAVED_TERMIOS = None
     _INTERJECTION_HAS_TYPED = False
     _INTERJECTION_ESCAPE = False
+    _INTERJECTION_ESCAPE_BUF = ""
+    _INTERJECTION_HISTORY_IDX = -1
+    _INTERJECTION_SAVED_BUF = ""
     if sys.platform == 'win32':
         return
     try:
@@ -1374,11 +1383,15 @@ def _interjection_start():
         _INTERJECTION_ACTIVE = False
 
 def _interjection_stop():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
+    _INTERJECTION_CURSOR = 0
     _INTERJECTION_HAS_TYPED = False
     _INTERJECTION_ESCAPE = False
+    _INTERJECTION_ESCAPE_BUF = ""
+    _INTERJECTION_HISTORY_IDX = -1
+    _INTERJECTION_SAVED_BUF = ""
     if _SAVED_TERMIOS is not None:
         try:
             import termios
@@ -1390,7 +1403,7 @@ def _interjection_stop():
         clear_footer()
 
 def _interjection_poll():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
     if not _INTERJECTION_ACTIVE:
         return None
     if select is None:
@@ -1407,23 +1420,65 @@ def _interjection_poll():
             text = data.decode('utf-8', errors='replace')
             for ch in text:
                 if _INTERJECTION_ESCAPE:
+                    _INTERJECTION_ESCAPE_BUF += ch
+                    seq = _INTERJECTION_ESCAPE_BUF
                     b = ord(ch)
                     if 0x40 <= b <= 0x7E or ch == '~':
                         _INTERJECTION_ESCAPE = False
+                        _INTERJECTION_ESCAPE_BUF = ""
+                        if seq == '[A':  # Up
+                            if _INTERJECTION_HISTORY:
+                                if _INTERJECTION_HISTORY_IDX == -1:
+                                    _INTERJECTION_SAVED_BUF = _INTERJECTION_BUF
+                                    _INTERJECTION_HISTORY_IDX = len(_INTERJECTION_HISTORY) - 1
+                                elif _INTERJECTION_HISTORY_IDX > 0:
+                                    _INTERJECTION_HISTORY_IDX -= 1
+                                _INTERJECTION_BUF = _INTERJECTION_HISTORY[_INTERJECTION_HISTORY_IDX]
+                                _INTERJECTION_CURSOR = len(_INTERJECTION_BUF)
+                                _INTERJECTION_HAS_TYPED = True
+                        elif seq == '[B':  # Down
+                            if _INTERJECTION_HISTORY and _INTERJECTION_HISTORY_IDX >= 0:
+                                _INTERJECTION_HISTORY_IDX += 1
+                                if _INTERJECTION_HISTORY_IDX >= len(_INTERJECTION_HISTORY):
+                                    _INTERJECTION_HISTORY_IDX = -1
+                                    _INTERJECTION_BUF = _INTERJECTION_SAVED_BUF
+                                else:
+                                    _INTERJECTION_BUF = _INTERJECTION_HISTORY[_INTERJECTION_HISTORY_IDX]
+                                _INTERJECTION_CURSOR = len(_INTERJECTION_BUF)
+                                _INTERJECTION_HAS_TYPED = True
+                        elif seq == '[C':  # Right
+                            _INTERJECTION_CURSOR = min(len(_INTERJECTION_BUF), _INTERJECTION_CURSOR + 1)
+                            _INTERJECTION_HAS_TYPED = True
+                        elif seq == '[D':  # Left
+                            _INTERJECTION_CURSOR = max(0, _INTERJECTION_CURSOR - 1)
+                            _INTERJECTION_HAS_TYPED = True
+                        elif seq == '[H':  # Home
+                            _INTERJECTION_CURSOR = 0
+                            _INTERJECTION_HAS_TYPED = True
+                        elif seq == '[F':  # End
+                            _INTERJECTION_CURSOR = len(_INTERJECTION_BUF)
+                            _INTERJECTION_HAS_TYPED = True
                     continue
                 if ch in ('\n', '\r'):
+                    if _INTERJECTION_BUF:
+                        _INTERJECTION_HISTORY.append(_INTERJECTION_BUF)
                     result = _INTERJECTION_BUF
                     _INTERJECTION_BUF = ""
+                    _INTERJECTION_CURSOR = 0
                     _INTERJECTION_RESULT = result
                     return result
                 elif ord(ch) == 3:
                     raise KeyboardInterrupt
                 elif ch in ('\x7f', '\b'):
-                    _INTERJECTION_BUF = _INTERJECTION_BUF[:-1]
+                    if _INTERJECTION_CURSOR > 0:
+                        _INTERJECTION_BUF = _INTERJECTION_BUF[:_INTERJECTION_CURSOR - 1] + _INTERJECTION_BUF[_INTERJECTION_CURSOR:]
+                        _INTERJECTION_CURSOR -= 1
                 elif ord(ch) == 27:
                     _INTERJECTION_ESCAPE = True
+                    _INTERJECTION_ESCAPE_BUF = ""
                 elif ord(ch) >= 32:
-                    _INTERJECTION_BUF += ch
+                    _INTERJECTION_BUF = _INTERJECTION_BUF[:_INTERJECTION_CURSOR] + ch + _INTERJECTION_BUF[_INTERJECTION_CURSOR:]
+                    _INTERJECTION_CURSOR += 1
                     _INTERJECTION_HAS_TYPED = True
         if _INTERJECTION_HAS_TYPED:
             _draw_interjection_footer()
@@ -1432,13 +1487,18 @@ def _interjection_poll():
     return None
 
 def _draw_interjection_footer():
-    global _INTERJECTION_BUF
+    global _INTERJECTION_BUF, _INTERJECTION_CURSOR
     buf = _INTERJECTION_BUF
+    cur = _INTERJECTION_CURSOR
     with stdout_lock:
-        if buf:
+        if buf or _INTERJECTION_HAS_TYPED:
             t = T()
             clear_footer()
-            sys.stdout.write(f" {t['bright']}interject>{RST} {buf}")
+            visual = f" {t['bright']}interject>{RST} {buf}"
+            sys.stdout.write(visual)
+            move_back = len(buf) - cur
+            if move_back > 0:
+                sys.stdout.write(f"\x1b[{move_back}D")
             sys.stdout.flush()
         else:
             draw_footer(build_status_bar())
