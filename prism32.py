@@ -1109,7 +1109,7 @@ class Platform:
     LINUX = sys.platform.startswith("linux")
     MACOS = sys.platform == 'darwin'
     WINDOWS = sys.platform == 'win32'
-    BSD = 'bsd' in sys.platform.lower()
+    BSD = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
     TERMUX = LINUX and os.environ.get('TERMUX_VERSION', '') != ''
     ANDROID = TERMUX or os.environ.get('ANDROID_ROOT', '') != ''
     
@@ -1659,6 +1659,19 @@ HIDE = "\x1b[?25l"
 SHOW = "\x1b[?25h"
 CLS  = "\x1b[2J\x1b[H"
 
+def _supports_ansi():
+    """Check if terminal supports ANSI escape codes."""
+    if 'NO_COLOR' in os.environ or os.environ.get('TERM') in ('dumb', 'emacs', ''):
+        return False
+    if Platform.WINDOWS:
+        try:
+            import ctypes
+            return ctypes.windll.kernel32.GetConsoleMode(
+                ctypes.windll.kernel32.GetStdHandle(-11), ctypes.byref(ctypes.c_uint32())) != 0
+        except Exception:
+            return False
+    return sys.stdout.isatty()
+
 # ── Persistent footer / scroll region ───────────────────────
 _term_size = os.terminal_size((80, 24))
 
@@ -1870,7 +1883,7 @@ def rl_prompt(text):
     return re.sub(r'(\x1b\[[0-9;?]*[a-zA-Z])', '\x01\\1\x02', text)
 
 def build_status_bar(spin_char=None, history=None, include_indicator=True):
-    """Build the bottom status bar: Prism32 MDS:<think> <ctx%> <spin> > """
+    """Build the bottom status bar: Prism32 MDS:<think> <ctx%> <sa> <spin> > """
     t = T()
     parts = [f" {t['bright']}Prism32{RST} {t['dim']}MDS{RST}:"]
     if Config.THINKING_EFFORT:
@@ -1879,6 +1892,9 @@ def build_status_bar(spin_char=None, history=None, include_indicator=True):
     if ctx > 0:
         ctx_color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['dim'])
         parts.append(f" {ctx_color}Ctx {ctx}%{RST}")
+    sa_count = sum(1 for s in _SUBAGENTS.values() if not s.done)
+    if sa_count > 0:
+        parts.append(f" {t['warn']}SA:{sa_count}{RST}")
     if include_indicator:
         indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
         parts.append(f" {indicator}")
@@ -2547,6 +2563,8 @@ def display_system_info():
 
 def _pty_su_root(cmd, timeout=None):
     """Run command as root via pty-based su (BSD needs a TTY for su)."""
+    if select is None:
+        return "[ERROR] select module not available on this platform"
     if pty is None:
         return "[ERROR] pty module not available on this platform"
     password = Config.ROOT_PASS
@@ -2675,6 +2693,7 @@ class SubAgent:
         self.result = None
         self.error = None
         self.done = False
+        self._step = 0
         self._history = []
         self._thread = None
 
@@ -2708,6 +2727,10 @@ class SubAgent:
         Config.STREAM = False
         try:
             for iteration in range(self.max_steps):
+                self._step = iteration + 1
+                with stdout_lock:
+                    t = T()
+                    print(f"  {t['dim']}[{self.id}] Step {self._step}/{self.max_steps}{RST}")
                 resp = ask_ai(self._history, stream=False)
                 if not resp or resp.startswith('['):
                     self.error = resp or "No response"
@@ -2746,7 +2769,12 @@ class SubAgent:
             prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
             print(f"  {t['primary']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
             print(f"  {t['primary']}╰{'─' * 50}{RST}")
-        self._run_loop()
+        spin = SpinnerThread(f"subagent {self.id}")
+        spin.start()
+        try:
+            self._run_loop()
+        finally:
+            spin.stop()
         with stdout_lock:
             t = T()
             status = "COMPLETE" if self.done and not self.error else "ERROR"
@@ -2771,7 +2799,7 @@ class SubAgent:
 
     def status_str(self):
         if not self.done:
-            return f"[{self.id}] RUNNING  task: {self.task[:50]}"
+            return f"[{self.id}] RUNNING step {self._step}/{self.max_steps}  task: {self.task[:50]}"
         if self.error:
             return f"[{self.id}] ERROR    task: {self.task[:50]}  err: {self.error[:40]}"
         return f"[{self.id}] DONE     task: {self.task[:50]}  result: {(self.result or '?')[:40]}"
@@ -3323,7 +3351,10 @@ def cmd_ls(path="."):
     box(f"LS {path}", "\n".join(entries), "primary")
 
 def cmd_find(pattern):
-    out = run_cmd(f"find . -name '*{pattern}*' -type f 2>/dev/null | head -30")
+    if Platform.WINDOWS:
+        out = run_cmd(f'dir /s /b "*{pattern}*" 2>nul')
+    else:
+        out = run_cmd(f"find . -name '*{pattern}*' -type f 2>/dev/null | head -30")
     if not out.strip():
         out = "No files found"
     box(f"FIND: {pattern}", out, "accent")
@@ -3334,7 +3365,10 @@ def cmd_grep(args):
         print(f"  Usage: grep <pattern> <file>")
         return
     pat, fp = parts
-    out = run_cmd(f"grep -n -i '{pat}' '{fp}' 2>/dev/null | head -30")
+    if Platform.WINDOWS:
+        out = run_cmd(f'findstr /n /i "{pat}" "{fp}" 2>nul')
+    else:
+        out = run_cmd(f"grep -n -i '{pat}' '{fp}' 2>/dev/null | head -30")
     if not out.strip():
         out = "No matches"
     box(f"GREP: {pat} in {fp}", out, "accent")
@@ -4296,7 +4330,14 @@ def main():
                     provider = parts[1].strip().split()[0] if parts[1].strip() else None
                 sa = SubAgent(task, provider=provider)
                 sa.run_async()
-                print(f"  Subagent {sa.id} spawned asynchronously.")
+                t = T()
+                print(f"  {t['warn']}╭─ SPAWNED [{sa.id}] ASYNC ─────────────────{RST}")
+                print(f"  {t['warn']}│{RST}  {t['bright']}Task:{RST} {task[:80]}")
+                prov_info = f"  {t['dim']}Provider:{RST} {provider}" if provider else ""
+                model_str = provider if provider else Config.MODEL
+                print(f"  {t['warn']}│{RST}  {t['dim']}Model:{RST} {model_str[:40]}{prov_info}")
+                print(f"  {t['warn']}╰{'─' * 50}{RST}")
+                print(f"  {t['dim']}Use /collect {sa.id} to retrieve results.{RST}")
                 _quantum.put(f"subagent_{sa.id}_spawned", True)
             else:
                 print(f"  Usage: /spawn <task description>")
@@ -4329,12 +4370,12 @@ def main():
                 print(f"  No subagent with id '{sid}'")
                 continue
             if not sa.done:
-                print(f"  Subagent {sid} still running. Check /subagents for status.")
+                print(f"  Subagent {sid} still running (step {sa._step}/{sa.max_steps}).")
+                print(f"  Use /subagents for status.")
                 continue
-            print(f"  {T()['bright']}Result from {sid}:{RST}")
-            print(f"  {(sa.result or sa.error or '?')[:2000]}")
-            print()
-            # Add to history
+            t = T()
+            result_text = (sa.result or sa.error or '?')[:2000]
+            box(f"SUBAGENT {sid} RESULT", result_text, "primary")
             history.append({"role": "user",
                 "content": f"[Collected subagent {sid}]\n" + (sa.result or sa.error or '?')[:2000]})
             with _subagent_lock:
