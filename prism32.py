@@ -1423,12 +1423,15 @@ def _interjection_poll():
 
 def _draw_interjection_footer():
     global _INTERJECTION_BUF
-    t = T()
     buf = _INTERJECTION_BUF
     with stdout_lock:
-        clear_footer()
-        sys.stdout.write(f" {t['bright']}interject>{RST} {buf}")
-        sys.stdout.flush()
+        if buf:
+            t = T()
+            clear_footer()
+            sys.stdout.write(f" {t['bright']}interject>{RST} {buf}")
+            sys.stdout.flush()
+        else:
+            draw_footer(build_status_bar())
 
 # ── ANSI Helpers ─────────────────────────────────────────────
 
