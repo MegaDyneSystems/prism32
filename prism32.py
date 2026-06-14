@@ -2563,6 +2563,7 @@ def stream_response(resp):
                         agent_prefix_printed = True
                     sys.stdout.write(f"{t['dim']}{reasoning}{RST}")
                     sys.stdout.flush()
+                full += reasoning
                 reasoning_mode = True
             
             if content:
