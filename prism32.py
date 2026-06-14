@@ -2457,12 +2457,14 @@ def stream_response(resp):
             _interjection_stop()
             with stdout_lock:
                 sys.stdout.write(SHOW)
+            move_to_scroll_bottom()
             print()
             return full
     
     _interjection_stop()
     with stdout_lock:
         sys.stdout.write(SHOW)
+    move_to_scroll_bottom()
     print()
     return full
 def extract_blocks(text, tag):
@@ -2894,7 +2896,7 @@ def cmd_export(session_history, filename=None):
 # ── Main Loop ────────────────────────────────────────────────
 
 def main():
-    global _shutdown_flag, _LAST_INTERJECT
+    global _shutdown_flag, _LAST_INTERJECT, _INTERJECTION_RESULT
     
     def _on_resize(sig, frame):
         update_terminal_size()
@@ -3985,6 +3987,7 @@ def main():
                 if resp:
                     history.append({"role": "assistant", "content": resp})
                 history.append({"role": "user", "content": inj})
+                move_to_scroll_bottom()
                 print(f" {T()['primary']}You:{RST} {inj}")
                 continue
             if not resp or resp.startswith('['):
