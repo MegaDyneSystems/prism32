@@ -83,10 +83,12 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
         ARE DECOMPOSED INTO MULTI-STEP EXECUTION SEQUENCES
         WITHOUT OPERATOR INTERVENTION.
 
-     D. OPERATOR INTERJECTION - DURING ACTIVE TASKS, THE
-        OPERATOR MAY TYPE MESSAGES AT ANY TIME.  THESE ARE
-        QUEUED AND DELIVERED TO THE AI BETWEEN STEPS, NEVER
-        MID-COMMAND.  ALT+^ RECALLS THE LAST INTERJECTION.
+D. OPERATOR INTERJECTION - DURING AI STREAMING, THE
+         OPERATOR MAY TYPE AT ANY TIME.  THE PROMPT CHANGES
+         TO "INTERJECT>" AND THE TYPED TEXT APPEARS IN THE
+         FOOTER.  PRESSING ENTER INTERRUPTS THE AI AND SENDS
+         THE MESSAGE AS NEW INPUT.  BACKSPACE AND CTRL-C
+         ARE SUPPORTED.
 
      E. PLUGIN EXTENSION - EXTERNAL MODULES MAY REGISTER
         COMMANDS, PROVIDERS, THEMES, AND LIFECYCLE HOOKS.
@@ -118,10 +120,13 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
           |             | OR EQUIVALENT | OR EQUIVALENT      |
           +--------------------------------------------------+
 
-          NOTE: FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY
-                USE THE --SLOW-CPU FLAG IF .  THIS DISABLES THE
-                SPINNER THREAD, RESPONSE STREAMING, AND AUTO
-                MEMORY FLUSHING FOR REDUCED OVERHEAD.
+NOTE: FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY
+                 USE THE --SLOW-CPU FLAG.  THIS DISABLES THE
+                 SPINNER THREAD, RESPONSE STREAMING, AND AUTO
+                 MEMORY FLUSHING FOR REDUCED OVERHEAD.
+
+                 USE --TURBO TO EXPLICITLY ENABLE FULL SPEED
+                 (STREAMING + SPINNER, WHICH IS THE DEFAULT).
 
      2.2  SOFTWARE REQUIREMENTS
 
@@ -217,14 +222,22 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
                 $ su root -c "mkdir -p /usr/local/bin && ln -sf \
                   /home/$USER/.local/bin/prism32 /usr/local/bin/prism32"
 
-      3.5  SLOW-CPU MODE
+3.5  PERFORMANCE FLAGS
 
-          FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY:
+           FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY:
 
-               $ prism32 --slow-cpu
+                $ prism32 --slow-cpu
 
-          THIS PARAMETER MAY BE PERSISTED IN THE CONFIGURATION
-          FILE (SEE SECTION 8.0).
+           THIS DISABLES THE SPINNER, RESPONSE STREAMING, AND
+           AUTO MEMORY FLUSHING FOR REDUCED OVERHEAD.
+
+           TO EXPLICITLY ENABLE FULL SPEED (STREAMING + SPINNER,
+           WHICH IS THE DEFAULT):
+
+                $ prism32 --turbo
+
+           THESE PARAMETERS MAY BE PERSISTED IN THE CONFIGURATION
+           FILE (SEE SECTION 8.0).
 
 
                                                                PAGE 5
@@ -294,29 +307,32 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      4.5  CONFIGURATION
 
-     +----------------------------------------------------------+
-     | COMMAND      | FUNCTION                                  |
-     |--------------+-------------------------------------------|
-     | MODEL (NAME) | SET OR DISPLAY AI MODEL                   |
-     | PROVIDER (N) | SWITCH PROVIDER; PROVIDER MODELS <NAME>   |
-     |              | TO BROWSE MODELS                          |
-     | THEME        | CYCLE TO NEXT COLOR THEME                 |
-     | PLUGINS      | LIST LOADED PLUGINS                       |
-     | API (URL)    | SET API ENDPOINT                          |
-     | APIKEY (KEY) | SET API AUTHENTICATION KEY                |
-     | USAGE        | SHOW OPENROUTER USAGE STATS               |
-     | CONFIG       | DISPLAY CURRENT CONFIGURATION             |
-     | SAVECFG      | SAVE CONFIGURATION TO DISK                |
-     | LOADCFG      | LOAD CONFIGURATION FROM DISK              |
-     | MEMORY       | DISPLAY SELF-EVOLVING MEMORY STATS        |
-     | MEMCTX (N)   | SET MEMORY CONTEXT CHARACTER LIMIT        |
-     | THINKING (L) | SET REASONING EFFORT (OFF/LOW/MED/HIGH)   |
-     | DEBUG        | TOGGLE DEBUG LOGGING                      |
-     | MAXSTEPS (N) | SET GOAL MODE MAXIMUM STEPS               |
-     | MAXTOKENS (N)| SET MAXIMUM RESPONSE TOKENS                |
-     | TEMPERATURE F| SET AI TEMPERATURE (0.0-2.0)              |
-     | AUTOSAVE (N) | SET AUTO-SAVE INTERVAL IN SECONDS         |
-     +----------------------------------------------------------+
++----------------------------------------------------------+
+      | COMMAND      | FUNCTION                                  |
+      |--------------+-------------------------------------------|
+      | MODEL (NAME) | SET OR DISPLAY AI MODEL                   |
+      | PROVIDER     | SWITCH PROVIDER; PROVIDER MODELS <NAME>   |
+      |              | TO BROWSE MODELS                          |
+      | PROVIDER API | SET API ENDPOINT URL                      |
+      | PROVIDER KEY | SET API AUTHENTICATION KEY                |
+      | THEME        | CYCLE TO NEXT COLOR THEME                 |
+      | PLUGINS      | LIST LOADED PLUGINS                       |
+      | USAGE        | SHOW OPENROUTER USAGE STATS               |
+      | CONFIG       | DISPLAY CURRENT CONFIGURATION             |
+      | SAVECFG      | SAVE CONFIGURATION TO DISK                |
+      | LOADCFG      | LOAD CONFIGURATION FROM DISK              |
+      | MEMORY       | DISPLAY SELF-EVOLVING MEMORY STATS        |
+      | MEMCTX (N)   | SET MEMORY CONTEXT CHARACTER LIMIT        |
+      | THINKING (L) | SET REASONING EFFORT (OFF/LOW/MED/HIGH)   |
+      | DEBUG        | TOGGLE DEBUG LOGGING                      |
+      | LOG          | SHOW DEBUG LOG                            |
+      | MAXSTEPS (N) | SET GOAL MODE MAXIMUM STEPS               |
+      | MAXTOKENS (N)| SET MAXIMUM RESPONSE TOKENS                |
+      | TEMPERATURE F| SET AI TEMPERATURE (0.0-2.0)              |
+      | AUTOSAVE (N) | SET AUTO-SAVE INTERVAL IN SECONDS         |
+      | AGENTNAME (N)| SET DISPLAY NAME FOR AI ASSISTANT         |
+      | ROOTPASS (P) | SET ROOT PASSWORD FOR SU/SUDO COMMANDS    |
+      +----------------------------------------------------------+
 
      4.6  SYSTEM
 
@@ -388,30 +404,16 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      NO SEPARATE COMMAND IS REQUIRED -- THE OPERATOR SIMPLY
      PROVIDES A TASK AND THE AI CONTINUES UNTIL FINISHED.
 
-     5.5.1  OPERATOR INTERJECTION
+5.5.1  OPERATOR INTERJECTION
 
-          DURING ACTIVE TASK EXECUTION, THE OPERATOR MAY TYPE
-          MESSAGES AT ANY TIME.  THESE ARE:
+           DURING AI STREAMING, THE OPERATOR MAY TYPE AT ANY
+           TIME.  THE PROMPT CHANGES TO "INTERJECT>" AND THE
+           TYPED TEXT APPEARS IN THE FOOTER, SEPARATE FROM
+           THE AI OUTPUT.  PRESSING ENTER INTERRUPTS THE AI
+           AND SENDS THE MESSAGE AS NEW INPUT.  BACKSPACE
+           AND CTRL-C ARE SUPPORTED.
 
-          A. QUEUED DURING AI STREAMING - COLLECTED BETWEEN
-             TOKENS, DELIVERED AFTER THE RESPONSE.
-
-          B. QUEUED DURING COMMAND EXECUTION - COLLECTED
-             BETWEEN COMMANDS, DELIVERED ON THE NEXT AI
-             ITERATION.  NEVER MID-COMMAND.
-
-          C. DELIVERED AS "(INTERJECTION: <TEXT>)" USER
-             MESSAGES IN THE SESSION HISTORY.
-
-     5.5.2  INTERJECT RECALL (ALT+^)
-
-          PRESSING CTRL+^ (ASCII 0X1E, OR ALT+^ ON MANY
-          TERMINALS) AT THE PROMPT RECALLS THE LAST
-          INTERJECTED TEXT FOR EDITING OR RESUBMISSION.
-          THE PROMPT SHOWS A "(⚑ INTERJECT: <TEXT>)"
-          INDICATOR WHEN RECALL TEXT IS AVAILABLE.
-
-     5.5.3  SESSION RESUME
+      5.5.2  SESSION RESUME
 
           THE RESUME COMMAND PRESENTS AN INTERACTIVE BROWSER
           FOR SAVED SESSIONS.  SELECTING A SESSION SHOWS THE
@@ -445,38 +447,49 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      --THEME NAME      -T     SET COLOR THEME
 
-     --NO-BOOT               SUPPRESS THE BOOT SEQUENCE
+--NO-BOOT               SUPPRESS THE BOOT SEQUENCE
 
-     --TEMPERATURE F         SET AI TEMPERATURE (0.0-2.0)
+      --TEMPERATURE F         SET AI TEMPERATURE (0.0-2.0)
 
-     --GOAL TASK       -G     INITIATE GOAL MODE AND EXIT
+      --GOAL TASK       -G     INITIATE GOAL MODE AND EXIT
 
-     --SLOW-CPU               ENABLE SLOW-CPU MODE:
-                              DISABLES SPINNER THREAD,
-                              STREAMING, AND AUTO MEMORY FLUSH
+      --TURBO                  EXPLICITLY ENABLE STREAMING
+                               AND SPINNER (DEFAULT BEHAVIOR,
+                               USEFUL TO OVERRIDE SAVED CONFIG)
+
+      --SLOW-CPU               DISABLE STREAMING AND SPINNER
+                               FOR REDUCED CPU OVERHEAD
 
 
                                                                PAGE 12
 PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 7.0  COLOR THEMES
-     =============
+      =============
 
-     THE SYSTEM PROVIDES 13 COLOR THEMES:
+      THE SYSTEM PROVIDES 21 COLOR THEMES:
 
-          PHOSPHOR    GREEN ON BLACK (DEFAULT)
-          AMBER       AMBER ON BLACK
-          CYAN        CYAN ON BLACK
-          VAPOR       PINK/PURPLE WITH CYAN
-          NORD        LOW-CONTRAST BLUE-GRAY
-          SOLARIZED   MUTED TEAL
-          NEON        HIGH-BRIGHTNESS CYAN/PINK
-          RETRO       AMBER/ORANGE TONES
-          ICE         WHITE WITH COOL BLUE
-          OCEAN       DEEP BLUE AND CYAN
-          SUNSET      WARM ORANGE WITH PINK
-          FOREST      GREEN AND EARTH TONES
-          PLASMA      PURPLE AND PINK
+           PHOSPHOR    GREEN ON BLACK (DEFAULT)
+           AMBER       AMBER ON BLACK
+           CYAN        CYAN ON BLACK
+           VAPOR       PINK/PURPLE WITH CYAN
+           NORD        LOW-CONTRAST BLUE-GRAY
+           SOLARIZED   MUTED TEAL
+           NEON        HIGH-BRIGHTNESS CYAN/PINK
+           RETRO       AMBER/ORANGE TONES
+           ICE         WHITE WITH COOL BLUE
+           OCEAN       DEEP BLUE AND CYAN
+           SUNSET      WARM ORANGE WITH PINK
+           FOREST      GREEN AND EARTH TONES
+           PLASMA      PURPLE AND PINK
+           CLEAR       TERMINAL DEFAULT (TRANSPARENT-FRIENDLY)
+           GLASS       TRANSLUCENT GRAY/CYAN
+           GHOST       FAINT WHITE/GREEN
+           SMOKE       CHARCOAL GRAY ON LIGHT BACKGROUND
+           PAPER       BLACK ON WHITE
+           INK         NAVY ON WHITE
+           DAYLIGHT    DARK TEAL ON WHITE
+           SLATE       DARK SLATE ON WHITE
 
      CYCLE THEMES AT THE CONSOLE:
 
@@ -499,30 +512,33 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      PARAMETERS:
 
-     +--------------------------------------------------------------+
-     | PARAMETER            | DEFAULT     | FUNCTION                |
-     |----------------------+-------------+-------------------------|
-     | THEME                | PHOSPHOR    | COLOR THEME             |
-     | API_BASE             | HTTP://     | API ENDPOINT URL        |
-     |                      | 127.0.0.1   |                         |
-     |                      | :8080       |                         |
-     | MODEL                | MODEL.GGUF  | AI MODEL IDENTIFIER     |
-     | API_KEY              | ""          | API AUTHENTICATION KEY  |
-     | PROVIDER             | LOCAL       | ACTIVE PROVIDER         |
-     | MAX_HISTORY          | 2000        | MAX MESSAGES IN HISTORY |
-     | MAX_RESPONSE_TOKENS  | 8192        | RESPONSE TOKEN LIMIT    |
-     | CMD_TIMEOUT          | 300         | COMMAND TIMEOUT (SECS)  |
-     | TIMEOUT              | 120         | API TIMEOUT (SECS)      |
-     | GOAL_MAX_STEPS       | 50          | MAX GOAL STEPS          |
-     | AUTO_SAVE_INTERVAL   | 120         | AUTO-SAVE INTERVAL (S)  |
-     | STREAM               | TRUE        | ENABLE STREAMING        |
-     | DEBUG                | FALSE       | DEBUG LOGGING           |
-     | NO_BOOT              | FALSE       | SUPPRESS BOOT           |
-     | MAX_MEMORY_CTX       | 1024        | MEMORY CONTEXT CHARS    |
-     | SLOW_CPU             | FALSE       | SLOW-CPU MODE           |
-     | THINKING_EFFORT      | ""          | REASONING EFFORT        |
-     |                      |             | (OFF/LOW/MEDIUM/HIGH)   |
-     +--------------------------------------------------------------+
++--------------------------------------------------------------+
+      | PARAMETER            | DEFAULT     | FUNCTION                |
+      |----------------------+-------------+-------------------------|
+      | THEME                | PHOSPHOR    | COLOR THEME             |
+      | API_BASE             | HTTP://     | API ENDPOINT URL        |
+      |                      | 127.0.0.1   |                         |
+      |                      | :8080       |                         |
+      | MODEL                | QWEN/QWEN3  | AI MODEL IDENTIFIER     |
+      |                      | .7-MAX      |                         |
+      | API_KEY              | ""          | API AUTHENTICATION KEY  |
+      | PROVIDER             | LOCAL       | ACTIVE PROVIDER         |
+      | MAX_HISTORY          | 2000        | MAX MESSAGES IN HISTORY |
+      | MAX_RESPONSE_TOKENS  | 8192        | RESPONSE TOKEN LIMIT    |
+      | CMD_TIMEOUT          | 600         | COMMAND TIMEOUT (SECS)  |
+      | GOAL_MAX_STEPS       | 50          | MAX GOAL STEPS          |
+      | AUTO_SAVE_INTERVAL   | 0           | AUTO-SAVE INTERVAL      |
+      |                      |             | (0 = SAVE ON INTERACT)  |
+      | STREAM               | TRUE        | ENABLE STREAMING        |
+      | DEBUG                | FALSE       | DEBUG LOGGING           |
+      | MAX_MEMORY_CTX       | 1024        | MEMORY CONTEXT CHARS    |
+      | SLOW_CPU             | FALSE       | SLOW-CPU MODE           |
+      | THINKING_EFFORT      | ""          | REASONING EFFORT        |
+      |                      |             | (OFF/LOW/MEDIUM/HIGH)   |
+      | AGENT_NAME           | MDS         | AI DISPLAY NAME         |
+      | ROOT_PASS            | ""          | ROOT PASSWORD FOR SU    |
+      | SUBAGENT_MODEL       | ""          | MODEL FOR SUBAGENTS     |
+      +--------------------------------------------------------------+
 
      COMMANDS:
 
@@ -550,13 +566,21 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
           OPENROUTER   HTTPS://OPENROUTER.AI/API/V1
           CUSTOM       (OPERATOR-SPECIFIED)
 
-     SWITCHING:
+SWITCHING:
 
-          prism32> provider openrouter
+           prism32> provider openrouter
 
-     LIST PROVIDERS:
+      SET API ENDPOINT:
 
-          prism32> provider list
+           prism32> provider api https://custom.api.com/v1
+
+      SET API KEY:
+
+           prism32> provider key sk-or-v1-...
+
+      LIST PROVIDERS:
+
+           prism32> provider list
 
      BROWSE MODELS:
 
@@ -657,11 +681,12 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
           /USAGE DISPLAYS API CONSUMPTION (OPENROUTER ONLY).
 
-     11.4 SESSION STORAGE
+11.4 SESSION STORAGE
 
-          SESSIONS ARE AUTO-SAVED TO ~/.PRISM32/SESSIONS/ EVERY
-          120 SECONDS (CONFIGURABLE VIA AUTOSAVE COMMAND).
-          USE THE RESUME COMMAND TO BROWSE AND LOAD.
+           SESSIONS ARE AUTO-SAVED TO ~/.PRISM32/SESSIONS/
+           AFTER EACH INTERACTION (CONFIGURABLE VIA AUTOSAVE
+           COMMAND).  USE THE RESUME COMMAND TO BROWSE AND
+           LOAD.
 
 
                                                                PAGE 18
@@ -801,7 +826,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      SESSION MANAGEMENT .................. 7
      SHELL COMMAND EXECUTION ............. 7
-     SLOW-CPU MODE ....................... 11, 13
+     SLOW-CPU MODE .................... 11, 13
      SYSTEM MESSAGES ..................... 19
 
      - T -

@@ -286,8 +286,9 @@ except Exception:
     echo -e "  ${DIM}Available models:${RST}"
     local max_show=30
     [ "${#MODELS[@]}" -lt "$max_show" ] && max_show="${#MODELS[@]}"
-    for i in $(seq 0 $((max_show - 1))); do
+    local i=0; while [ "$i" -lt "$max_show" ]; do
       printf "  ${BLD}%2d)${RST} ${MODELS[$i]}\n" $((i+1))
+      i=$((i+1))
     done
     if [ "${#MODELS[@]}" -gt "$max_show" ]; then
       echo -e "  ${DIM}  ... and $((${#MODELS[@]} - max_show)) more${RST}"
@@ -471,7 +472,7 @@ echo -e "  ${CY}Help: prism32 --help${RST}"
 echo ""
 
 if [ -n "${api_key+x}" ]; then
-  echo -e "  ${Y}w${RST} API key set in shell only. Use /apikey inside Prism32 to persist."
+  echo -e "  ${Y}w${RST} API key set in shell only. Use /provider key inside Prism32 to persist."
   echo ""
 fi
 
