@@ -327,6 +327,10 @@ def load_plugins():
 MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "memory.json")
 QUANTUM_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "quantum.json")
 SOUL_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "soul.md")
+PROMPTSHARD_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "promptshard.md")
+
+# Secrets vault: stored separately from promptshard to prevent injection
+SECRETS_FILE = os.path.join(os.path.expanduser("~"), ".prism32", ".secrets.json")
 
 _MEMORY_DIRTY = False
 _MEMORY_FLUSH_COUNTER = 0
@@ -409,6 +413,150 @@ def write_soul(text):
     os.makedirs(os.path.dirname(SOUL_FILE), exist_ok=True)
     with open(SOUL_FILE, 'w', encoding='utf-8') as f:
         f.write(text.strip() + "\n")
+
+# ── Secrets Vault ─────────────────────────────────────────
+def _secrets_load():
+    """Load secrets vault. Returns dict."""
+    try:
+        with open(SECRETS_FILE) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _secrets_save(secrets):
+    """Save secrets vault."""
+    os.makedirs(os.path.dirname(SECRETS_FILE), exist_ok=True)
+    with open(SECRETS_FILE, 'w') as f:
+        json.dump(secrets, f, indent=2)
+
+# ── Promptshard System ────────────────────────────────────
+# promptshard.md is a modular job assignment format.
+# Each shard defines: objective, agent type, model caps, tools,
+# skills, environment, domain prompt, secrets, and status.
+# The captain agent reads shards and delegates to subagent teams.
+
+PROMPTSHARD_DEFAULTS = """# promptshard: root
+## objective: main session objective
+## agent: captain
+## model_capabilities: chat
+## tools: bash, git, python3
+## skills: 
+## environment: terminal session
+## prompt: |-
+You are the captain agent coordinating specialized agent teams. Delegate tasks using /delegate or /spawn with quantum context syncing.
+## secrets_requested: 
+## status: active
+## parent: 
+"""
+
+def read_promptshard():
+    """Read promptshard.md. Returns parsed dict or defaults."""
+    try:
+        with open(PROMPTSHARD_FILE, 'r', encoding='utf-8') as f:
+            raw = f.read()
+    except (FileNotFoundError, IOError):
+        raw = PROMPTSHARD_DEFAULTS
+        os.makedirs(os.path.dirname(PROMPTSHARD_FILE), exist_ok=True)
+        with open(PROMPTSHARD_FILE, 'w', encoding='utf-8') as f:
+            f.write(raw)
+
+    shard = {"raw": raw, "id": "root", "objective": "",
+             "agent": "captain", "model_capabilities": "chat",
+             "tools": "", "skills": "", "environment": "",
+             "prompt": "", "secrets_requested": "",
+             "status": "active", "parent": ""}
+    for line in raw.split('\n'):
+        if line.startswith('# promptshard:'):
+            shard["id"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## objective:'):
+            shard["objective"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## agent:'):
+            shard["agent"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## model_capabilities:'):
+            shard["model_capabilities"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## tools:'):
+            shard["tools"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## skills:'):
+            shard["skills"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## environment:'):
+            shard["environment"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## prompt: |-'):
+            shard["prompt"] = ""  # multi-line follows
+        elif line.startswith('## secrets_requested:'):
+            shard["secrets_requested"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## status:'):
+            shard["status"] = line.split(':', 1)[1].strip()
+        elif line.startswith('## parent:'):
+            shard["parent"] = line.split(':', 1)[1].strip()
+        elif shard["prompt"] is not None and not line.startswith('#') and not line.startswith('##'):
+            if line.strip():
+                if shard["prompt"] == "":
+                    shard["prompt"] = line.strip()
+                else:
+                    shard["prompt"] += "\n" + line.strip()
+    shard["prompt"] = shard["prompt"].rstrip('\n')
+    return shard
+
+def write_promptshard(shard):
+    """Write a promptshard dict back to file."""
+    lines = [f"# promptshard: {shard.get('id', 'root')}",
+             f"## objective: {shard.get('objective', '')}",
+             f"## agent: {shard.get('agent', 'captain')}",
+             f"## model_capabilities: {shard.get('model_capabilities', 'chat')}",
+             f"## tools: {shard.get('tools', '')}",
+             f"## skills: {shard.get('skills', '')}",
+             f"## environment: {shard.get('environment', '')}",
+             f"## prompt: |-",
+             shard.get('prompt', ''),
+             f"## secrets_requested: {shard.get('secrets_requested', '')}",
+             f"## status: {shard.get('status', 'active')}",
+             f"## parent: {shard.get('parent', '')}",
+             ""]
+    text = "\n".join(lines)
+    os.makedirs(os.path.dirname(PROMPTSHARD_FILE), exist_ok=True)
+    with open(PROMPTSHARD_FILE, 'w', encoding='utf-8') as f:
+        f.write(text)
+    return shard
+
+def shard_approve_secrets(shard, secrets):
+    """Approve secrets for a shard. Stores in vault, injects into quantum."""
+    vault = _secrets_load()
+    vault[shard['id']] = secrets
+    _secrets_save(vault)
+    for k, v in secrets.items():
+        _quantum.put(f"secret:{shard['id']}:{k}", v)
+
+def shard_spawn_agent(shard):
+    """Spawn a subagent from a promptshard definition."""
+    if shard.get('status') in ('completed', 'expired'):
+        return None
+    task = f"{shard.get('objective', '')}\n\n{shard.get('prompt', '')}"
+    model = shard.get('model_capabilities', '')
+    # Pick a subagent model based on capabilities
+    model_name = Config.SUBAGENT_MODEL or Config.MODEL
+    caps = model.lower()
+    if 'vision' in caps or 'image' in caps:
+        pass  # Use current model (likely supports vision)
+    sa = SubAgent(task, model=model_name, max_steps=Config.GOAL_MAX_STEPS)
+    # Store shard context in quantum for this agent
+    _quantum.put(f"shard:{sa.id}:id", shard['id'])
+    _quantum.put(f"shard:{sa.id}:objective", shard['objective'])
+    _quantum.put(f"shard:{sa.id}:tools", shard['tools'])
+    _quantum.put(f"shard:{sa.id}:skills", shard['skills'])
+    _quantum.put(f"shard:{sa.id}:environment", shard['environment'])
+    # Mark status
+    shard['status'] = 'active'
+    write_promptshard(shard)
+    return sa
+
+def shard_mark_complete(shard_id, result=""):
+    """Mark a promptshard as completed."""
+    shard = read_promptshard()
+    if shard.get('id') == shard_id:
+        shard['status'] = 'completed'
+        write_promptshard(shard)
+    _quantum.put(f"shard:{shard_id}:result", result)
+    _quantum.put(f"shard:{shard_id}:status", "completed")
 
 # ── File-Cabinet Long-Term Memory (6,000 files) ─────────────
 LONGTERM_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "longterm")
@@ -1919,6 +2067,8 @@ def build_status_bar(spin_char=None, history=None, include_indicator=True):
     sa_count = sum(1 for s in _SUBAGENTS.values() if not s.done)
     if sa_count > 0:
         parts.append(f" {t['warn']}SA:{sa_count}{RST}")
+    if _quantum.was_used():
+        parts.append(f" {t['accent']}Q{RST}")
     if include_indicator:
         indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
         parts.append(f" {indicator}")
@@ -2634,6 +2784,21 @@ def _try_plugin_cmd(c):
     c_stripped = c.strip()
     cmd_name = c_stripped.split(None, 1)[0].lower()
     cmd_args = c_stripped.split(None, 1)[1] if ' ' in c_stripped else ""
+    # Handle /quantum from execute blocks (subagents use this)
+    if cmd_name == '/quantum' or cmd_name == 'quantum':
+        parts = cmd_args.split(None, 1)
+        if not cmd_args:
+            return str(_quantum)
+        if ':' in cmd_args:
+            kv = cmd_args.split(':', 1)
+            key = kv[0].strip()
+            val = kv[1].strip() if len(kv) > 1 else ""
+            if val:
+                _quantum.put(key, val)
+                return f"Quantum: {key} = {val}"
+            v = _quantum.get(key)
+            return f"Quantum: {key} = {v}" if v is not None else f"Key '{key}' not found"
+        return f"Usage: /quantum <key>:<value> or /quantum <key>:"
     if registry.get(cmd_name):
         return registry.dispatch_capture(cmd_name, cmd_args)
     return None
@@ -2670,14 +2835,25 @@ class QuantumContext:
     def __init__(self):
         self._data = {}
         self._lock = threading.Lock()
+        self._used = False
 
     def put(self, key, value):
         with self._lock:
             self._data[key] = value
+            self._used = True
+        # Show indicator in footer on next redraw
+        return key
 
     def get(self, key, default=None):
         with self._lock:
-            return self._data.get(key, default)
+            val = self._data.get(key, default)
+            if val is not None:
+                self._used = True
+            return val
+
+    def delete(self, key):
+        with self._lock:
+            return self._data.pop(key, None)
 
     def items(self):
         with self._lock:
@@ -2686,10 +2862,17 @@ class QuantumContext:
     def merge(self, data):
         with self._lock:
             self._data.update(data)
+            self._used = True
 
     def clear(self):
         with self._lock:
             self._data.clear()
+
+    def was_used(self):
+        with self._lock:
+            u = self._used
+            self._used = False
+            return u
 
     def __str__(self):
         with self._lock:
@@ -2703,17 +2886,27 @@ _subagent_lock = threading.Lock()
 _next_sa_id = 0
 
 SUBAGENT_SYSTEM_PROMPT = """You are a Prism32 subagent. You have FULL bash access via:
-
 ```execute
 command here
 ```
 
-You are working on a subtask delegated by the main agent. Work autonomously step by step. After each command, assess progress. Report when done.
+You are working on a subtask delegated by the main agent. Work autonomously step by step.
 
-A shared quantum context is available between all agents. Read from it with the /quantum command when you need shared information.
-Use /remember <text> to store important findings in the long-term file-cabinet memory.
+A shared quantum context is available between all agents. Read from it using:
+```execute
+/quantum
+```
+Write to it using:
+```execute
+/quantum <key>:<value>
+```
+Read a specific key using:
+```execute
+/quantum <key>:
+```
+
+Use /remember <text> to store important findings in long-term memory.
 Use /recall <query> to search past memories from any agent.
-You can be assigned a different provider than the main agent via --provider flag.
 """
 
 class SubAgent:
@@ -2786,6 +2979,8 @@ class SubAgent:
                         cmd_result(c, result, success)
                         msg = f"Executed: {c}\nResult:\n{result[:1500]}"
                         self._history.append({"role": "user", "content": f"{msg}\n\nCommand output above. Continue with task or give final answer."})
+                    # Inject latest quantum context so subagent sees cross-agent data
+                    self._history[0] = self._build_history()
                 else:
                     clean = clean_response(resp)
                     self.result = clean
@@ -3051,7 +3246,7 @@ def build_context():
         f"CPU: {info.get('cpu', '')}\nRAM: {info.get('ram', '')}\n"
         f"Disk: {info.get('disk', '')}\nIP: {info.get('ip', '')}\n"
         f"Uptime: {info.get('uptime', '')}\nCWD: {os.getcwd()}\n"
-        f"Memory:{mem}\n{extra}{soul_block}{plugin_block}"
+        f"Memory:{mem}\n{extra}{soul_block}{plugin_block}\nPROMPTSHARD status: {read_promptshard().get('status', 'active')} | Captain agent delegates using /delegate and /spawn with quantum context syncing."
     )
 
 # ── User Interaction (ask / interject) ──────────────────────
@@ -3322,6 +3517,14 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
     /auto delete <id>    Delete an automation
     /auto pause <id>     Pause an automation
     /auto resume <id>    Resume a paused automation
+
+ {bold}Promptshard{reset}
+    /shard [show]        Display current promptshard
+    /shard deploy        Spawn subagent from promptshard
+    /shard complete      Mark promptshard as done
+    /shard reset         Reset to active
+    /shard set <k>:<v>   Update a promptshard field
+    /shard secrets       Manage secrets vault
     """
 
 
@@ -4018,6 +4221,97 @@ def main():
                 history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
             continue
 
+        # ── Promptshard command ──
+        if cmd == 'shard':
+            parts = args_str.split(None, 1)
+            subcmd = parts[0].lower() if parts else ""
+            subarg = parts[1] if len(parts) > 1 else ""
+            t = T()
+
+            if subcmd == 'show' or not subcmd:
+                shard = read_promptshard()
+                lines = []
+                for k in ('id', 'objective', 'agent', 'model_capabilities',
+                          'tools', 'skills', 'status', 'parent'):
+                    v = shard.get(k, '')
+                    lines.append(f"  {t['bright']}{k}:{RST} {v}")
+                if shard.get('prompt'):
+                    lines.append(f"  {t['bright']}prompt:{RST}")
+                    for pl in shard['prompt'].split('\n'):
+                        lines.append(f"    {pl}")
+                box("PROMPTSHARD", "\n".join(lines), "accent")
+                print()
+
+            elif subcmd == 'deploy':
+                shard = read_promptshard()
+                if shard.get('status') == 'completed':
+                    print(f"  {t['warn']}Promptshard already completed. Use /shard reset to redeploy.{RST}\n")
+                    continue
+                sa = shard_spawn_agent(shard)
+                if sa:
+                    print(f"  {t['ok']}+ Deployed promptshard as {sa.id}{RST}")
+                    print(f"  {t['dim']}  Objective: {shard.get('objective', '')[:60]}{RST}")
+                    print(f"  {t['dim']}  Use /collect {sa.id} when complete.{RST}\n")
+                else:
+                    print(f"  {t['err']}Failed to deploy promptshard.{RST}\n")
+
+            elif subcmd == 'complete':
+                shard = read_promptshard()
+                shard_mark_complete(shard.get('id', 'root'), subarg)
+                print(f"  {t['ok']}+ Promptshard marked complete.{RST}\n")
+
+            elif subcmd == 'reset':
+                shard = read_promptshard()
+                shard['status'] = 'active'
+                write_promptshard(shard)
+                print(f"  {t['ok']}+ Promptshard reset to active.{RST}\n")
+
+            elif subcmd == 'set':
+                if ':' in subarg:
+                    kv = subarg.split(':', 1)
+                    key = kv[0].strip().lower()
+                    val = kv[1].strip()
+                    shard = read_promptshard()
+                    if key in ('id', 'objective', 'agent', 'model_capabilities',
+                              'tools', 'skills', 'environment', 'prompt',
+                              'secrets_requested', 'status', 'parent'):
+                        shard[key] = val
+                        write_promptshard(shard)
+                        print(f"  {t['ok']}+ Shard {key} updated.{RST}\n")
+                    else:
+                        print(f"  {t['err']}Unknown field: {key}{RST}\n")
+                else:
+                    print(f"  Usage: /shard set <field>:<value>\n")
+
+            elif subcmd == 'secrets':
+                vault = _secrets_load()
+                if subarg:
+                    kv = subarg.split(':', 1)
+                    if len(kv) == 2:
+                        vault[kv[0]] = kv[1]
+                        _secrets_save(vault)
+                        _quantum.put(f"secret:{kv[0]}", kv[1])
+                        print(f"  {t['ok']}+ Secret stored: {kv[0]}{RST}\n")
+                    else:
+                        print(f"  {t['dim']}Usage: /shard secrets <name>:<value>{RST}\n")
+                else:
+                    if vault:
+                        box("SECRETS VAULT", "\n".join(f"  {k}: {'*' * len(v)}" for k, v in vault.items()), "warn")
+                    else:
+                        print(f"  {t['dim']}No secrets stored.{RST}")
+                    print()
+
+            else:
+                print(f"  Usage: /shard [show|deploy|complete|reset|set|secrets]")
+                print(f"    show      - display current promptshard")
+                print(f"    deploy    - spawn subagent from promptshard")
+                print(f"    complete  - mark promptshard as done")
+                print(f"    reset     - reset to active")
+                print(f"    set k:v   - update a field")
+                print(f"    secrets   - manage secrets vault")
+                print()
+            continue
+
         # ── Automation command ──
         if cmd == 'auto':
             t = T()
@@ -4423,6 +4717,9 @@ def main():
             t = T()
             result_text = (sa.result or sa.error or '?')[:2000]
             box(f"SUBAGENT {sid} RESULT", result_text, "primary")
+            # Store result in quantum for other agents
+            _quantum.put(f"subagent:{sid}:result", sa.result or sa.error or "")
+            _quantum.put(f"subagent:{sid}:task", sa.task)
             history.append({"role": "user",
                 "content": f"[Collected subagent {sid}]\n" + (sa.result or sa.error or '?')[:2000]})
             with _subagent_lock:
