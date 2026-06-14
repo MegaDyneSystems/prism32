@@ -1908,12 +1908,24 @@ def clear_footer():
     sys.stdout.write("\x1b[K")
     sys.stdout.flush()
 
+def activity_vector(history=None, frame=0, busy=False):
+    """Build the footer activity vector; width grows with context usage."""
+    t = T()
+    ctx = context_pct(history) if history else 0
+    width = 2 + min(10, max(0, ctx) // 10)
+    if busy:
+        wave = ["▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"]
+        chars = "".join(wave[(frame + i) % len(wave)] for i in range(width))
+        color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['accent'])
+        return f"{color}{chars}{RST}"
+    return f"{t['dim']}{'░' * width}{RST}"
+
 def draw_footer(status_bar, spin_char=None):
     """Draw the footer at the bottom of the screen."""
     if not _footer_reserved:
         return
     t = T()
-    indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
+    indicator = spin_char if spin_char is not None else activity_vector()
     clear_footer()
     sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
     sys.stdout.flush()
@@ -2085,7 +2097,7 @@ def rl_prompt(text):
     """Wrap ANSI escapes in readline \x01/\x02 markers so cursor tracking works."""
     return re.sub(r'(\x1b\[[0-9;?]*[a-zA-Z])', '\x01\\1\x02', text)
 
-def build_status_bar(spin_char=None, history=None, include_indicator=True):
+def build_status_bar(spin_char=None, history=None, include_indicator=False):
     """Build the bottom status bar: Prism32 MDS:<think> <ctx%> <sa> <spin> > """
     t = T()
     parts = [f" {t['bright']}Prism32{RST} {t['dim']}MDS{RST}:"]
@@ -2394,7 +2406,7 @@ class SpinnerThread(threading.Thread):
         super().__init__(daemon=True)
         self.message = message
         self._done = threading.Event()
-        self.frames = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
+        self.frames = list(range(8))
 
     def run(self):
         i = 0
@@ -2403,13 +2415,13 @@ class SpinnerThread(threading.Thread):
         while not self._done.is_set():
             with stdout_lock:
                 if inline:
-                    char = self.frames[i % len(self.frames)]
                     history = _BOTTOM_BAR_SPINNER_STATE["history"]
+                    char = activity_vector(history=history, frame=self.frames[i % len(self.frames)], busy=True)
                     draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=char)
                     i += 1
                 else:
                     t = T()
-                    char = self.frames[i % len(self.frames)]
+                    char = activity_vector(frame=self.frames[i % len(self.frames)], busy=True)
                     sys.stdout.write(f"\r\033[K {t['dim']}{char} {self.message}...{RST}")
                     sys.stdout.flush()
                     i += 1
@@ -2421,7 +2433,7 @@ class SpinnerThread(threading.Thread):
         with stdout_lock:
             if _BOTTOM_BAR_SPINNER_STATE["enabled"]:
                 history = _BOTTOM_BAR_SPINNER_STATE["history"]
-                draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=None)
+                draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=activity_vector(history=history))
             else:
                 sys.stdout.write("\r" + " " * 75 + "\r")
                 sys.stdout.flush()
@@ -5159,6 +5171,9 @@ def main():
                     resp = ask_ai(history)
                     print()
                 else:
+                    if not _footer_reserved:
+                        set_scroll_region()
+                    draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=activity_vector(history=history, busy=True))
                     set_bottom_bar_spinner(history)
                     spin = SpinnerThread("thinking")
                     spin.start()
@@ -5168,9 +5183,7 @@ def main():
             finally:
                 if spin is not None:
                     spin.stop()
-                    # After spinner, cursor is on footer line; move to scroll region
-                    move_to_scroll_bottom()
-                    print()
+                    release_footer_for_output()
                 _interjection_stop()
 
             # Handle interjection (user typed while AI was streaming)
