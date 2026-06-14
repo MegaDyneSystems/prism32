@@ -3407,7 +3407,7 @@ def main():
     parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable streaming and animated spinner (default)")
     parser.add_argument("--slow-cpu", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
-    parser.add_argument("--temperature", type=float, help="AI temperature (0.0-1.0)")
+    parser.add_argument("--temperature", type=float, help="AI temperature (0.0-2.0)")
     parser.add_argument("--goal", "-g", help="Run in goal mode and exit")
     parser.add_argument("--set-timeout", type=int, help="Set command timeout in seconds and exit")
     parser.add_argument("--update", help="Update prism32 from a URL or file path and exit")

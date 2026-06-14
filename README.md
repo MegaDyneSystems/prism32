@@ -133,10 +133,9 @@ NOTE: FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY
 
      2.2  SOFTWARE REQUIREMENTS
 
-          - PYTHON INTERPRETER, VERSION 3.7 OR LATER
-          - NETWORK CONNECTION TO THE AI MODEL API ENDPOINT
-          - BASH SHELL (FOR THE INSTALLER PROGRAM)
-          - OPTIONAL: PARAMIKO (FOR REMOTE SSH FUNCTIONS)
+- PYTHON INTERPRETER, VERSION 3.7 OR LATER
+           - NETWORK CONNECTION TO THE AI MODEL API ENDPOINT
+           - BASH SHELL (FOR THE INSTALLER PROGRAM)
 
 
                                                                PAGE 3
@@ -542,7 +541,14 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
                                USEFUL TO OVERRIDE SAVED CONFIG)
 
       --SLOW-CPU               DISABLE STREAMING AND SPINNER
-                               FOR REDUCED CPU OVERHEAD
+                                FOR REDUCED CPU OVERHEAD
+                                (HIDDEN FLAG, NOT IN --HELP)
+
+      --SET-TIMEOUT SECS        SET COMMAND TIMEOUT AND EXIT
+                                (ONE-SHOT CONFIG UTILITY)
+
+      --UPDATE PATH|URL         UPDATE PRISM32 FROM GIT PROJECT
+                                DIRECTORY OR URL AND EXIT
 
 
                                                                PAGE 12
@@ -882,8 +888,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      - I -
 
      INSTALLATION ........................ 3
-     INTERJECT, OPERATOR ................. 10
-     INTERJECT RECALL (ALT+^) ............ 10
+INTERJECT, OPERATOR ................. 10
 
      - L -
 
