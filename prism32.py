@@ -1535,7 +1535,7 @@ class Config:
 
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
     ROOT_PASS = ""  # root password for su/sudo commands (injected as $ROOT_PASS env)
-    STREAM = True
+    STREAM = False
     MAX_MEMORY_CTX = 1024  # max chars for memory context in system prompt (0 = disable)
     AGENT_NAME = "MDS"     # name displayed before assistant responses
     MODEL_CONTEXT_MAP = {
@@ -1638,7 +1638,9 @@ class Config:
             if "auto_save_interval" in data: cls.AUTO_SAVE_INTERVAL = data["auto_save_interval"]
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
             if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = data["max_memory_ctx"]
-            if "stream" in data: cls.STREAM = data["stream"]
+            # Live stream rendering is intentionally session-only. Older saved
+            # configs may contain stream=true, which can re-enable fragile
+            # token-level terminal output on legacy systems.
             if "slow_cpu" in data: cls.SLOW_CPU = data["slow_cpu"]
             if "subagent_model" in data: cls.SUBAGENT_MODEL = data["subagent_model"]
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
@@ -3795,7 +3797,7 @@ def main():
     parser.add_argument("--api", "-a", help="Override API base URL")
     parser.add_argument("--api-key", "-k", help="Set API key (e.g. OpenRouter)")
     parser.add_argument("--theme", "-t", choices=["phosphor","amber","cyan","vapor","nord","solarized","neon","retro","ice","ocean","sunset","forest","plasma","clear","glass","ghost","smoke","paper","ink","daylight","slate"], help="Color theme")
-    parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable streaming and animated spinner (default)")
+    parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable live streaming output")
     parser.add_argument("--slow-cpu", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
     parser.add_argument("--temperature", type=float, help="AI temperature (0.0-2.0)")
