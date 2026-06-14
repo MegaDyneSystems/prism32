@@ -1846,6 +1846,7 @@ def _supports_ansi():
 
 # ── Persistent footer / scroll region ───────────────────────
 _term_size = os.terminal_size((80, 24))
+_footer_reserved = False
 
 def update_terminal_size():
     """Update cached terminal dimensions."""
@@ -1857,6 +1858,8 @@ def update_terminal_size():
 
 def set_scroll_region():
     """Reserve bottom line for the footer; everything else scrolls above."""
+    global _footer_reserved
+    _footer_reserved = True
     h = _term_size.lines
     if h > 1:
         sys.stdout.write(f"\x1b[1;{h-1}r")
@@ -1864,7 +1867,19 @@ def set_scroll_region():
 
 def reset_scroll_region():
     """Reset scrolling region to full screen."""
+    global _footer_reserved
+    _footer_reserved = False
     sys.stdout.write("\x1b[r")
+    sys.stdout.flush()
+
+def release_footer_for_output():
+    """Disable the reserved footer so normal output can scroll safely."""
+    if not _footer_reserved:
+        return
+    reset_scroll_region()
+    h = _term_size.lines
+    if h > 0:
+        sys.stdout.write(f"\x1b[{h};1H\r\x1b[K\n")
     sys.stdout.flush()
 
 def move_to_footer():
@@ -1874,6 +1889,8 @@ def move_to_footer():
 
 def move_to_scroll_bottom():
     """Move cursor to the last line of the scroll region (just above footer)."""
+    if not _footer_reserved:
+        return
     h = _term_size.lines
     if h > 1:
         sys.stdout.write(f"\x1b[{h-1};1H")
@@ -1883,12 +1900,16 @@ def move_to_scroll_bottom():
 
 def clear_footer():
     """Clear the footer line."""
+    if not _footer_reserved:
+        return
     move_to_footer()
     sys.stdout.write("\x1b[K")
     sys.stdout.flush()
 
 def draw_footer(status_bar, spin_char=None):
     """Draw the footer at the bottom of the screen."""
+    if not _footer_reserved:
+        return
     t = T()
     indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
     clear_footer()
@@ -1942,10 +1963,11 @@ def _interjection_stop():
             pass
         _SAVED_TERMIOS = None
     with stdout_lock:
-        sys.stdout.write("\x1b[s")
-        clear_footer()
-        sys.stdout.write("\x1b[u")
-        sys.stdout.flush()
+        if _footer_reserved:
+            sys.stdout.write("\x1b[s")
+            clear_footer()
+            sys.stdout.write("\x1b[u")
+            sys.stdout.flush()
 
 def _interjection_poll():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
@@ -2036,6 +2058,8 @@ def _draw_interjection_footer():
     buf = _INTERJECTION_BUF
     cur = _INTERJECTION_CURSOR
     with stdout_lock:
+        if not _footer_reserved:
+            return
         sys.stdout.write("\x1b[s")
         if buf or _INTERJECTION_HAS_TYPED:
             t = T()
@@ -3769,6 +3793,8 @@ def main():
     set_scroll_region()
 
     while True:
+        if not _footer_reserved:
+            set_scroll_region()
         draw_footer(build_status_bar(history=history))
         try:
             user_input = input().strip()
@@ -3780,6 +3806,7 @@ def main():
 
         if not user_input:
             continue
+        release_footer_for_output()
         _PluginHooks.fire_message(user_input)
         # Clear interject recall on new input
         _LAST_INTERJECT = ""
