@@ -321,6 +321,7 @@ _INTERJECTION_ACTIVE = False
 _INTERJECTION_BUF = ""
 _INTERJECTION_RESULT = None
 _SAVED_TERMIOS = None
+_INTERJECTION_HAS_TYPED = False
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -1349,11 +1350,12 @@ def draw_footer(status_bar, spin_char=None):
 # ── Interjection (type while AI streams) ─────────────────────
 
 def _interjection_start():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
     _INTERJECTION_RESULT = None
     _SAVED_TERMIOS = None
+    _INTERJECTION_HAS_TYPED = False
     if sys.platform == 'win32':
         return
     try:
@@ -1370,9 +1372,10 @@ def _interjection_start():
         _INTERJECTION_ACTIVE = False
 
 def _interjection_stop():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
+    _INTERJECTION_HAS_TYPED = False
     if _SAVED_TERMIOS is not None:
         try:
             import termios
@@ -1384,32 +1387,36 @@ def _interjection_stop():
         clear_footer()
 
 def _interjection_poll():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED
     if not _INTERJECTION_ACTIVE:
         return None
     if select is None:
         return None
     try:
         fd = sys.stdin.fileno()
-        if not select.select([fd], [], [], 0)[0]:
-            return None
-        data = os.read(fd, 4096)
-        if not data:
-            return None
-        text = data.decode('utf-8', errors='replace')
-        for ch in text:
-            if ch in ('\n', '\r'):
-                result = _INTERJECTION_BUF
-                _INTERJECTION_BUF = ""
-                _INTERJECTION_RESULT = result
-                return result
-            elif ord(ch) == 3:
-                raise KeyboardInterrupt
-            elif ch in ('\x7f', '\b'):
-                _INTERJECTION_BUF = _INTERJECTION_BUF[:-1]
-            elif ord(ch) >= 32:
-                _INTERJECTION_BUF += ch
-        _draw_interjection_footer()
+        has_input = select.select([fd], [], [], 0)[0]
+        if has_input:
+            data = os.read(fd, 4096)
+            if not data:
+                if _INTERJECTION_HAS_TYPED:
+                    _draw_interjection_footer()
+                return None
+            text = data.decode('utf-8', errors='replace')
+            for ch in text:
+                if ch in ('\n', '\r'):
+                    result = _INTERJECTION_BUF
+                    _INTERJECTION_BUF = ""
+                    _INTERJECTION_RESULT = result
+                    return result
+                elif ord(ch) == 3:
+                    raise KeyboardInterrupt
+                elif ch in ('\x7f', '\b'):
+                    _INTERJECTION_BUF = _INTERJECTION_BUF[:-1]
+                elif ord(ch) >= 32:
+                    _INTERJECTION_BUF += ch
+                    _INTERJECTION_HAS_TYPED = True
+        if _INTERJECTION_HAS_TYPED:
+            _draw_interjection_footer()
     except Exception:
         pass
     return None
