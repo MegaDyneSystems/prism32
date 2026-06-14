@@ -3190,6 +3190,88 @@ def stream_response(resp):
     reasoning_mode = False
     agent_prefix_printed = False
     stream_color = None
+    display_buf = ""
+    display_color = None
+    last_flush = time.monotonic()
+    fence_state = {"pending": "", "hidden": False}
+
+    def _filter_visible_content(text, final=False):
+        data = fence_state["pending"] + text
+        fence_state["pending"] = ""
+        out = []
+        i = 0
+        while i < len(data):
+            if fence_state["hidden"]:
+                end = data.find("```", i)
+                if end == -1:
+                    fence_state["pending"] = data[-2:] if len(data) > 2 else data
+                    return "".join(out)
+                fence_state["hidden"] = False
+                i = end + 3
+                if i < len(data) and data[i] == "\n":
+                    i += 1
+                continue
+
+            start = data.find("```", i)
+            if start == -1:
+                if final:
+                    out.append(data[i:])
+                    fence_state["pending"] = ""
+                else:
+                    keep = 10
+                    if len(data) - i > keep:
+                        out.append(data[i:len(data)-keep])
+                        fence_state["pending"] = data[len(data)-keep:]
+                    else:
+                        fence_state["pending"] = data[i:]
+                return "".join(out)
+
+            out.append(data[i:start])
+            line_end = data.find("\n", start)
+            if line_end == -1:
+                fence_state["pending"] = data[start:]
+                return "".join(out)
+            fence_line = data[start:line_end].strip().lower()
+            if fence_line.startswith("```execute") or fence_line.startswith("```ask"):
+                fence_state["hidden"] = True
+                i = line_end + 1
+            else:
+                out.append(data[start:line_end + 1])
+                i = line_end + 1
+        return "".join(out)
+
+    def _queue_display(text, color_key):
+        nonlocal display_buf, display_color, stream_color, agent_prefix_printed, last_flush
+        if not text:
+            return
+        if display_color != color_key:
+            _flush_display(force=True)
+            display_color = color_key
+        display_buf += text
+        now = time.monotonic()
+        if "\n" in display_buf or len(display_buf) >= 240 or now - last_flush >= 0.15:
+            _flush_display(force=True)
+
+    def _flush_display(force=False):
+        nonlocal display_buf, stream_color, agent_prefix_printed, last_flush
+        if not display_buf:
+            return
+        if not force and "\n" not in display_buf and len(display_buf) < 240:
+            return
+        color = t['dim'] if display_color == "reasoning" else t['primary']
+        with stdout_lock:
+            if not agent_prefix_printed:
+                prefix_color = t['accent'] if display_color == "reasoning" else t['primary']
+                sys.stdout.write(f" {prefix_color}<{Config.AGENT_NAME}>:{RST} ")
+                agent_prefix_printed = True
+                stream_color = None
+            if stream_color != display_color:
+                sys.stdout.write(color)
+                stream_color = display_color
+            sys.stdout.write(display_buf)
+            sys.stdout.flush()
+        display_buf = ""
+        last_flush = time.monotonic()
     
     with stdout_lock:
         move_to_scroll_bottom()
@@ -3208,43 +3290,30 @@ def stream_response(resp):
             reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
             
             if reasoning:
-                with stdout_lock:
-                    if not agent_prefix_printed:
-                        sys.stdout.write(f" {t['accent']}<{Config.AGENT_NAME}>:{RST} ")
-                        agent_prefix_printed = True
-                    if stream_color != "reasoning":
-                        sys.stdout.write(t['dim'])
-                        stream_color = "reasoning"
-                    sys.stdout.write(reasoning)
-                    sys.stdout.flush()
+                _queue_display(reasoning, "reasoning")
                 full += reasoning
                 reasoning_mode = True
             
             if content:
-                with stdout_lock:
-                    if not agent_prefix_printed:
-                        sys.stdout.write(f" {t['primary']}<{Config.AGENT_NAME}>:{RST} ")
-                        agent_prefix_printed = True
-                    if reasoning_mode:
-                        sys.stdout.write(f"{RST}\n{t['primary']}")
-                        reasoning_mode = False
-                        stream_color = "content"
-                    elif stream_color != "content":
-                        sys.stdout.write(t['primary'])
-                        stream_color = "content"
-                    sys.stdout.write(content)
-                    sys.stdout.flush()
+                if reasoning_mode:
+                    _queue_display("\n", "content")
+                    reasoning_mode = False
+                _queue_display(_filter_visible_content(content), "content")
                 full += content
         except json.JSONDecodeError:
             continue
 
         inj = _interjection_poll()
         if inj is not None:
+            _queue_display(_filter_visible_content("", final=True), "content")
+            _flush_display(force=True)
             _interjection_stop()
             with stdout_lock:
                 sys.stdout.write(RST + SHOW)
             return full
     
+    _queue_display(_filter_visible_content("", final=True), "content")
+    _flush_display(force=True)
     _interjection_stop()
     with stdout_lock:
         sys.stdout.write(RST + SHOW)
