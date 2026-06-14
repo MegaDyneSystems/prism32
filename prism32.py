@@ -24,8 +24,14 @@ import threading
 stdout_lock = threading.Lock()
 import hashlib
 import importlib.util
-import pty
-import select
+try:
+    import pty
+except ImportError:
+    pty = None
+try:
+    import select
+except ImportError:
+    select = None
 try:
     import readline
 except ImportError:
@@ -740,10 +746,16 @@ class Platform:
     MACOS = sys.platform == 'darwin'
     WINDOWS = sys.platform == 'win32'
     BSD = 'bsd' in sys.platform.lower()
+    TERMUX = LINUX and os.environ.get('TERMUX_VERSION', '') != ''
+    ANDROID = TERMUX or os.environ.get('ANDROID_ROOT', '') != ''
     
     @staticmethod
     def get_system():
         """Get the operating system name."""
+        if Platform.TERMUX:
+            return "Android (Termux)"
+        if Platform.ANDROID:
+            return "Android"
         if Platform.MACOS:
             return "macOS"
         elif Platform.LINUX:
@@ -768,12 +780,21 @@ class Platform:
         arch_map = {
             'x86_64': 'x86_64',
             'AMD64': 'x86_64',
+            'amd64': 'x86_64',
             'i386': 'i686',
+            'i486': 'i686',
+            'i586': 'i686',
             'i686': 'i686',
             'aarch64': 'ARM64',
             'arm64': 'ARM64',
             'armv7l': 'ARMv7',
+            'armv7': 'ARMv7',
             'armv6l': 'ARMv6',
+            'armv6': 'ARMv6',
+            'arm': 'ARM',
+            'riscv64': 'RISC-V 64',
+            'riscv32': 'RISC-V 32',
+            'riscv': 'RISC-V',
         }
         return arch_map.get(machine, machine)
     
@@ -1350,8 +1371,9 @@ def _interjection_poll():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_RESULT
     if not _INTERJECTION_ACTIVE:
         return None
+    if select is None:
+        return None
     try:
-        import select
         fd = sys.stdin.fileno()
         if not select.select([fd], [], [], 0)[0]:
             return None
@@ -2072,6 +2094,8 @@ def display_system_info():
 
 def _pty_su_root(cmd, timeout=None):
     """Run command as root via pty-based su (BSD needs a TTY for su)."""
+    if pty is None:
+        return "[ERROR] pty module not available on this platform"
     password = Config.ROOT_PASS
     if not password:
         return "[ERROR] No root password set (use /rootpass)"
@@ -2907,14 +2931,16 @@ def main():
     def _on_resize(sig, frame):
         update_terminal_size()
         set_scroll_region()
-    signal.signal(signal.SIGWINCH, _on_resize)
+    if hasattr(signal, 'SIGWINCH'):
+        signal.signal(signal.SIGWINCH, _on_resize)
     
     parser = argparse.ArgumentParser(description="Prism32 - Retro AI Terminal Agent")
     parser.add_argument("--model", "-m", help="Override model name")
     parser.add_argument("--api", "-a", help="Override API base URL")
     parser.add_argument("--api-key", "-k", help="Set API key (e.g. OpenRouter)")
     parser.add_argument("--theme", "-t", choices=["phosphor","amber","cyan","vapor","nord","solarized","neon","retro","ice","ocean","sunset","forest","plasma","clear","glass","ghost","smoke","paper","ink","daylight","slate"], help="Color theme")
-    parser.add_argument("--slow-cpu", action="store_true", help="Slow CPU mode: disable spinner, batch saves, less overhead")
+    parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable streaming and animated spinner (default)")
+    parser.add_argument("--slow-cpu", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
     parser.add_argument("--temperature", type=float, help="AI temperature (0.0-1.0)")
     parser.add_argument("--goal", "-g", help="Run in goal mode and exit")
@@ -2928,6 +2954,9 @@ def main():
         Config.MODEL = args.model
     if args.api:
         Config.API_BASE = args.api
+    if args.turbo:
+        Config.SLOW_CPU = False
+        Config.STREAM = True
     if args.slow_cpu:
         Config.SLOW_CPU = True
         Config.STREAM = False
