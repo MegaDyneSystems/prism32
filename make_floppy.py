@@ -1,26 +1,73 @@
 #!/usr/bin/env python3
 """Build a Prism32 floppy disk installer image.
-FAT12 filesystem - can be dd'd directly to a floppy disk (/dev/sdc)."""
-import os, sys, struct, time
+FAT12 filesystem - cross-platform, works on Linux/macOS/BSD.
+Can be written to USB floppy drives, SD cards, or USB flash drives.
 
-PRISM32_DIR = os.path.expanduser("~/Documents/Programs/Palmcoder95")
+Usage:
+  python3 make_floppy.py                    # build image to /tmp
+  python3 make_floppy.py --write            # build + write to detected device
+  python3 make_floppy.py --write /dev/sdc   # build + write to specific device
+   python3 make_floppy.py -o floppy.img              # build to custom path
+   python3 make_floppy.py --format 525-hd            # 5.25" high-density (1.2MB)
+   python3 make_floppy.py --format 525-double        # 5.25" double-density (360KB)
+   python3 make_floppy.py --format 35-hd             # 3.5" high-density (1.44MB, default)
+"""
+import os, sys, struct, time, subprocess, platform
+
+# Auto-detect project directory
+PRISM32_DIR = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_IMG = "/tmp/opencode/prism32_floppy.img"
+
+# Floppy format presets
+FLOPPY_FORMATS = {
+    "525-double": {   # 5.25" 360K DD
+        "total_sectors": 720,
+        "sectors_per_track": 9,
+        "num_heads": 2,
+        "sectors_per_fat": 3,
+        "root_entries": 112,
+        "media_byte": 0xFD,
+        "label": "525DD",
+    },
+    "525-hd": {       # 5.25" 1.2M HD
+        "total_sectors": 2400,
+        "sectors_per_track": 15,
+        "num_heads": 2,
+        "sectors_per_fat": 7,
+        "root_entries": 224,
+        "media_byte": 0xF9,
+        "label": "525HD",
+    },
+    "35-hd": {        # 3.5" 1.44M HD (default)
+        "total_sectors": 2880,
+        "sectors_per_track": 18,
+        "num_heads": 2,
+        "sectors_per_fat": 9,
+        "root_entries": 224,
+        "media_byte": 0xF0,
+        "label": "35HD",
+    },
+}
 
 BYTES_PER_SECTOR = 512
 SECTORS_PER_CLUSTER = 1
 RESERVED_SECTORS = 1
 NUM_FATS = 2
-ROOT_ENTRIES = 224
-TOTAL_SECTORS = 2880
-SECTORS_PER_FAT = 9
-SECTORS_PER_TRACK = 18
-NUM_HEADS = 2
 FAT12_EOC = 0xFFF
 
-root_dir_sectors = (ROOT_ENTRIES * 32 + BYTES_PER_SECTOR - 1) // BYTES_PER_SECTOR
-data_start_sector = RESERVED_SECTORS + NUM_FATS * SECTORS_PER_FAT + root_dir_sectors
-total_data_sectors = TOTAL_SECTORS - data_start_sector
-total_clusters = total_data_sectors // SECTORS_PER_CLUSTER
+# Will be set by build()
+fmt = None
+TOTAL_SECTORS = None
+SECTORS_PER_FAT = None
+ROOT_ENTRIES = None
+SECTORS_PER_TRACK = None
+NUM_HEADS = None
+MEDIA_BYTE = None
+VOLUME_LABEL = None
+root_dir_sectors = None
+data_start_sector = None
+total_data_sectors = None
+total_clusters = None
 
 FILES = [
     ("prism32.py",  os.path.join(PRISM32_DIR, "prism32.py")),
@@ -70,6 +117,7 @@ def encode_dir_entry(name, ext, attrs, size, first_cluster, ts):
 
 
 def build_boot_sector():
+    global MEDIA_BYTE
     bs = bytearray(512)
     bs[0:3] = b'\xeb\x3c\x90'
     bs[3:11] = b'PRISM32 '
@@ -79,7 +127,7 @@ def build_boot_sector():
     bs[16] = NUM_FATS
     struct.pack_into('<H', bs, 17, ROOT_ENTRIES)
     struct.pack_into('<H', bs, 19, TOTAL_SECTORS)
-    bs[21] = 0xF0
+    bs[21] = MEDIA_BYTE
     struct.pack_into('<H', bs, 22, SECTORS_PER_FAT)
     struct.pack_into('<H', bs, 24, SECTORS_PER_TRACK)
     struct.pack_into('<H', bs, 26, NUM_HEADS)
@@ -89,7 +137,7 @@ def build_boot_sector():
     bs[37] = 0x00
     bs[38] = 0x29
     struct.pack_into('<I', bs, 39, int(time.time()) & 0xFFFFFFFF)
-    bs[43:54] = b'PRISM32_FLP'
+    bs[43:54] = (VOLUME_LABEL + "       ")[:11].encode()
     bs[54:62] = b'FAT12   '
     msg = b'Prism32 v6.7 - Boot from HD' + b'\x00' * 16
     bs[62:62+len(msg)] = msg
@@ -97,13 +145,13 @@ def build_boot_sector():
     return bytes(bs)
 
 
-def build_fat(chain):
-    """Build FAT12 table bytes from a cluster chain list.
-    chain[n] = next cluster for cluster n, or 0xFFF for EOC, or 0 for free."""
-    total = total_clusters + 2
-    fat = bytearray(SECTORS_PER_FAT * BYTES_PER_SECTOR)
-    entries = [0xFF0, 0xFFF]  # FAT[0] = media desc (0xF0) + 0xFF, FAT[1] = EOC
+def build_fat(chain, fat_sectors, total_clusters, media_byte):
+    """Build FAT12 table bytes from a cluster chain list."""
+    fat = bytearray(fat_sectors * BYTES_PER_SECTOR)
+    entries_med = (media_byte & 0xFF) | 0xF00
+    entries = [entries_med, 0xFFF]
     entries.extend(chain)
+    total = len(entries)
 
     off = 0
     i = 0
@@ -123,7 +171,25 @@ def build_fat(chain):
     return bytes(fat)
 
 
-def build():
+def build(fmt_name="35-hd"):
+    global TOTAL_SECTORS, SECTORS_PER_FAT, ROOT_ENTRIES, SECTORS_PER_TRACK
+    global NUM_HEADS, MEDIA_BYTE, VOLUME_LABEL, root_dir_sectors
+    global data_start_sector, total_data_sectors, total_clusters
+
+    fmt = FLOPPY_FORMATS[fmt_name]
+    TOTAL_SECTORS = fmt["total_sectors"]
+    SECTORS_PER_FAT = fmt["sectors_per_fat"]
+    SECTORS_PER_TRACK = fmt["sectors_per_track"]
+    NUM_HEADS = fmt["num_heads"]
+    ROOT_ENTRIES = fmt["root_entries"]
+    MEDIA_BYTE = fmt["media_byte"]
+    VOLUME_LABEL = fmt["label"]
+
+    root_dir_sectors = (ROOT_ENTRIES * 32 + BYTES_PER_SECTOR - 1) // BYTES_PER_SECTOR
+    data_start_sector = RESERVED_SECTORS + NUM_FATS * SECTORS_PER_FAT + root_dir_sectors
+    total_data_sectors = TOTAL_SECTORS - data_start_sector
+    total_clusters = total_data_sectors // SECTORS_PER_CLUSTER
+
     now = time.time()
     os.makedirs(os.path.dirname(OUTPUT_IMG) or '.', exist_ok=True)
 
@@ -205,7 +271,7 @@ def build():
     img[0:512] = build_boot_sector()
 
     # FATs
-    fat_data = build_fat(chain)
+    fat_data = build_fat(chain, SECTORS_PER_FAT, total_clusters, MEDIA_BYTE)
     fat1_off = RESERVED_SECTORS * BYTES_PER_SECTOR
     img[fat1_off:fat1_off + len(fat_data)] = fat_data
     fat2_off = (RESERVED_SECTORS + SECTORS_PER_FAT) * BYTES_PER_SECTOR
@@ -239,15 +305,115 @@ def build():
     kb = os.path.getsize(OUTPUT_IMG) / 1024
     used = sum(1 for c in chain if c != 0)
     print(f"\n  Floppy image: {OUTPUT_IMG}")
+    print(f"  Format: {fmt_name} ({fmt['label']}, {fmt['total_sectors']} sectors)")
     print(f"  Size: {kb:.1f} KB  ({os.path.getsize(OUTPUT_IMG)} bytes)")
     print(f"  Files: {len(file_entries)}  (clusters used: {used}/{total_clusters})")
     print(f"  Free: {(total_clusters - used) / total_clusters * 100:.0f}%")
-    print(f"\n  To write to floppy: dd if={OUTPUT_IMG} of=/dev/sdc bs=512")
-    print(f"  To mount:          mount -o loop {OUTPUT_IMG} /mnt/floppy")
-    print(f"  To install:        mount -o loop {OUTPUT_IMG} /mnt/floppy &&")
-    print(f"                     cd /mnt/floppy && sh autorun.sh")
+    print(f"\n  To write:  python3 make_floppy.py --write [device]")
+    print(f"  To mount:  mount -o loop {OUTPUT_IMG} /mnt/floppy")
+    print(f"  To install: mount -o loop {OUTPUT_IMG} /mnt/floppy &&")
+    print(f"                     cd /mnt/floppy && sh AUTORUN.SH")
     return True
 
 
+def detect_removable():
+    """Detect removable media device (floppy, SD card, USB flash)."""
+    system = platform.system()
+    if system == "Linux":
+        for prefix in ("sd", "mmcblk"):
+            for entry in os.listdir("/sys/block/"):
+                if not entry.startswith(prefix):
+                    continue
+                try:
+                    path = f"/sys/block/{entry}"
+                    rem = open(f"{path}/removable").read().strip()
+                    size = int(open(f"{path}/size").read().strip())
+                except (OSError, ValueError):
+                    continue
+                if rem == "1" and 2880 <= size <= 8388608:
+                    return f"/dev/{entry}"
+    elif system == "Darwin":
+        for i in range(1, 10):
+            dev = f"/dev/disk{i}"
+            if os.path.exists(dev):
+                try:
+                    out = subprocess.check_output(
+                        ["diskutil", "info", dev], stderr=subprocess.STDOUT
+                    ).decode()
+                    if "Removable" in out or "External" in out:
+                        return dev
+                except (subprocess.CalledProcessError, OSError):
+                    pass
+    elif system in ("NetBSD", "OpenBSD", "FreeBSD"):
+        for dev in (f"/dev/rsd{i}c" for i in range(0, 4)):
+            if os.path.exists(dev):
+                return dev
+    return None
+
+
+def write_to_device(img_path, device=None):
+    """Write the floppy image to a device. Auto-detect if not specified."""
+    if device is None:
+        device = detect_removable()
+    if device is None:
+        print("  No removable media detected.")
+        print(f"  Specify device: python3 make_floppy.py --write /dev/sdc")
+        return False
+    if not os.path.exists(device):
+        print(f"  Device not found: {device}")
+        return False
+
+    print(f"\n  Target: {device}")
+    print(f"  WARNING: ALL DATA ON {device} WILL BE DESTROYED!")
+    confirm = input("  Continue? (y/N): ").strip().lower()
+    if confirm not in ("y", "yes"):
+        print("  Cancelled.")
+        return False
+
+    system = platform.system()
+    cmd = []
+    if system in ("Linux", "NetBSD", "OpenBSD", "FreeBSD"):
+        if os.geteuid() != 0:
+            cmd = ["sudo", "dd", f"if={img_path}", f"of={device}", "bs=512", "conv=fsync"]
+        else:
+            cmd = ["dd", f"if={img_path}", f"of={device}", "bs=512", "conv=fsync"]
+    elif system == "Darwin":
+        subprocess.run(["diskutil", "unmountDisk", device],
+                       capture_output=True)
+        if os.geteuid() != 0:
+            cmd = ["sudo", "dd", f"if={img_path}", f"of={device}", "bs=512"]
+        else:
+            cmd = ["dd", f"if={img_path}", f"of={device}", "bs=512"]
+
+    print(f"  Running: {' '.join(cmd)}")
+    try:
+        subprocess.run(cmd, check=True)
+        if system == "Darwin":
+            subprocess.run(["diskutil", "eject", device], capture_output=True)
+        print(f"\n  Device written successfully.")
+        print(f"  Eject and insert the media, then run: sh AUTORUN.SH")
+        return True
+    except subprocess.CalledProcessError as e:
+        print(f"\n  Error writing to device: {e}")
+        return False
+
+
 if __name__ == '__main__':
-    build()
+    import argparse
+    parser = argparse.ArgumentParser(description="Prism32 Floppy Image Builder")
+    parser.add_argument("--write", "-w", nargs="?", const=True, default=False,
+                        help="Write image to device (auto-detect or specify)")
+    parser.add_argument("--output", "-o", default=OUTPUT_IMG,
+                        help=f"Output image path (default: {OUTPUT_IMG})")
+    parser.add_argument("--format", "-f", default="35-hd",
+                        choices=list(FLOPPY_FORMATS.keys()),
+                        help="Floppy format: 35-hd (1.44MB, default), "
+                             "525-hd (1.2MB), 525-double (360KB)")
+    args = parser.parse_args()
+
+    globals()['OUTPUT_IMG'] = args.output
+    build(fmt_name=args.format)
+
+    if args.write:
+        device = args.write if isinstance(args.write, str) else None
+        write_to_device(OUTPUT_IMG, device)

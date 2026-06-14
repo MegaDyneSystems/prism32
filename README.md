@@ -222,10 +222,55 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
            D. (OPTIONAL) MAKE A SYSTEM-WIDE COMMAND:
 
-                $ su root -c "mkdir -p /usr/local/bin && ln -sf \
-                  /home/$USER/.local/bin/prism32 /usr/local/bin/prism32"
+$ su root -c "mkdir -p /usr/local/bin && ln -sf \
+                   /home/$USER/.local/bin/prism32 /usr/local/bin/prism32"
 
-3.5  PERFORMANCE FLAGS
+3.5  FLOPPY DISK INSTALLATION
+
+     PRISM32 FITS ON A STANDARD 1.44MB FLOPPY DISK (ALL FILES
+     TOTAL APPROXIMATELY 260 KB, WITH 82% FREE SPACE).  THIS
+     ENABLES BOOTSTRAPPING ON AIR-GAPPED OR LEGACY SYSTEMS.
+
+     A.  BUILD THE FLOPPY IMAGE:
+
+              $ python3 make_floppy.py
+
+          THIS CREATES A FAT12 FLOPPY IMAGE AT
+          /tmp/opencode/prism32_floppy.img.
+
+     B.  WRITE THE IMAGE TO A FLOPPY DISK, SD CARD, OR USB FLASH
+          DRIVE.  USE THE CROSS-PLATFORM INSTALLER SCRIPT:
+
+              $ sh floppy-install.sh /tmp/opencode/prism32_floppy.img
+
+          OR MANUALLY, IDENTIFY THE TARGET DEVICE:
+
+          LINUX:
+              $ sudo dd if=prism32_floppy.img of=/dev/sdX bs=512
+
+          MACOS:
+              $ sudo dd if=prism32_floppy.img of=/dev/diskX bs=512
+
+          NETBSD:
+              $ dd if=prism32_floppy.img of=/dev/rsdXc bs=512
+
+     C.  INSTALL FROM THE FLOPPY:
+
+          INSERT THE FLOPPY, THEN:
+
+              $ mount /media/floppy   (OR /mnt/floppy)
+              $ cd /media/floppy
+              $ sh AUTORUN.SH
+
+     D.  THE FLOPPY IMAGE WORKS WITH:
+
+          - USB FLOPPY DRIVES (FLASHBASTER, etc.)
+          - SD CARDS IN USB CARD READERS
+          - USB FLASH DRIVES
+          - VIRTUAL FLOPPY IMAGES (QEMU, VIRTUALBOX)
+          - ANY DEVICE WITH >= 1.44MB CAPACITY
+
+3.6  PERFORMANCE FLAGS
 
            FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY:
 
