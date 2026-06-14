@@ -2075,9 +2075,12 @@ def _pty_su_root(cmd, timeout=None):
     password = Config.ROOT_PASS
     if not password:
         return "[ERROR] No root password set (use /rootpass)"
+    su_path = shutil.which("su")
+    if not su_path:
+        return "[ERROR] su not found on this system"
     pid, fd = pty.fork()
     if pid == 0:
-        os.execv("/usr/bin/su", ["su", "root", "-c", cmd])
+        os.execv(su_path, ["su", "root", "-c", cmd])
     else:
         time.sleep(0.3)
         os.write(fd, (password + "\n").encode())
@@ -2111,8 +2114,10 @@ def run_cmd(cmd, timeout=None):
     try:
         if Platform.BSD and Config.ROOT_PASS and ('su' in cmd or 'sudo' in cmd):
             return _pty_su_root(cmd, timeout)
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout,
-        env={**os.environ, "ROOT_PASS": Config.ROOT_PASS} if Config.ROOT_PASS else None)
+        env = None
+        if Config.ROOT_PASS and ('su' in cmd or 'sudo' in cmd):
+            env = {**os.environ, "ROOT_PASS": Config.ROOT_PASS}
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, env=env)
         out = result.stdout + result.stderr
         return out[-4000:] if len(out) > 4000 else out
     except subprocess.TimeoutExpired:
@@ -4046,9 +4051,7 @@ def main():
 _IS_OPENROUTER = None
 def build_headers(extra=None):
     global _IS_OPENROUTER
-    if _IS_OPENROUTER is None:
-        _IS_OPENROUTER = "openrouter" in Config.API_BASE.lower()
-    """Build request headers with API key if configured."""
+    _IS_OPENROUTER = "openrouter" in Config.API_BASE.lower()
     h = {"Content-Type": "application/json"}
     if Config.API_KEY:
         h["Authorization"] = f"Bearer {Config.API_KEY}"
@@ -4224,6 +4227,7 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
                 Config.MODEL = chosen
                 if _saved:
                     Config.PROVIDER = provider
+                    Config.API_KEY = _saved["key"]
                     Config.save_config()
                 Config.save_config()
                 print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
@@ -4274,9 +4278,8 @@ def cmd_provider_set(provider_name):
     print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
     
     needs_key = not Config.API_KEY and not prov.get("default_key")
-    is_openai = "openai" in provider_name or "openrouter" in provider_name
-    if needs_key and is_openai:
-        print(f"   {t['warn']}This provider requires an API key.{RST}")
+    if needs_key:
+        print(f"   {t['warn']}This provider may require an API key.{RST}")
         try:
             key = input(rl_prompt(f"   API key (or Enter to skip): ")).strip()
             if key:
