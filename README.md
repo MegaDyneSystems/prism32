@@ -64,6 +64,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
           - MACOS
           - FREEBSD / NETBSD / OPENBSD
           - MICROSOFT WINDOWS (PARTIAL SUPPORT)
+          - Android Termux
 
           NOTE: THE SYSTEM REQUIRES PYTHON VERSION 3.7 OR LATER.
 
@@ -96,9 +97,25 @@ D. OPERATOR INTERJECTION - DURING AI STREAMING, THE
      E. PLUGIN EXTENSION - EXTERNAL MODULES MAY REGISTER
         COMMANDS, PROVIDERS, THEMES, AND LIFECYCLE HOOKS.
 
-     F. SELF-EVOLVING MEMORY - THE SYSTEM TRACKS COMMAND
-        USAGE PATTERNS AND INJECTS CONTEXT INTO THE AI
-        SYSTEM PROMPT.
+F. SELF-EVOLVING MEMORY - THE SYSTEM TRACKS COMMAND
+         USAGE PATTERNS AND INJECTS CONTEXT INTO THE AI
+         SYSTEM PROMPT.
+
+     G. QUANTUM ENTANGLEMENT CONTEXT - AGENTS SHARE A
+         SYNCHRONIZED CONTEXT BUS.  THE CAPTAIN AGENT
+         DELEGATES TO SUBAGENT TEAMS; ALL AGENTS READ AND
+         WRITE TO A SHARED QUANTUM CONTEXT THAT IS
+         INJECTED INTO EVERY SYSTEM PROMPT.
+
+     H. PROMPTSHARD SYSTEM - MODULAR JOB ASSIGNMENT FILES
+         WITH STRUCTURED FIELDS: OBJECTIVE, AGENT TYPE,
+         MODEL CAPABILITIES, TOOLS, DOMAIN PROMPT,
+         SECRETS, AND STATUS.  SHARDS ARE TEMPORARY AND
+         EXPIRE ON COMPLETION.
+
+     I. PLUGIN COMMANDS IN EXECUTE BLOCKS - PLUGIN
+         COMMANDS LISTED IN BUILD_CONTEXT() AND CALLABLE
+         BY AI AGENTS THROUGH STANDARD EXECUTE BLOCKS.
 
 
                                                                PAGE 2
@@ -136,7 +153,7 @@ NOTE: FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY
 - PYTHON INTERPRETER, VERSION 3.7 OR LATER
            - NETWORK CONNECTION TO THE AI MODEL API ENDPOINT
            - BASH SHELL (FOR THE INSTALLER PROGRAM)
-
+           - Optional: Paramiko (for remote SSH functions)
 
                                                                PAGE 3
 PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
@@ -427,7 +444,9 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
            /THINKING     /MAXSTEPS     /SAVECFG   /LOADCFG
            /IMAGE        /SOUL         /AGENTNAME /ROOTPASS
            /STREAM       /TEMPERATURE  /TIMEOUT   /AUTOSAVE
-           /AUTO
+           /AUTO         /SHARD        /QUANTUM   /SCRAPE
+           /DELEGATE     /SPAWN        /SUBAGENTS /COLLECT
+           /SKILL-CREATE /SKILL-LIST   /SKILL-LOAD /SKILL-DELETE
 
 
                                                                PAGE 9
@@ -740,14 +759,94 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
               IF "PING" IN TEXT.LOWER():
                   API.INJECT_CONTEXT("(PING DETECTED)")
 
-          DEF CMD_HELLO(ARGS, HISTORY, CMD_LOG):
-              PRINT("HELLO, WORLD!")
+DEF CMD_HELLO(ARGS, HISTORY, CMD_LOG):
+               PRINT("HELLO, WORLD!")
+
+      10.4 PLUGIN COMMANDS IN EXECUTE BLOCKS
+
+           PLUGIN COMMANDS ARE LISTED IN THE AI SYSTEM PROMPT
+           AND CALLABLE VIA EXECUTE BLOCKS.  BUILT-IN PLUGIN:
+
+           WEB_SCRAPER (PLUGINS/WEB_SCRAPER.PY):
+             /SCRAPE <URL>         FETCH AND DISPLAY WEB CONTENT
+             AUTO-URL DETECTION    INJECTS SCRAPED TEXT WHEN URLS
+                                   ARE DETECTED IN OPERATOR INPUT
+             STDLIB ONLY           USES API.HTTP_GET(), NO PIP
 
 
-                                                               PAGE 17
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+11.0 QUANTUM ENTANGLEMENT SHARED CONTEXT
+     =====================================
 
-11.0 DIAGNOSTIC INFORMATION
+     A THREAD-SAFE KEY-VALUE STORE SYNCHRONIZING DATA BETWEEN
+     THE CAPTAIN AGENT AND ALL SUBAGENTS.  CONTEXT IS INJECTED
+     INTO EVERY SYSTEM PROMPT.  A "Q" INDICATOR APPEARS IN THE
+     STATUS BAR WHEN ACCESSED.
+
+     11.1 COMMANDS
+
+             /QUANTUM                  VIEW ALL KEYS
+             /QUANTUM <KEY>:<VALUE>    SET A KEY
+             /QUANTUM <KEY>:           GET A KEY
+
+     11.2 SUBAGENT ACCESS VIA EXECUTE BLOCKS
+
+             ```execute
+             /quantum target_url:https://example.com
+             ```
+
+     11.3 AUTO-SYNC
+
+             subagent:<id>:result    RESULT TEXT
+             subagent:<id>:task       ORIGINAL TASK
+             secret:<id>:<name>      APPROVED SECRETS
+
+
+12.0 PROMPTSHARD SYSTEM
+     ====================
+
+     PROMPTSHARD.MD (~/.PRISM32/PROMPTSHARD.MD) IS A MODULAR
+     JOB ASSIGNMENT FILE.  THE CAPTAIN AGENT READS THE SHARD
+     AND DEPLOYS SPECIALIZED SUBAGENT TEAMS.
+
+     12.1 FORMAT
+
+           # PROMPTSHARD: <ID>
+           ## OBJECTIVE: <GOAL>
+           ## AGENT: CAPTAIN|SPECIALIST
+           ## MODEL_CAPABILITIES: CHAT,VISION,3D,FAST
+           ## TOOLS: BASH,GIT,PYTHON3
+           ## PROMPT: |-
+             YOU ARE AN EXPERT IN <FIELD>.
+           ## SECRETS_REQUESTED: <NAME>
+           ## STATUS: ACTIVE|COMPLETED|EXPIRED
+
+     12.2 SECRETS VAULT
+
+        SECRETS STORED IN ~/.PRISM32/.SECRETS.JSON (SEPARATE
+        FROM THE PROMPT TO PREVENT INJECTION).
+
+             prism32> /shard secrets db_pass:mypassword
+
+     12.3 COMMANDS
+
+             /SHARD [SHOW]          DISPLAY CURRENT SHARD
+             /SHARD DEPLOY          SPAWN SUBAGENT FROM SHARD
+             /SHARD COMPLETE        MARK AS DONE
+             /SHARD SET <K>:<V>    UPDATE A FIELD
+             /SHARD SECRETS         MANAGE SECRETS VAULT
+
+     12.4 CAPTAIN AGENT TEAMS
+
+        THE CAPTAIN COORDINATES SPECIALIST TEAMS:
+
+           CAPTAIN
+              |-- /DELEGATE SCAN PORTS   (SUBAGENT A)
+              |-- /SPAWN WRITE REPORT    (SUBAGENT B)
+              V
+           QUANTUM SYNC -> /COLLECT A, B -> RESULTS
+
+
+13.0 DIAGNOSTIC INFORMATION
      =======================
 
      11.1 LOG FILES
@@ -857,16 +956,18 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 14.0 INDEX
      =======
 
-     - A -
+- A -
 
      ACTIVE TASK MODE .................... 10
      API ENDPOINT ........................ 13, 14
      API KEY ............................. 11, 13
+     AUTOMATION SYSTEM ................... 9
      AUTONOMOUS GOAL MODE ................ 9
      AUTO-SAVE INTERVAL .................. 13
 
      - C -
 
+     CAPTAIN AGENT TEAMS ................. 11, 12
      COLOR THEMES ........................ 12
      COMMAND LINE PARAMETERS ............. 11
      CONFIGURATION FILE .................. 13
@@ -888,7 +989,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      - I -
 
      INSTALLATION ........................ 3
-INTERJECT, OPERATOR ................. 10
+     INTERJECT, OPERATOR ................. 10
 
      - L -
 
@@ -905,7 +1006,13 @@ INTERJECT, OPERATOR ................. 10
      - P -
 
      PLUGINS ............................. 15
+     PLUGIN COMMANDS IN EXECUTE BLOCKS .. 15
+     PROMPTSHARD SYSTEM .................. 12
      PROVIDER CONFIGURATION .............. 14
+
+     - Q -
+
+     QUANTUM ENTANGLEMENT CONTEXT ....... 11
 
      - R -
 
@@ -913,9 +1020,12 @@ INTERJECT, OPERATOR ................. 10
 
      - S -
 
+     SCRAPE COMMAND ...................... 15
+     SECRETS VAULT ....................... 12
      SESSION MANAGEMENT .................. 7
      SHELL COMMAND EXECUTION ............. 7
      SLOW-CPU MODE .................... 11, 13
+     SUBAGENTS ........................... 10
      SYSTEM MESSAGES ..................... 19
 
      - T -
