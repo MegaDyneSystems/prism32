@@ -446,6 +446,7 @@ echo ""
 sub "Skills:     $SKILLS_DIR"
 sub "Plugin dir: $PLUGINS_DIR"
 sub "Sessions:   $SESSIONS_DIR"
+sub "Soul:       $RUNTIME_DIR/soul.md"
 sub "Config:     $CONFIG_FILE"
 sub "Log:        $LOG_FILE"
 

@@ -86,9 +86,12 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 D. OPERATOR INTERJECTION - DURING AI STREAMING, THE
          OPERATOR MAY TYPE AT ANY TIME.  THE PROMPT CHANGES
          TO "INTERJECT>" AND THE TYPED TEXT APPEARS IN THE
-         FOOTER.  PRESSING ENTER INTERRUPTS THE AI AND SENDS
-         THE MESSAGE AS NEW INPUT.  BACKSPACE AND CTRL-C
-         ARE SUPPORTED.
+         FOOTER.  THE LEFT/RIGHT ARROW KEYS MOVE THE CURSOR
+         WITHIN THE TEXT.  THE UP/DOWN ARROW KEYS CYCLE
+         THROUGH PREVIOUS INTERJECTIONS.  PRESSING ENTER
+         INTERRUPTS THE AI AND SENDS THE MESSAGE AS NEW
+         INPUT.  BACKSPACE, HOME, END, AND CTRL-C ARE
+         SUPPORTED.
 
      E. PLUGIN EXTENSION - EXTERNAL MODULES MAY REGISTER
         COMMANDS, PROVIDERS, THEMES, AND LIFECYCLE HOOKS.
@@ -267,17 +270,18 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      4.2  MANUAL TOOLS
 
-     +----------------------------------------------------------+
-     | COMMAND      | FUNCTION                                  |
-     |--------------+-------------------------------------------|
-     | BASH (CMD)   | EXECUTE A SHELL COMMAND                   |
-     | EDIT (F,TEXT)| APPEND TEXT TO A FILE                     |
-     | CAT (FILE)   | DISPLAY FILE CONTENTS                     |
-     | LS (PATH)    | LIST DIRECTORY CONTENTS                   |
-     | FIND (PAT)   | SEARCH FOR FILES BY NAME                  |
-     | GREP (P,F)   | SEARCH FILE CONTENTS                      |
-     | GIT          | GIT STATUS AND DIFF SUMMARY               |
-     +----------------------------------------------------------+
++----------------------------------------------------------+
+      | COMMAND      | FUNCTION                                  |
+      |--------------+-------------------------------------------|
+      | BASH (CMD)   | EXECUTE A SHELL COMMAND                   |
+      | EDIT (F,TEXT)| APPEND TEXT TO A FILE                     |
+      | CAT (FILE)   | DISPLAY FILE CONTENTS                     |
+      | LS (PATH)    | LIST DIRECTORY CONTENTS                   |
+      | FIND (PAT)   | SEARCH FOR FILES BY NAME                  |
+      | GREP (P,F)   | SEARCH FILE CONTENTS                      |
+      | GIT          | GIT STATUS AND DIFF SUMMARY               |
+      | IMAGE (P)    | SEND IMAGE TO AI (FILE OR URL)            |
+      +----------------------------------------------------------+
 
      4.3  SYSTEM INFORMATION
 
@@ -332,6 +336,8 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
       | AUTOSAVE (N) | SET AUTO-SAVE INTERVAL IN SECONDS         |
       | AGENTNAME (N)| SET DISPLAY NAME FOR AI ASSISTANT         |
       | ROOTPASS (P) | SET ROOT PASSWORD FOR SU/SUDO COMMANDS    |
+      | SOUL (OPTS)  | MANAGE PERSISTENT CUSTOM RULES            |
+      |              | (SHOW/SET/APPEND/CLEAR/EDIT)              |
       +----------------------------------------------------------+
 
      4.6  SYSTEM
@@ -343,12 +349,14 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      | QUIT         | TERMINATE THE PROGRAM                     |
      +----------------------------------------------------------+
 
-     4.7  SLASH COMMANDS
+4.7  SLASH COMMANDS
 
-          /HELP         /QUIT         /GOAL      /THEME
-          /MODEL        /PROVIDER     /PLUGINS   /DEBUG
-          /LOG          /CONFIG       /MEMORY    /MEMCTX
-          /THINKING     /MAXSTEPS     /SAVECFG   /LOADCFG
+           /HELP         /QUIT         /GOAL      /THEME
+           /MODEL        /PROVIDER     /PLUGINS   /DEBUG
+           /LOG          /CONFIG       /MEMORY    /MEMCTX
+           /THINKING     /MAXSTEPS     /SAVECFG   /LOADCFG
+           /IMAGE        /SOUL         /AGENTNAME /ROOTPASS
+           /STREAM       /TEMPERATURE  /TIMEOUT   /AUTOSAVE
 
 
                                                                PAGE 9
@@ -409,8 +417,12 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
            DURING AI STREAMING, THE OPERATOR MAY TYPE AT ANY
            TIME.  THE PROMPT CHANGES TO "INTERJECT>" AND THE
            TYPED TEXT APPEARS IN THE FOOTER, SEPARATE FROM
-           THE AI OUTPUT.  PRESSING ENTER INTERRUPTS THE AI
-           AND SENDS THE MESSAGE AS NEW INPUT.  BACKSPACE
+           THE AI OUTPUT.  THE LEFT/RIGHT ARROW KEYS MOVE
+           THE CURSOR WITHIN THE TEXT.  THE UP/DOWN ARROW
+           KEYS CYCLE THROUGH PREVIOUS INTERJECTIONS.
+           HOME AND END JUMP TO THE START OR END OF THE
+           TEXT.  PRESSING ENTER INTERRUPTS THE AI AND
+           SENDS THE MESSAGE AS NEW INPUT.  BACKSPACE
            AND CTRL-C ARE SUPPORTED.
 
       5.5.2  SESSION RESUME
