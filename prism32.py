@@ -297,6 +297,31 @@ class _PluginHooks:
 _plugin_apis = {}
 _PluginAPI_placeholder = object()
 
+def _load_plugin_file(mod_path, mod_name=None, quiet=False):
+    """Load one plugin file and register its commands/hooks."""
+    mod_name = mod_name or os.path.splitext(os.path.basename(mod_path))[0]
+    if mod_name in _PLUGINS:
+        return True, f"Already loaded: {mod_name}"
+    try:
+        spec = importlib.util.spec_from_file_location(mod_name, mod_path)
+        if not spec or not spec.loader:
+            return False, f"Could not create plugin spec: {mod_path}"
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        api = PluginAPI(mod_name)
+        _plugin_apis[mod_name] = api
+        if hasattr(mod, "register"):
+            mod.register(api)
+        _PluginHooks.register_plugin(mod, api)
+        _PLUGINS[mod_name] = mod
+        if not quiet:
+            print(f"  [plugin] Loaded: {mod_name}")
+        return True, f"Loaded: {mod_name}"
+    except Exception as e:
+        if not quiet:
+            print(f"  [plugin] Error loading {mod_name}: {e}")
+        return False, f"Error loading {mod_name}: {e}"
+
 def load_plugins():
     """Load external command plugins from ~/.prism32/plugins/.
     Uses importlib.util to load from file path (no sys.path manipulation needed)."""
@@ -305,22 +330,8 @@ def load_plugins():
         return
     for f in sorted(os.listdir(PLUGIN_DIR)):
         if f.endswith(".py") and not f.startswith("_"):
-            mod_name = f[:-3]
             mod_path = os.path.join(PLUGIN_DIR, f)
-            try:
-                spec = importlib.util.spec_from_file_location(mod_name, mod_path)
-                if spec and spec.loader:
-                    mod = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(mod)
-                    api = PluginAPI(mod_name)
-                    _plugin_apis[mod_name] = api
-                    if hasattr(mod, "register"):
-                        mod.register(api)
-                    _PluginHooks.register_plugin(mod, api)
-                    _PLUGINS[mod_name] = mod
-                    print(f"  [plugin] Loaded: {mod_name}")
-            except Exception as e:
-                print(f"  [plugin] Error loading {mod_name}: {e}")
+            _load_plugin_file(mod_path, mod_name=f[:-3])
 
 # ── Self-Evolving Memory System ─────────────────────────────
 # Small persistent file (~/.prism32/memory.json) that tracks
@@ -898,7 +909,13 @@ Useful PluginAPI fields:
 - api.http_get(url, headers=None, timeout=10)
 - api.http_post(url, data=None, headers=None, timeout=10)
 - api.config, api.memory, api.history, api.plugins
-- Hooks: on_boot, on_shutdown, on_message, on_response, on_command, on_tick
+- Hooks used in normal operation: on_boot, on_message, on_command, on_tick
+
+## Self-Extension
+
+Use /extend temp <goal> to have Prism32 generate, syntax-check, write, and load a temporary plugin for a missing capability. Use /extend permanent <goal> only when the operator explicitly wants the plugin to load on future startups.
+
+Use /extend prompt to print a pasteable plugin-generation prompt for another AI chatbot.
 
 ## Harness Absorption
 
@@ -998,6 +1015,210 @@ def write_evolve_plugin(kind, name):
     if not os.path.exists(path):
         _safe_write(path, evolve_plugin_template(safe))
     return path
+
+def plugin_cheat_sheet_text():
+    return textwrap.dedent("""\
+    You are writing a Prism32 plugin.
+
+    Goal: create one small, useful extension for the operator's requested task.
+
+    Output rules:
+    - Return ONLY Python source code. No Markdown fences. No explanation.
+    - Use Python 3.7+ standard library only. No pip dependencies.
+    - Do not hardcode API keys, passwords, private hostnames, or secrets.
+    - Do not perform network, filesystem, subprocess, or destructive work at import time.
+    - Put side effects only inside registered command handlers or explicit hooks.
+    - Define a USAGE_CONTEXT string that explains every command/option the plugin adds.
+    - Add def on_boot(api): api.inject_context(USAGE_CONTEXT) so Prism32 agents know how to use it.
+    - Prefer lowercase command names with hyphens, such as "weather" or "repo-report".
+    - Handler signature: def handler(args_str, history, cmd_log):
+    - Use print() for command output. Use api.log() for diagnostics.
+    - Keep the plugin self-contained in one file.
+    - If an operation can modify or delete data, require explicit command arguments.
+
+    Required shape:
+
+    USAGE_CONTEXT = (
+        "Plugin available:\n"
+        "- /my-command <args>: what it does, its options, and when agents should use it.\n"
+    )
+
+    def register(api):
+        def my_command(args_str, history, cmd_log):
+            print("ready")
+        api.registry.register("my-command", my_command, description="Short description")
+
+    def on_boot(api):
+        api.inject_context(USAGE_CONTEXT)
+
+    Available PluginAPI:
+    - api.registry.register(name, handler, aliases=[], description="", category="", hidden=False)
+    - api.registry.dispatch_capture(name, args_str) -> str or None
+    - api.register_provider(id, **config)
+    - api.register_theme(name, **colors)
+    - api.config: runtime config class
+    - api.memory: memory dict
+    - api.history: current session history
+    - api.inject_context(text): add context to future AI prompts
+    - api.schedule(interval_sec, callback): run periodic callback
+    - api.http_get(url, headers=None, timeout=10) -> str
+    - api.http_post(url, data=None, headers=None, timeout=10) -> str
+    - api.log(text): diagnostic output
+    - api.plugins: loaded plugin modules
+
+    Optional hooks:
+    - def on_boot(api): called after startup initialization
+    - def on_message(api, text): called for operator input
+    - def on_command(api, name, args, result): called for slash commands; result is currently None
+    - def on_tick(api): called about every 5 seconds while Prism32 is running
+
+    Good plugin ideas:
+    - add a focused slash command for a repeated workflow
+    - parse and summarize local files
+    - call a simple HTTP API with api.http_get()
+    - inject task-specific context with api.inject_context()
+    - add a provider or theme
+    - create a report generator, log parser, release checklist, inventory scanner, or API helper
+    """).strip()
+
+def _extension_plugin_name(goal):
+    words = re.findall(r"[a-zA-Z0-9]+", goal.lower())[:6]
+    base = "_".join(words) or "extension"
+    digest = hashlib.sha1(goal.encode("utf-8", errors="replace")).hexdigest()[:8]
+    return _sanitize_plugin_name(f"auto_{base}_{digest}")[:64]
+
+def _extract_python_source(text):
+    text = (text or "").strip()
+    if not text:
+        return ""
+    fenced = re.search(r"```(?:python|py)\s*\n(.*?)```", text, flags=re.IGNORECASE | re.DOTALL)
+    if not fenced:
+        fenced = re.search(r"```\s*\n(.*?)```", text, flags=re.DOTALL)
+    if fenced:
+        text = fenced.group(1).strip()
+    # Some models still prefix a short sentence before code. Keep from the first
+    # import or function definition if that makes the response look like source.
+    markers = [m.start() for m in re.finditer(r"(?m)^(import |from |def |class )", text)]
+    if markers and markers[0] > 0:
+        text = text[markers[0]:].strip()
+    return text.rstrip() + "\n" if text else ""
+
+def _validate_plugin_source(source, path):
+    if not source.strip():
+        return "Model returned no Python source."
+    if not re.search(r"def\s+register\s*\(", source):
+        return "Plugin must define register(api)."
+    try:
+        compile(source, path, "exec")
+    except SyntaxError as e:
+        return f"Syntax error on line {e.lineno}: {e.msg}"
+    except Exception as e:
+        return f"Compile failed: {e}"
+    return None
+
+def _extend_plugin_prompt(goal, safe_name, cmd_name, kind):
+    return [
+        {"role": "system", "content": plugin_cheat_sheet_text()},
+        {"role": "user", "content": textwrap.dedent(f"""\
+        Create a Prism32 plugin for this goal:
+        {goal}
+
+        Plugin file basename: {safe_name}
+        Suggested primary slash command: /{cmd_name}
+        Persistence mode: {kind}
+
+        Make it useful immediately after loading. Register at least one command.
+        Return only Python source code.
+        """).strip()},
+    ]
+
+def _extend_result_rebuild_context(history):
+    if history:
+        try:
+            history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
+        except Exception:
+            pass
+
+def extend_with_plugin(args_str, history=None):
+    raw = (args_str or "").strip()
+    if not raw:
+        return (
+            "Usage:\n"
+            "  /extend <goal>                  Generate/load a temporary plugin\n"
+            "  /extend temp <goal>             Generate/load a temporary plugin\n"
+            "  /extend permanent <goal>        Generate/load a persistent plugin\n"
+            "  /extend load <path>             Load an existing plugin file\n"
+            "  /extend prompt                  Show pasteable plugin prompt"
+        )
+
+    head, _, rest = raw.partition(" ")
+    head_l = head.lower()
+    if head_l in ("prompt", "cheat", "cheatsheet", "cheat-sheet"):
+        return plugin_cheat_sheet_text()
+
+    if head_l in ("load", "reload"):
+        path = os.path.expanduser(rest.strip())
+        if not path:
+            return "Usage: /extend load <path>"
+        if not os.path.isfile(path):
+            return f"[EXTEND FAILED] Plugin file not found: {path}"
+        before = registry.names()
+        safe_name = _sanitize_plugin_name(os.path.splitext(os.path.basename(path))[0])
+        ok, msg = _load_plugin_file(path, mod_name=safe_name, quiet=True)
+        if not ok:
+            return f"[EXTEND FAILED] {msg}"
+        _extend_result_rebuild_context(history)
+        new_cmds = sorted(registry.names() - before)
+        commands = ", ".join("/" + c for c in new_cmds) or "(no new commands registered)"
+        return f"[EXTENSION LOADED]\nPlugin: {path}\nCommands: {commands}"
+
+    if head_l in ("permanent", "perm", "persist", "persistent", "save"):
+        kind = "permanent"
+        goal = rest.strip()
+    elif head_l in ("temp", "temporary", "scratch"):
+        kind = "temp"
+        goal = rest.strip()
+    else:
+        kind = "temp"
+        goal = raw
+    if not goal:
+        return f"Usage: /extend {kind} <goal>"
+
+    ensure_evolve_files(refresh_tools=False)
+    safe_name = _extension_plugin_name(goal)
+    cmd_name = safe_name.replace("_", "-")
+    directory = PLUGIN_DIR if kind == "permanent" else EVOLVE_TEMP_PLUGIN_DIR
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, safe_name + ".py")
+
+    messages = _extend_plugin_prompt(goal, safe_name, cmd_name, kind)
+    response = ask_ai_cancelable(messages, history=history)
+    if response == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
+        return AGENT_CANCELLED_RESPONSE
+
+    source = _extract_python_source(response)
+    err = _validate_plugin_source(source, path)
+    if err:
+        failed_path = os.path.join(EVOLVE_TEMP_PLUGIN_DIR, safe_name + ".failed.txt")
+        _safe_write(failed_path, response or "")
+        return f"[EXTEND FAILED] {err}\nRaw model response saved: {failed_path}"
+
+    _safe_write(path, source)
+    before = registry.names()
+    ok, msg = _load_plugin_file(path, mod_name=safe_name, quiet=True)
+    if not ok:
+        return f"[EXTEND FAILED] {msg}\nPlugin source saved: {path}"
+    _extend_result_rebuild_context(history)
+    new_cmds = sorted(registry.names() - before)
+    commands = ", ".join("/" + c for c in new_cmds) or "(no new commands registered)"
+    lifetime = "loads on startup" if kind == "permanent" else "loaded for this Prism32 process"
+    return (
+        "[EXTENSION LOADED]\n"
+        f"Mode: {kind} ({lifetime})\n"
+        f"Goal: {goal}\n"
+        f"Plugin: {path}\n"
+        f"Commands: {commands}"
+    )
 
 # ── Soul (persistent custom rules) ────────────────────────────
 
@@ -4107,7 +4328,7 @@ def _cmd_succeeded(result):
     low = (result or "").lower()[:60]
     return not any(w in low for w in ["error", "blocked", "timeout", "failed", "not found", "cancelled"])
 
-def _try_plugin_cmd(c):
+def _try_plugin_cmd(c, history=None):
     """Check if c is a plugin command and dispatch it, returning result or None."""
     c_stripped = c.strip()
     cmd_name = c_stripped.split(None, 1)[0].lower()
@@ -4146,6 +4367,8 @@ def _try_plugin_cmd(c):
             ensure_evolve_files(refresh_tools=False)
             return _safe_read(EVOLVE_DOC_FILE)[:4000]
         return evolve_context()
+    if cmd_name in ('/extend', 'extend'):
+        return extend_with_plugin(cmd_args, history=history)
     if cmd_name in ('/memory', 'memory'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "startup"
         if sub in ("path", "paths"):
@@ -4414,7 +4637,7 @@ class SubAgent:
                         self._history.append({"role": "assistant", "content": resp})
                     for c in commands:
                         c = c.strip()
-                        plugin_result = _try_plugin_cmd(c)
+                        plugin_result = _try_plugin_cmd(c, history=self._history)
                         if plugin_result is not None:
                             result = plugin_result.strip()
                         else:
@@ -4508,6 +4731,7 @@ Use /subagents to list running or completed subagents.
 Skills are reusable workflows stored in ~/.prism32/skills/. Use /skill-list to see them and /skill-load <name> to activate a skill's instructions in context.
 Use /harness scan to detect external AI agent CLIs and /harness delegate <task> to launch a super subagent seeded with those capabilities.
 Use /evolve on when Prism32 needs self-repair/plugin-generation docs, baseline comparison, and local tool exploration.
+Use /extend temp <goal> when a missing reusable capability would help complete the task. This generates, syntax-checks, writes, and loads a temporary Prism32 plugin. Use /extend permanent <goal> only when the operator explicitly asks for a persistent extension. Prefer plugin self-extension over editing prism32.py; edit core code only when the requested change cannot be solved as a plugin.
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
@@ -5032,7 +5256,7 @@ def cmd_goal(goal_text, history, cmd_log):
 
 # ── Dynamic command names ──────────────────────────────────
 _ALL_CMDS = registry.names() | {
-    'agentname', 'api', 'apikey', 'arch', 'autosave', 'bash', 'cat', 'clear', 'collect', 'config', 'debug', 'delegate', 'delete', 'edit', 'evolve', 'exit', 'export', 'find', 'forget', 'git', 'goal', 'grep', 'harness', 'help', 'history', 'key', 'load', 'loadcfg', 'log', 'ls', 'maxhistory', 'maxsteps', 'maxtokens', 'memories', 'memory', 'model', 'net', 'ports', 'procs', 'provider', 'providers', 'q', 'quantum', 'quit', 'recall', 'remember', 'resume', 'rootpass', 'sam', 'save', 'savecfg', 'session', 'sessions', 'skill-create', 'skill-delete', 'skill-list', 'skill-load', 'spawn', 'stream', 'subagent-model', 'subagents', 'sysinfo', 'temperature', 'theme', 'thinking', 'timeout', 'update', 'usage', 'plugins'
+    'agentname', 'api', 'apikey', 'arch', 'autosave', 'bash', 'cat', 'clear', 'collect', 'config', 'debug', 'delegate', 'delete', 'edit', 'evolve', 'extend', 'exit', 'export', 'find', 'forget', 'git', 'goal', 'grep', 'harness', 'help', 'history', 'key', 'load', 'loadcfg', 'log', 'ls', 'maxhistory', 'maxsteps', 'maxtokens', 'memories', 'memory', 'model', 'net', 'ports', 'procs', 'provider', 'providers', 'q', 'quantum', 'quit', 'recall', 'remember', 'resume', 'rootpass', 'sam', 'save', 'savecfg', 'session', 'sessions', 'skill-create', 'skill-delete', 'skill-list', 'skill-load', 'spawn', 'stream', 'subagent-model', 'subagents', 'sysinfo', 'temperature', 'theme', 'thinking', 'timeout', 'update', 'usage', 'plugins'
 , 'memctx', 'memory'
 }
 
@@ -5042,6 +5266,8 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
  {bold}AI Interaction{reset}
    <anything>           Talk to AI - it runs commands automatically
    /goal <task>         Autonomous multi-step goal mode
+   /extend <goal>       AI-generate/load a temporary plugin
+   /extend permanent <g> AI-generate/load persistent plugin
 
  {bold}Configuration{reset}
    /agentname <name>    Set the name shown before assistant responses
@@ -5099,7 +5325,8 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
     /plugins             List loaded plugins
     /soul [show|set|...]  Manage persistent custom rules (soul.md)
     /harness [scan]      Detect external AI agent harness CLIs
-    /evolve [on|docs]    Self-repair docs, baseline, tool scan mode
+     /evolve [on|docs]    Self-repair docs, baseline, tool scan mode
+     /extend prompt       Pasteable plugin-generation prompt
     /update [dir]        Git pull + reinstall from project directory
    /help                This help
    /quit                Exit
@@ -5600,6 +5827,17 @@ def cmd_evolve(args_str, history, cmd_log):
             print(f"  {t['dim']}Restart Prism32 or run /plugins after restart to load it.{RST}")
         return
     print("  Usage: /evolve [on|off|status|docs|context|tools|diff|baseline|plugin]")
+
+def cmd_extend(args_str, history, cmd_log):
+    t = T()
+    result = extend_with_plugin(args_str, history=history)
+    if result == AGENT_CANCELLED_RESPONSE:
+        box("STOPPED", agent_cancel_message(), "warn")
+        clear_agent_cancel()
+        return
+    color = "err" if result.startswith("[EXTEND FAILED]") else "accent"
+    title = "EXTEND FAILED" if color == "err" else "EXTEND"
+    box(title, result, color)
 
 # ── Main Loop ────────────────────────────────────────────────
 
@@ -6590,6 +6828,11 @@ def main():
             print()
             continue
 
+        if cmd == 'extend':
+            cmd_extend(args_str, history, cmd_log)
+            print()
+            continue
+
         # ── Subagent commands ──
         if cmd == 'delegate':
             if args_str:
@@ -6963,7 +7206,7 @@ def main():
                         for c in commands:
                             c = c.strip()
                             print(f"\n  {T()['warn']}>{c}{RST}")
-                            plugin_result = _try_plugin_cmd(c)
+                            plugin_result = _try_plugin_cmd(c, history=history)
                             if plugin_result is not None:
                                 result = plugin_result.strip()
                             else:
@@ -7051,7 +7294,7 @@ def main():
                 for c in commands:
                     c = c.strip()
                     viz.tool_call("execute", c)
-                    plugin_result = _try_plugin_cmd(c)
+                    plugin_result = _try_plugin_cmd(c, history=history)
                     if plugin_result is not None:
                         result = plugin_result.strip()
                     else:
