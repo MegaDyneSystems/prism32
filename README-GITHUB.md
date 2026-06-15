@@ -141,6 +141,14 @@ NVIDIA targets:
 - OpenHAB, Domoticz, Homebridge: Linux hosts with Python 3.7+ installed.
 - Marlin, Duet, ESPHome, Tasmota: MCU/appliance devices. Point Prism32 at the companion Linux host on the same network.
 
+Devices you can control with Prism32 on a companion Linux host:
+
+- Robot vacuums: Roomba, Roborock, Dreame, Ecovacs (via Home Assistant, Valetudo, or REST).
+- Zigbee/Z-Wave: lights, switches, sensors, locks, thermostats (via Zigbee2MQTT, Z-Wave JS).
+- IP cameras, smart speakers, garage controllers, irrigation, energy monitors.
+- Shelly, Sonoff, Tasmota devices over HTTP/MQTT.
+- Prism32 runs on the coordinator host. Use it to write automations, debug MQTT, query device APIs, and script multi-device routines. Use /extend for device-specific plugins.
+
 Best-effort targets include containers, ChromeOS/Crostini, Proxmox, TrueNAS, pfSense, OPNsense, OpenWrt/BusyBox, NAS appliances, Solaris/SunOS/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX, MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, and OpenVMS where compatible Python exists.
 
 Architecture labels include x86/x64, ARM, RISC-V, LoongArch, PowerPC/POWER, MIPS, SPARC, S/390x/IBM Z, Alpha, PA-RISC, Itanium, Elbrus, VAX, and SGI MIPS.

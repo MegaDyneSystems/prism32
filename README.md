@@ -206,6 +206,15 @@ Smart home and IoT hub systems:
 - Raspberry Pi OS and Raspbian are already covered as standard Linux targets.
 - Use startup memory to record MQTT brokers, Zigbee2MQTT paths, API tokens, device lists, and automation names so the agent can help debug, script, and monitor.
 
+Robot vacuums, IoT devices, and automation hardware:
+
+- iRobot Roomba, Roborock, Dreame, Ecovacs, and other Wi-Fi vacuums are typically controlled through Home Assistant, Valetudo, or REST APIs. Prism32 can run on the same Linux host that manages these devices.
+- Zigbee and Z-Wave hardware (lights, switches, sensors, locks, thermostats, blinds) managed through Zigbee2MQTT, Z-Wave JS, or deCONZ.
+- IP cameras (RTSP/ONVIF), smart speakers, smart displays, garage door controllers, irrigation systems, and energy monitors.
+- Shelly, Sonoff, and Tasmota-flashed devices accessible over HTTP/MQTT.
+- Prism32 does not run on the vacuum, lightbulb, or sensor itself. It runs on the Linux host, Home Assistant box, or Raspberry Pi that coordinates them. The AI can then help write automations, debug MQTT flows, query device APIs, generate dashboards, or script multi-device routines.
+- Use /extend to create plugins for specific device APIs. Use startup memory and /remember to store device names, IPs, MQTT topics, and common automation patterns.
+
 Best-effort targets and environment classes:
 
 - ChromeOS/Crostini
