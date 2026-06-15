@@ -24,6 +24,7 @@ import math
 import base64
 import threading
 stdout_lock = threading.Lock()
+import queue
 import hashlib
 import importlib.util
 try:
@@ -360,6 +361,10 @@ _INTERJECTION_ESCAPE_BUF = ""
 _INTERJECTION_HISTORY = []
 _INTERJECTION_HISTORY_IDX = -1
 _INTERJECTION_SAVED_BUF = ""
+_INTERJECTION_CANCEL = object()
+AGENT_CANCELLED_RESPONSE = "[CANCELLED] Agent stopped by Escape"
+_AGENT_CANCEL_REQUESTED = False
+_AGENT_CANCEL_REASON = ""
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -3111,6 +3116,25 @@ def read_footer_input(status_bar):
 
 # ── Interjection (type while AI streams) ─────────────────────
 
+def request_agent_cancel(reason="Agent stopped by Escape", cancel_event=None):
+    global _AGENT_CANCEL_REQUESTED, _AGENT_CANCEL_REASON
+    _AGENT_CANCEL_REQUESTED = True
+    _AGENT_CANCEL_REASON = reason
+    if cancel_event is not None:
+        cancel_event.set()
+    return _INTERJECTION_CANCEL
+
+def clear_agent_cancel():
+    global _AGENT_CANCEL_REQUESTED, _AGENT_CANCEL_REASON
+    _AGENT_CANCEL_REQUESTED = False
+    _AGENT_CANCEL_REASON = ""
+
+def agent_cancel_requested(cancel_event=None):
+    return _AGENT_CANCEL_REQUESTED or (cancel_event is not None and cancel_event.is_set())
+
+def agent_cancel_message():
+    return _AGENT_CANCEL_REASON or "Agent stopped by Escape"
+
 def _interjection_start():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
     _INTERJECTION_ACTIVE = False
@@ -3177,16 +3201,20 @@ def _interjection_poll():
                 if _INTERJECTION_HAS_TYPED:
                     _draw_interjection_footer()
                 return None
+            if data == b'\x1b':
+                return request_agent_cancel()
             text = data.decode('utf-8', errors='replace')
             for ch in text:
                 if _INTERJECTION_ESCAPE:
                     _INTERJECTION_ESCAPE_BUF += ch
                     seq = _INTERJECTION_ESCAPE_BUF
                     b = ord(ch)
+                    if seq in ('[', 'O'):
+                        continue
                     if 0x40 <= b <= 0x7E or ch == '~':
                         _INTERJECTION_ESCAPE = False
                         _INTERJECTION_ESCAPE_BUF = ""
-                        if seq == '[A':  # Up
+                        if seq in ('[A', 'OA'):  # Up
                             if _INTERJECTION_HISTORY:
                                 if _INTERJECTION_HISTORY_IDX == -1:
                                     _INTERJECTION_SAVED_BUF = _INTERJECTION_BUF
@@ -3196,7 +3224,7 @@ def _interjection_poll():
                                 _INTERJECTION_BUF = _INTERJECTION_HISTORY[_INTERJECTION_HISTORY_IDX]
                                 _INTERJECTION_CURSOR = len(_INTERJECTION_BUF)
                                 _INTERJECTION_HAS_TYPED = True
-                        elif seq == '[B':  # Down
+                        elif seq in ('[B', 'OB'):  # Down
                             if _INTERJECTION_HISTORY and _INTERJECTION_HISTORY_IDX >= 0:
                                 _INTERJECTION_HISTORY_IDX += 1
                                 if _INTERJECTION_HISTORY_IDX >= len(_INTERJECTION_HISTORY):
@@ -3206,10 +3234,10 @@ def _interjection_poll():
                                     _INTERJECTION_BUF = _INTERJECTION_HISTORY[_INTERJECTION_HISTORY_IDX]
                                 _INTERJECTION_CURSOR = len(_INTERJECTION_BUF)
                                 _INTERJECTION_HAS_TYPED = True
-                        elif seq == '[C':  # Right
+                        elif seq in ('[C', 'OC'):  # Right
                             _INTERJECTION_CURSOR = min(len(_INTERJECTION_BUF), _INTERJECTION_CURSOR + 1)
                             _INTERJECTION_HAS_TYPED = True
-                        elif seq == '[D':  # Left
+                        elif seq in ('[D', 'OD'):  # Left
                             _INTERJECTION_CURSOR = max(0, _INTERJECTION_CURSOR - 1)
                             _INTERJECTION_HAS_TYPED = True
                         elif seq == '[H':  # Home
@@ -3300,6 +3328,67 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
         indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
         parts.append(f" {indicator}")
     return "".join(parts)
+
+def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=None):
+    """Run a blocking foreground operation while Escape can stop waiting for it."""
+    if threading.current_thread() is not threading.main_thread():
+        return fn()
+    if select is None or sys.platform == 'win32':
+        return fn()
+
+    clear_agent_cancel()
+    if cancel_event is None:
+        cancel_event = threading.Event()
+    result_q = queue.Queue(maxsize=1)
+
+    def _target():
+        try:
+            result_q.put((True, fn()))
+        except BaseException as e:
+            result_q.put((False, e))
+
+    _interjection_start()
+    worker = threading.Thread(target=_target, daemon=True)
+    worker.start()
+    frame = 0
+    last_draw = 0
+    try:
+        while worker.is_alive():
+            inj = _interjection_poll()
+            if inj is _INTERJECTION_CANCEL or agent_cancel_requested(cancel_event):
+                request_agent_cancel(cancel_event=cancel_event)
+                return AGENT_CANCELLED_RESPONSE
+            if inj is not None:
+                request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
+                return None
+            now = time.monotonic()
+            if now - last_draw >= 0.12:
+                with stdout_lock:
+                    if _footer_reserved:
+                        spin = activity_vector(history=history, frame=frame, busy=True)
+                        draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=spin)
+                    else:
+                        t = T()
+                        char = activity_vector(frame=frame, busy=True)
+                        sys.stdout.write(f"\r\033[K {t['dim']}{char} {message}...{RST}")
+                        sys.stdout.flush()
+                frame += 1
+                last_draw = now
+            time.sleep(0.03)
+        ok, value = result_q.get_nowait()
+        if ok:
+            return value
+        raise value
+    finally:
+        _interjection_stop()
+
+def ask_ai_cancelable(messages, history=None):
+    cancel_event = threading.Event()
+    return run_cancelable_blocking(
+        lambda: ask_ai(messages, stream=False, cancel_event=cancel_event),
+        history=history,
+        cancel_event=cancel_event,
+    )
 
 # ── Box Drawing ──────────────────────────────────────────────
 
@@ -4016,7 +4105,7 @@ def _pty_su_root(cmd, timeout=None):
 def _cmd_succeeded(result):
     """Check if a command result indicates success."""
     low = (result or "").lower()[:60]
-    return not any(w in low for w in ["error", "blocked", "timeout", "failed", "not found"])
+    return not any(w in low for w in ["error", "blocked", "timeout", "failed", "not found", "cancelled"])
 
 def _try_plugin_cmd(c):
     """Check if c is a plugin command and dispatch it, returning result or None."""
@@ -4066,12 +4155,104 @@ def _try_plugin_cmd(c):
         return registry.dispatch_capture(cmd_name, cmd_args)
     return None
 
+def _tail_cmd_output(out):
+    text = bytes(out).decode(errors="replace") if isinstance(out, bytearray) else str(out)
+    return text[-4000:] if len(text) > 4000 else text
+
+def _terminate_process(proc):
+    try:
+        if os.name == 'posix' and hasattr(os, 'killpg'):
+            os.killpg(proc.pid, signal.SIGTERM)
+        else:
+            proc.terminate()
+    except Exception:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    try:
+        proc.wait(timeout=1)
+    except Exception:
+        try:
+            if os.name == 'posix' and hasattr(os, 'killpg'):
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except Exception:
+            pass
+
+def _can_cancel_foreground_input():
+    if select is None or sys.platform == 'win32':
+        return False
+    if threading.current_thread() is not threading.main_thread():
+        return False
+    try:
+        return sys.stdin.isatty()
+    except Exception:
+        return False
+
 def run_cmd(cmd, timeout=None):
+    global _INTERJECTION_RESULT
     if timeout is None:
         timeout = Config.CMD_TIMEOUT
     try:
         if Config.ROOT_PASS and ('su' in cmd or 'sudo' in cmd):
             return _pty_su_root(cmd, timeout)
+        if _can_cancel_foreground_input():
+            clear_agent_cancel()
+            out = bytearray()
+            popen_kwargs = {
+                "shell": True,
+                "stdout": subprocess.PIPE,
+                "stderr": subprocess.STDOUT,
+            }
+            if os.name == 'posix':
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(cmd, **popen_kwargs)
+            deadline = time.time() + timeout
+            _interjection_start()
+            try:
+                while True:
+                    inj = _interjection_poll()
+                    if inj is _INTERJECTION_CANCEL or agent_cancel_requested():
+                        request_agent_cancel()
+                        _terminate_process(proc)
+                        output = _tail_cmd_output(out)
+                        suffix = ("\n" + output) if output else ""
+                        return f"[CANCELLED] Command stopped by Escape{suffix}"
+                    if inj is not None:
+                        _INTERJECTION_RESULT = None
+                        request_agent_cancel("Command interrupted by user input")
+                        _terminate_process(proc)
+                        output = _tail_cmd_output(out)
+                        suffix = ("\n" + output) if output else ""
+                        return f"[CANCELLED] Command interrupted by user input{suffix}"
+
+                    if proc.stdout is not None:
+                        readable, _, _ = select.select([proc.stdout], [], [], 0.05)
+                        if readable:
+                            data = os.read(proc.stdout.fileno(), 4096)
+                            if data:
+                                out.extend(data)
+                    if proc.poll() is not None:
+                        if proc.stdout is not None:
+                            while True:
+                                readable, _, _ = select.select([proc.stdout], [], [], 0)
+                                if not readable:
+                                    break
+                                data = os.read(proc.stdout.fileno(), 4096)
+                                if not data:
+                                    break
+                                out.extend(data)
+                        break
+                    if time.time() > deadline:
+                        _terminate_process(proc)
+                        output = _tail_cmd_output(out)
+                        suffix = ("\n" + output) if output else ""
+                        return f"[TIMEOUT] Command exceeded {timeout}s{suffix}"
+            finally:
+                _interjection_stop()
+            return _tail_cmd_output(out)
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         out = result.stdout + result.stderr
         return out[-4000:] if len(out) > 4000 else out
@@ -4347,7 +4528,7 @@ GENERAL RULES:
 5. When a goal is set, keep working until done or max steps reached
 6. Report what you did and what remains after each step"""
 
-def ask_ai(messages, stream=None, retry=2, base_delay=2):
+def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
     '''Resilient AI query with retry, backoff, and history trimming.'''
     # Filter empty messages
     clean_messages = []
@@ -4377,6 +4558,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2):
     
     last_error = ""
     for attempt in range(retry + 1):
+        if agent_cancel_requested(cancel_event):
+            return AGENT_CANCELLED_RESPONSE
         try:
             req = urllib.request.Request(
                 url,
@@ -4385,10 +4568,14 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2):
             )
             with urllib.request.urlopen(req, timeout=600) as resp:
                 if stream if stream is not None else Config.STREAM:
-                    return stream_response(resp)
+                    return stream_response(resp, cancel_event=cancel_event)
                 data = json.loads(resp.read().decode())
+                if agent_cancel_requested(cancel_event):
+                    return AGENT_CANCELLED_RESPONSE
                 return data.get('choices', [{}])[0].get('message', {}).get('content', '')
         except urllib.error.HTTPError as e:
+            if agent_cancel_requested(cancel_event):
+                return AGENT_CANCELLED_RESPONSE
             body = e.read().decode()[:500]
             if e.code == 401:
                 last_error = f"[HTTP ERROR 401] Authentication failed. Set a valid API key via /provider key or --api-key"
@@ -4406,6 +4593,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2):
             continue
             break
         except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            if agent_cancel_requested(cancel_event):
+                return AGENT_CANCELLED_RESPONSE
             last_error = f"[NETWORK ERROR] {e}"
             learn_error(str(e), "network")
             if attempt < retry:
@@ -4415,13 +4604,15 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2):
                 continue
             break
         except Exception as e:
+            if agent_cancel_requested(cancel_event):
+                return AGENT_CANCELLED_RESPONSE
             last_error = f"[ERROR] {e}"
             learn_error(str(e), "ask_ai exception")
             break
     
     return last_error
 
-def stream_response(resp):
+def stream_response(resp, cancel_event=None):
     full = ""
     t = T()
     reasoning_mode = False
@@ -4514,6 +4705,8 @@ def stream_response(resp):
         move_to_scroll_bottom()
     
     for line in resp:
+        if agent_cancel_requested(cancel_event):
+            break
         line = line.decode('utf-8', errors='ignore').strip()
         if not line or not line.startswith('data: '):
             continue
@@ -4541,7 +4734,17 @@ def stream_response(resp):
             continue
 
         inj = _interjection_poll()
+        if inj is _INTERJECTION_CANCEL or agent_cancel_requested(cancel_event):
+            request_agent_cancel(cancel_event=cancel_event)
+            _queue_display(_filter_visible_content("", final=True), "content")
+            _flush_display(force=True)
+            _interjection_stop()
+            with stdout_lock:
+                sys.stdout.write(RST + SHOW)
+            return AGENT_CANCELLED_RESPONSE
         if inj is not None:
+            request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
+            clear_agent_cancel()
             _queue_display(_filter_visible_content("", final=True), "content")
             _flush_display(force=True)
             _interjection_stop()
@@ -4549,6 +4752,14 @@ def stream_response(resp):
                 sys.stdout.write(RST + SHOW)
             return full
     
+    if agent_cancel_requested(cancel_event):
+        _queue_display(_filter_visible_content("", final=True), "content")
+        _flush_display(force=True)
+        _interjection_stop()
+        with stdout_lock:
+            sys.stdout.write(RST + SHOW)
+        return AGENT_CANCELLED_RESPONSE
+
     _queue_display(_filter_visible_content("", final=True), "content")
     _flush_display(force=True)
     _interjection_stop()
@@ -4666,6 +4877,7 @@ Use ```ask``` ONLY if truly stuck.
 Max steps: {max_steps}. Be efficient. When the goal is achieved, summarize what was done and verified."""
 
 def cmd_goal(goal_text, history, cmd_log):
+    global _INTERJECTION_RESULT
     t = T()
     if not goal_text:
         print(f"  Usage: goal <describe what to accomplish>")
@@ -4683,6 +4895,7 @@ def cmd_goal(goal_text, history, cmd_log):
 
     history.append({"role": "user", "content": goal_msg})
     completed = False
+    cancelled = False
     goal_session_id = datetime.now().strftime("goal_%Y%m%d_%H%M%S")
 
     for step in range(1, max_steps + 1):
@@ -4697,27 +4910,45 @@ def cmd_goal(goal_text, history, cmd_log):
         try:
             if Config.STREAM:
                 move_to_scroll_bottom()
+                _interjection_start()
                 resp = ask_ai(history)
                 print()
             else:
-                spin = SpinnerThread("thinking")
-                spin.start()
-                resp = ask_ai(history, stream=False)
+                resp = ask_ai_cancelable(history, history=history)
         except KeyboardInterrupt:
             resp = None
         finally:
             if spin is not None:
                 spin.stop()
+            _interjection_stop()
+        if _INTERJECTION_RESULT is not None:
+            _INTERJECTION_RESULT = None
+            clear_agent_cancel()
+            box("STOPPED", "Goal interrupted by user input", "warn")
+            cancelled = True
+            break
+        if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
+            msg = agent_cancel_message()
+            clear_agent_cancel()
+            box("STOPPED", msg, "warn")
+            cancelled = True
+            break
         if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
             if len(history) > 5:
                 history = [history[0]] + history[:-4]
             viz.status("API error, trimming history and retrying...", "warning")
-            resp = ask_ai(history, stream=False)
+            resp = ask_ai_cancelable(history, history=history)
         if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
             # Second failure - strip back to just system + goal, retry once more
             history = history[:2]
             viz.status("API error again, stripping history to system+goal...", "warning")
-            resp = ask_ai(history, stream=False)
+            resp = ask_ai_cancelable(history, history=history)
+        if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
+            msg = agent_cancel_message()
+            clear_agent_cancel()
+            box("STOPPED", msg, "warn")
+            cancelled = True
+            break
         if not resp or resp.startswith('['):
             box("AI ERROR", resp or "No response", "err")
             break
@@ -4743,10 +4974,12 @@ def cmd_goal(goal_text, history, cmd_log):
             if clean:
                 box(f"STEP {step} ANALYSIS", clean, "accent")
 
+            command_cancelled = False
             for c in commands:
                 c = c.strip()
                 viz.tool_call("execute", c)
                 result = run_cmd(c)
+                command_cancelled = agent_cancel_requested() or (result or "").startswith("[CANCELLED]")
                 success = _cmd_succeeded(result)
                 viz.tool_result(success, result[:100])
                 cmd_result(c, result, success)
@@ -4760,6 +4993,14 @@ def cmd_goal(goal_text, history, cmd_log):
                     history.append({"role": "user", "content": f"{exec_msg}\n\n{continuation}"})
                 else:
                     history.append({"role": "user", "content": continuation})
+                if command_cancelled:
+                    msg = agent_cancel_message()
+                    clear_agent_cancel()
+                    box("STOPPED", msg, "warn")
+                    cancelled = True
+                    break
+            if command_cancelled:
+                break
         else:
             clean = clean_response(resp)
             if not resp or not resp.strip():
@@ -4774,7 +5015,7 @@ def cmd_goal(goal_text, history, cmd_log):
         
         time.sleep(Config.GOAL_STEP_DELAY)
 
-    if not completed:
+    if not completed and not cancelled:
         print(f"\n{t['warn']} Reached max steps ({max_steps}). Goal may be incomplete.{RST}")
 
     learn_session(len(history), len(cmd_log), goal_mode=True)
@@ -6761,10 +7002,8 @@ def main():
                     if not _footer_reserved:
                         set_scroll_region()
                     draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=activity_vector(history=history, busy=True))
-                    set_bottom_bar_spinner(history)
-                    spin = SpinnerThread("thinking")
-                    spin.start()
-                    resp = ask_ai(history)
+                    resp = ask_ai_cancelable(history, history=history)
+                    release_footer_for_output()
             except KeyboardInterrupt:
                 resp = None
             finally:
@@ -6777,6 +7016,7 @@ def main():
             if _INTERJECTION_RESULT is not None:
                 inj = _INTERJECTION_RESULT
                 _INTERJECTION_RESULT = None
+                clear_agent_cancel()
                 if resp:
                     history.append({"role": "assistant", "content": resp + "\n\n[assistant response interrupted by user interjection]"})
                 history.append({"role": "user", "content": inj})
@@ -6784,6 +7024,11 @@ def main():
                 print(f" {T()['primary']}You:{RST} {inj}")
                 save_current_session(history, cmd_log)
                 continue
+            if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
+                msg = agent_cancel_message()
+                clear_agent_cancel()
+                box("STOPPED", msg, "warn")
+                break
             if not resp or resp.startswith('['):
                 box("AI ERROR", resp or "No response", "err")
                 break
@@ -6802,6 +7047,7 @@ def main():
                 if resp.strip():
                     history.append({"role": "assistant", "content": resp})
 
+                command_cancelled = False
                 for c in commands:
                     c = c.strip()
                     viz.tool_call("execute", c)
@@ -6810,6 +7056,7 @@ def main():
                         result = plugin_result.strip()
                     else:
                         result = run_cmd(c)
+                    command_cancelled = agent_cancel_requested() or (result or "").startswith("[CANCELLED]")
                     success = _cmd_succeeded(result)
                     viz.tool_result(success, result[:100])
                     cmd_result(c, result, success)
@@ -6821,6 +7068,13 @@ def main():
                         history.append({"role": "user", "content": f"{exec_msg}\n\n{continuation}"})
                     else:
                         history.append({"role": "user", "content": continuation})
+                    if command_cancelled:
+                        msg = agent_cancel_message()
+                        clear_agent_cancel()
+                        box("STOPPED", msg, "warn")
+                        break
+                if command_cancelled:
+                    break
             else:
                 if not clean:
                     box("AI ERROR", "Empty response", "err")

@@ -123,6 +123,80 @@ def test_interjection_text_enter_sets_result_once():
         os.read = old_read
         sys.stdin = old_stdin
 
+def test_interjection_escape_requests_cancel():
+    """Bare Escape should stop the active agent operation."""
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED
+    old_select = globals().get('select')
+    old_read = os.read
+    old_stdin = sys.stdin
+
+    class FakeSelect:
+        @staticmethod
+        def select(readable, writable, exceptional, timeout):
+            return ([0], [], [])
+
+    class FakeStdin:
+        def fileno(self):
+            return 0
+
+    try:
+        clear_agent_cancel()
+        globals()['select'] = FakeSelect
+        os.read = lambda fd, size: b"\x1b"
+        sys.stdin = FakeStdin()
+        _INTERJECTION_ACTIVE = True
+        _INTERJECTION_BUF = ""
+        _INTERJECTION_CURSOR = 0
+        _INTERJECTION_RESULT = None
+        _INTERJECTION_HAS_TYPED = False
+        assert _interjection_poll() is _INTERJECTION_CANCEL
+        assert agent_cancel_requested()
+        assert _INTERJECTION_RESULT is None
+    finally:
+        clear_agent_cancel()
+        globals()['select'] = old_select
+        os.read = old_read
+        sys.stdin = old_stdin
+
+def test_interjection_arrow_escape_sequence_does_not_cancel():
+    """ANSI arrow-key sequences should remain editable interjection input."""
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX
+    old_select = globals().get('select')
+    old_read = os.read
+    old_stdin = sys.stdin
+    old_history = list(_INTERJECTION_HISTORY)
+
+    class FakeSelect:
+        @staticmethod
+        def select(readable, writable, exceptional, timeout):
+            return ([0], [], [])
+
+    class FakeStdin:
+        def fileno(self):
+            return 0
+
+    try:
+        clear_agent_cancel()
+        globals()['select'] = FakeSelect
+        os.read = lambda fd, size: b"\x1b[A"
+        sys.stdin = FakeStdin()
+        _INTERJECTION_ACTIVE = True
+        _INTERJECTION_BUF = ""
+        _INTERJECTION_CURSOR = 0
+        _INTERJECTION_RESULT = None
+        _INTERJECTION_HAS_TYPED = False
+        _INTERJECTION_HISTORY = ["previous prompt"]
+        _INTERJECTION_HISTORY_IDX = -1
+        assert _interjection_poll() is None
+        assert not agent_cancel_requested()
+        assert _INTERJECTION_BUF == "previous prompt"
+    finally:
+        clear_agent_cancel()
+        _INTERJECTION_HISTORY = old_history
+        globals()['select'] = old_select
+        os.read = old_read
+        sys.stdin = old_stdin
+
 def test_interjection_buf_accumulation():
     """_INTERJECTION_BUF should accumulate characters."""
     global _INTERJECTION_BUF
