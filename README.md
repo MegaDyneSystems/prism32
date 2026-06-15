@@ -213,6 +213,7 @@ Robot vacuums, IoT devices, and automation hardware:
 - IP cameras (RTSP/ONVIF), smart speakers, smart displays, garage door controllers, irrigation systems, and energy monitors.
 - Shelly, Sonoff, and Tasmota-flashed devices accessible over HTTP/MQTT.
 - Prism32 does not run on the vacuum, lightbulb, or sensor itself. It runs on the Linux host, Home Assistant box, or Raspberry Pi that coordinates them. The AI can then help write automations, debug MQTT flows, query device APIs, generate dashboards, or script multi-device routines.
+- Many IoT devices and robot vacuums use lightweight MCU firmware without Python or a shell. If a device runs embedded Linux with Python 3.7+, a shell, and network access, Prism32 can run directly on it. Check your device specs.
 - Use /extend to create plugins for specific device APIs. Use startup memory and /remember to store device names, IPs, MQTT topics, and common automation patterns.
 
 Best-effort targets and environment classes:

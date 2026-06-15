@@ -147,7 +147,7 @@ Devices you can control with Prism32 on a companion Linux host:
 - Zigbee/Z-Wave: lights, switches, sensors, locks, thermostats (via Zigbee2MQTT, Z-Wave JS).
 - IP cameras, smart speakers, garage controllers, irrigation, energy monitors.
 - Shelly, Sonoff, Tasmota devices over HTTP/MQTT.
-- Prism32 runs on the coordinator host. Use it to write automations, debug MQTT, query device APIs, and script multi-device routines. Use /extend for device-specific plugins.
+- Prism32 runs on the coordinator host, or directly on any device with Python 3.7+, a shell, and network access. Use it to write automations, debug MQTT, query device APIs, and script multi-device routines. Use /extend for device-specific plugins.
 
 Best-effort targets include containers, ChromeOS/Crostini, Proxmox, TrueNAS, pfSense, OPNsense, OpenWrt/BusyBox, NAS appliances, Solaris/SunOS/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX, MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, and OpenVMS where compatible Python exists.
 
