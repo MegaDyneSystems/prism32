@@ -425,6 +425,10 @@ Prism32 sends OpenAI-style `/chat/completions` requests. Providers work best whe
 
 All commands require the `/` prefix. Bare text is sent to the AI.
 
+Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/delegate`, `/spawn`, `/subagents`, `/skills`, `/auto`, `/shard`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks.
+
+From `execute` blocks, the model can use shell commands (the normal path), plugin-registered commands, `/quantum`, `/harness scan|context|path`, `/evolve tools|diff|docs|context`, `/extend`, and `/memory path`.
+
 Core:
 
 ```text

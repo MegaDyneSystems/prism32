@@ -4733,6 +4733,16 @@ Use /harness scan to detect external AI agent CLIs and /harness delegate <task> 
 Use /evolve on when Prism32 needs self-repair/plugin-generation docs, baseline comparison, and local tool exploration.
 Use /extend temp <goal> when a missing reusable capability would help complete the task. This generates, syntax-checks, writes, and loads a temporary Prism32 plugin. Use /extend permanent <goal> only when the operator explicitly asks for a persistent extension. Prefer plugin self-extension over editing prism32.py; edit core code only when the requested change cannot be solved as a plugin.
 
+Commands you can use inside execute blocks:
+- Any shell command (the normal path).
+- /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
+- /harness scan, /harness context, /harness path (detect external AI CLIs).
+- /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
+- /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
+- /memory path, /memory paths (locate memory files).
+- Any plugin-registered command listed in context (see Available plugin commands).
+Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /memory edit, /delegate, /spawn, /subagents, /skills, /auto, /shard, and other session/config commands are operator-side only and do not work from execute blocks.
+
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
 
