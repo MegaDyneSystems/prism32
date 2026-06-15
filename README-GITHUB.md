@@ -134,6 +134,13 @@ NVIDIA targets:
 - DRIVE OS: best effort; Linux side is most practical, QNX side depends on Python availability.
 - CUDA is used through a local model server or OpenAI-compatible gateway, not directly by Prism32.
 
+3D printer and smart home targets:
+
+- OctoPrint, Klipper (Mainsail/Fluidd), PrusaLink: Raspberry Pi Linux/ARM with Python 3.7+.
+- Home Assistant OS/Supervised/Core: Linux with Python 3.7+.
+- OpenHAB, Domoticz, Homebridge: Linux hosts with Python 3.7+ installed.
+- Marlin, Duet, ESPHome, Tasmota: MCU/appliance devices. Point Prism32 at the companion Linux host on the same network.
+
 Best-effort targets include containers, ChromeOS/Crostini, Proxmox, TrueNAS, pfSense, OPNsense, OpenWrt/BusyBox, NAS appliances, Solaris/SunOS/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX, MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, and OpenVMS where compatible Python exists.
 
 Architecture labels include x86/x64, ARM, RISC-V, LoongArch, PowerPC/POWER, MIPS, SPARC, S/390x/IBM Z, Alpha, PA-RISC, Itanium, Elbrus, VAX, and SGI MIPS.

@@ -187,6 +187,25 @@ NVIDIA platform notes:
 - NVIDIA DRIVE OS is best effort: the Linux side should work if Python and a shell are available; QNX-side use depends on having a compatible Python runtime.
 - Prism32 does not require or call CUDA directly. For GPU acceleration of tasks, have your MDS AI agent create custom Cuda plugins
 
+3D printer and maker systems:
+
+- OctoPrint (Raspberry Pi Linux with Python 3) should work as a standard Linux/ARM target.
+- Klipper with Mainsail or Fluidd (Raspberry Pi Linux with Python 3) should work.
+- PrusaLink / Prusa Connect (Raspberry Pi Linux with Python) should work.
+- Repetier-Server (Linux with Python) should work.
+- Marlin, RepRapFirmware, and Duet are MCU firmwares and cannot run Prism32 directly. Point Prism32 at the companion Raspberry Pi or host machine connected to the printer.
+- Use /memory append to save G-code paths, printer serial ports, material profiles, and slicing workflows for faster AI-assisted print management.
+
+Smart home and IoT hub systems:
+
+- Home Assistant OS, Home Assistant Supervised, and Home Assistant Core (Linux with Python 3) should work.
+- OpenHAB (Linux, requires Python 3.7+ installed alongside) should work.
+- Domoticz (Linux with Python available) should work.
+- Homebridge (Linux, requires Python 3.7+ installed alongside) should work.
+- Hubitat, SmartThings, and ESPHome are appliance/MCU systems. Point Prism32 at a companion Linux host on the same network.
+- Raspberry Pi OS and Raspbian are already covered as standard Linux targets.
+- Use startup memory to record MQTT brokers, Zigbee2MQTT paths, API tokens, device lists, and automation names so the agent can help debug, script, and monitor.
+
 Best-effort targets and environment classes:
 
 - ChromeOS/Crostini
