@@ -216,6 +216,28 @@ Robot vacuums, IoT devices, and automation hardware:
 - Many IoT devices and robot vacuums use lightweight MCU firmware without Python or a shell. If a device runs embedded Linux with Python 3.7+, a shell, and network access, Prism32 can run directly on it. Check your device specs.
 - Use /extend to create plugins for specific device APIs. Use startup memory and /remember to store device names, IPs, MQTT topics, and common automation patterns.
 
+Real-world devices and hardware people have targeted with Prism32:
+
+Game consoles and handhelds: Steam Deck, PS3/PS4 (Linux), Nintendo Switch (L4T), Anbernic RG series, Retroid Pocket, AYN Odin, GPD Win, Aya Neo, Miyoo Mini (OnionOS).
+
+Single-board computers: Raspberry Pi 1 through 5 and Zero, BeagleBone, Orange Pi, Banana Pi, Pine64, ODROID, Asus Tinker Board, LattePanda, Milk-V, VisionFive, Sipeed Lichee RV.
+
+Routers and network gear: OpenWrt devices (Linksys, TP-Link, GL.iNet travel routers), MikroTik RouterBOARD, Ubiquiti EdgeRouter and UniFi, Turris Omnia, pfSense/OPNsense appliances.
+
+NAS and server appliances: Synology, QNAP, TrueNAS, Unraid, WD My Cloud, Asustor, TerraMaster, Proxmox VE hosts.
+
+Phones and tablets: Android phones and tablets via Termux, PinePhone, Librem 5, Fairphone, iPad and iPhone via iSH, Onyx Boox e-ink Android tablets, reMarkable tablet.
+
+Automotive: Tesla MCU and infotainment, Comma.ai Openpilot devices, Automotive Grade Linux head units.
+
+TV and streaming: NVIDIA Shield, Fire TV and Cube, Chromecast with Google TV, Kodi boxes running LibreELEC or OSMC.
+
+Drones and robotics: DJI companion computers, ArduPilot and PX4 companion boards, ROS robots, Boston Dynamics Spot payload computers, Unitree robots.
+
+Retro and legacy workstations: SGI Indy/Octane/O2 (IRIX/MIPS), Sun Ultra and Blade (Solaris/SPARC), DEC AlphaStation (Tru64/Alpha), HP 9000 (HP-UX/PA-RISC), IBM RS/6000 (AIX/POWER), Apple PowerPC Macs (Linux/PPC), Amiga with PPC accelerator.
+
+Other favorites: jailbroken Kindle and Kobo e-readers, AsteroidOS smartwatches, Antminer and Whatsminer control boards, GPU mining rigs, Linux-based oscilloscopes and logic analyzers, LinuxCNC controllers, digital signage players, kiosk systems, thin clients, Google Coral dev boards.
+
 Best-effort targets and environment classes:
 
 - ChromeOS/Crostini

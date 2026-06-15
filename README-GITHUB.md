@@ -149,6 +149,8 @@ Devices you can control with Prism32 on a companion Linux host:
 - Shelly, Sonoff, Tasmota devices over HTTP/MQTT.
 - Prism32 runs on the coordinator host, or directly on any device with Python 3.7+, a shell, and network access. Use it to write automations, debug MQTT, query device APIs, and script multi-device routines. Use /extend for device-specific plugins.
 
+Real hardware it has been used on: Steam Deck, PS3/PS4, Nintendo Switch, Anbernic and Retroid handhelds, Raspberry Pi 1-5 and Zero, BeagleBone, Orange Pi, Milk-V and VisionFive RISC-V boards, OpenWrt travel routers, MikroTik, GL.iNet, Synology and QNAP NAS, Android phones via Termux, PinePhone, reMarkable, Tesla MCU, Comma.ai Openpilot, DJI drones, ArduPilot, NVIDIA Shield, Kodi boxes, jailbroken Kindle and Kobo, SGI/SPARC/DEC/HP/IBM legacy Unix workstations, Antminer control boards, LinuxCNC, digital signage, and thin clients.
+
 Best-effort targets include containers, ChromeOS/Crostini, Proxmox, TrueNAS, pfSense, OPNsense, OpenWrt/BusyBox, NAS appliances, Solaris/SunOS/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX, MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, and OpenVMS where compatible Python exists.
 
 Architecture labels include x86/x64, ARM, RISC-V, LoongArch, PowerPC/POWER, MIPS, SPARC, S/390x/IBM Z, Alpha, PA-RISC, Itanium, Elbrus, VAX, and SGI MIPS.
