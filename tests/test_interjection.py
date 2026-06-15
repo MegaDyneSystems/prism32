@@ -57,6 +57,72 @@ def test_interjection_poll_no_data():
     result = _interjection_poll()
     assert result is None
 
+def test_interjection_empty_enter_does_not_interrupt():
+    """Blank Enter while streaming should not become a follow-up prompt."""
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED
+    old_select = globals().get('select')
+    old_read = os.read
+    old_stdin = sys.stdin
+
+    class FakeSelect:
+        @staticmethod
+        def select(readable, writable, exceptional, timeout):
+            return ([0], [], [])
+
+    class FakeStdin:
+        def fileno(self):
+            return 0
+
+    try:
+        globals()['select'] = FakeSelect
+        os.read = lambda fd, size: b"\n"
+        sys.stdin = FakeStdin()
+        _INTERJECTION_ACTIVE = True
+        _INTERJECTION_BUF = ""
+        _INTERJECTION_CURSOR = 0
+        _INTERJECTION_RESULT = None
+        _INTERJECTION_HAS_TYPED = False
+        assert _interjection_poll() is None
+        assert _INTERJECTION_RESULT is None
+        assert _INTERJECTION_BUF == ""
+    finally:
+        globals()['select'] = old_select
+        os.read = old_read
+        sys.stdin = old_stdin
+
+def test_interjection_text_enter_sets_result_once():
+    """Typed interjection text should be captured without extra Enter."""
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED
+    old_select = globals().get('select')
+    old_read = os.read
+    old_stdin = sys.stdin
+
+    class FakeSelect:
+        @staticmethod
+        def select(readable, writable, exceptional, timeout):
+            return ([0], [], [])
+
+    class FakeStdin:
+        def fileno(self):
+            return 0
+
+    try:
+        globals()['select'] = FakeSelect
+        os.read = lambda fd, size: b"follow up\n"
+        sys.stdin = FakeStdin()
+        _INTERJECTION_ACTIVE = True
+        _INTERJECTION_BUF = ""
+        _INTERJECTION_CURSOR = 0
+        _INTERJECTION_RESULT = None
+        _INTERJECTION_HAS_TYPED = False
+        assert _interjection_poll() == "follow up"
+        assert _INTERJECTION_RESULT == "follow up"
+        assert _INTERJECTION_BUF == ""
+    finally:
+        globals()['select'] = old_select
+        os.read = old_read
+        sys.stdin = old_stdin
+
 def test_interjection_buf_accumulation():
     """_INTERJECTION_BUF should accumulate characters."""
     global _INTERJECTION_BUF
@@ -140,3 +206,30 @@ def test_move_to_scroll_bottom_does_not_crash():
         move_to_scroll_bottom()
     except Exception:
         assert False, "move_to_scroll_bottom raised"
+
+def test_read_footer_input_reads_single_line():
+    """Footer prompt input should consume one submitted line."""
+    global _footer_reserved, _ANSI_ENABLED
+    old_footer = _footer_reserved
+    old_ansi = _ANSI_ENABLED
+    old_stdin = sys.stdin
+
+    class FakeStdin:
+        def __init__(self):
+            self.calls = 0
+
+        def readline(self):
+            self.calls += 1
+            return "hello agent\n"
+
+    fake = FakeStdin()
+    try:
+        _footer_reserved = True
+        _ANSI_ENABLED = False
+        sys.stdin = fake
+        assert read_footer_input("status") == "hello agent"
+        assert fake.calls == 1
+    finally:
+        _footer_reserved = old_footer
+        _ANSI_ENABLED = old_ansi
+        sys.stdin = old_stdin

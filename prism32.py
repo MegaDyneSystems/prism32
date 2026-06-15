@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.6 - MegaDyne Systems Terminal Agent
+Prism32 v6.7 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -16,6 +16,7 @@ import re
 import signal
 import argparse
 import textwrap
+import difflib
 from datetime import datetime
 import platform
 import atexit
@@ -325,9 +326,18 @@ def load_plugins():
 # usage patterns, errors, and preferences to improve over time.
 
 MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "memory.json")
+STARTUP_MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "startup_memory.md")
 QUANTUM_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "quantum.json")
 SOUL_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "soul.md")
 PROMPTSHARD_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "promptshard.md")
+HARNESS_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "harnesses.json")
+EVOLVE_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "evolve")
+EVOLVE_DOC_FILE = os.path.join(EVOLVE_DIR, "evolve.md")
+EVOLVE_TOOL_FILE = os.path.join(EVOLVE_DIR, "tools.json")
+EVOLVE_BASELINE_DIR = os.path.join(EVOLVE_DIR, "baseline")
+EVOLVE_BASELINE_FILE = os.path.join(EVOLVE_BASELINE_DIR, "prism32.py")
+EVOLVE_BASELINE_CONFIG_FILE = os.path.join(EVOLVE_BASELINE_DIR, "config.default.json")
+EVOLVE_TEMP_PLUGIN_DIR = os.path.join(EVOLVE_DIR, "tmp_plugins")
 
 # Secrets vault: stored separately from promptshard to prevent injection
 SECRETS_FILE = os.path.join(os.path.expanduser("~"), ".prism32", ".secrets.json")
@@ -336,6 +346,7 @@ _MEMORY_DIRTY = False
 _MEMORY_FLUSH_COUNTER = 0
 _LAST_INTERJECT = ""
 _CURRENT_SESSION_ID = None
+_EVOLVE_MODE = False
 
 # ── Interjection state ────────────────────────────────────────
 _INTERJECTION_ACTIVE = False
@@ -366,6 +377,8 @@ def _default_memory():
         "command_stats": {},
         "error_patterns": {},
         "preferences": {},
+        "system_profile": {},
+        "startup_memory_file": STARTUP_MEMORY_FILE,
         "session_count": 0,
         "suggestions_shown": [],
     }
@@ -376,6 +389,8 @@ def load_memory():
             mem = json.load(f)
         if mem.get("version", 0) < 2:
             mem = _default_memory()
+        mem.setdefault("system_profile", {})
+        mem.setdefault("startup_memory_file", STARTUP_MEMORY_FILE)
         return mem
     except (FileNotFoundError, json.JSONDecodeError):
         return _default_memory()
@@ -397,6 +412,587 @@ def save_memory(memory):
             json.dump(memory, f, indent=2)
     except Exception:
         pass
+
+# ── Startup Memory, Harness Absorption, and Evolve Support ─────
+
+STARTUP_AUTO_START = "<!-- PRISM32_AUTO_START -->"
+STARTUP_AUTO_END = "<!-- PRISM32_AUTO_END -->"
+
+HARNESS_CANDIDATES = [
+    {
+        "id": "opencode",
+        "display": "OpenCode",
+        "executables": ["opencode"],
+        "abilities": ["codebase editing", "tool calling", "subagents", "repo automation"],
+        "hint": "Use for multi-file software engineering after inspecting its help output.",
+    },
+    {
+        "id": "codex",
+        "display": "OpenAI Codex CLI",
+        "executables": ["codex"],
+        "abilities": ["code editing", "repo repair", "command execution"],
+        "hint": "Use for focused coding tasks when its CLI is configured.",
+    },
+    {
+        "id": "claude-code",
+        "display": "Claude Code",
+        "executables": ["claude", "claude-code"],
+        "abilities": ["code editing", "repo analysis", "agentic terminal work"],
+        "hint": "Use for coding tasks after checking authentication and CLI syntax.",
+    },
+    {
+        "id": "kimicode",
+        "display": "KimiCode",
+        "executables": ["kimicode", "kimi"],
+        "abilities": ["code editing", "long context analysis", "repo assistance"],
+        "hint": "Use when Kimi-based coding tools are installed and authenticated.",
+    },
+    {
+        "id": "pi",
+        "display": "Pi AI CLI",
+        "executables": ["pi"],
+        "abilities": ["assistant CLI", "terminal assistance"],
+        "hint": "Inspect help first; command names vary between Pi-related tools.",
+    },
+    {
+        "id": "aider",
+        "display": "Aider",
+        "executables": ["aider"],
+        "abilities": ["git-aware coding", "multi-file edits", "LLM pair programming"],
+        "hint": "Useful for git-backed code edits when configured with an API key.",
+    },
+    {
+        "id": "gemini-cli",
+        "display": "Gemini CLI",
+        "executables": ["gemini"],
+        "abilities": ["assistant CLI", "large context analysis", "code help"],
+        "hint": "Use for large context inspection if installed and authenticated.",
+    },
+    {
+        "id": "goose",
+        "display": "Goose",
+        "executables": ["goose"],
+        "abilities": ["desktop/terminal agent", "tool use", "automation"],
+        "hint": "Use for autonomous local automation after checking available extensions.",
+    },
+    {
+        "id": "cursor-agent",
+        "display": "Cursor Agent",
+        "executables": ["cursor-agent"],
+        "abilities": ["codebase editing", "repo automation"],
+        "hint": "Use for Cursor-backed coding workflows when present.",
+    },
+]
+
+TOOL_SCAN_GROUPS = {
+    "shells": ["bash", "sh", "zsh", "fish", "ksh", "dash", "ash", "busybox", "cmd", "powershell", "pwsh"],
+    "python": ["python3", "python", "py"],
+    "vcs": ["git", "hg", "svn"],
+    "editors": ["nano", "vim", "vi", "nvim", "ed", "notepad", "code"],
+    "build": ["make", "cmake", "ninja", "gcc", "clang", "cc", "msbuild", "cl"],
+    "network": ["ssh", "scp", "sftp", "curl", "wget", "ftp", "nc", "ncat", "telnet", "ifconfig", "ip", "netstat", "ss"],
+    "archives": ["tar", "gzip", "gunzip", "zip", "unzip", "7z", "certutil"],
+    "package": ["apt", "apt-get", "dnf", "microdnf", "tdnf", "yum", "pacman", "zypper", "apk", "rpm-ostree", "swupd", "opkg", "ipkg", "emerge", "xbps-install", "eopkg", "slackpkg", "guix", "nix-env", "pkg", "pkgin", "pkg_add", "pkgadd", "pkgutil", "pkgman", "brew", "port", "winget", "choco", "scoop", "synopkg"],
+    "services": ["systemctl", "service", "rc-service", "rcctl", "svcadm", "initctl", "launchctl", "synoservice", "svcs"],
+    "embedded": ["busybox", "opkg", "ipkg", "uci", "ubus", "procd", "fw_printenv", "fw_setenv", "termux-setup-storage"],
+    "containers": ["docker", "podman", "kubectl", "nerdctl", "ctr", "crictl", "lxc", "lxc-info", "systemd-detect-virt"],
+    "storage_appliance": ["midclt", "cli", "synoshare", "synoservice", "synopkg", "qm", "pvesh", "pveversion"],
+    "windows": ["cmd", "powershell", "pwsh", "where", "wmic", "tasklist", "netstat", "ipconfig", "route", "reg", "wsl"],
+}
+
+def _runtime_dir():
+    return os.path.dirname(MEMORY_FILE)
+
+def _now_iso():
+    return datetime.now().isoformat()
+
+def _detect_shell_name():
+    if os.environ.get("COMSPEC"):
+        return os.environ.get("COMSPEC", "")
+    return os.environ.get("SHELL", "") or os.environ.get("0", "") or "unknown"
+
+def _safe_read(path, default=""):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.read()
+    except (FileNotFoundError, IOError, OSError):
+        return default
+
+def _safe_write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+def _startup_auto_block():
+    try:
+        info = get_system_info(force=True)
+    except Exception:
+        info = {}
+    shell = _detect_shell_name()
+    term = os.environ.get("TERM") or os.environ.get("WT_SESSION") or os.environ.get("TERM_PROGRAM") or "unknown"
+    pkg = info.get("pkg_mgr") or "unknown"
+    lines = [
+        STARTUP_AUTO_START,
+        "## Auto-Detected System Snapshot",
+        "",
+        f"- Updated: {_now_iso()}",
+        f"- OS: {info.get('os', platform.system() or 'unknown')}",
+        f"- Architecture: {info.get('arch', platform.machine() or 'unknown')}",
+        f"- CPU: {info.get('cpu', 'unknown')}",
+        f"- RAM: {info.get('ram', 'unknown')}",
+        f"- Disk: {info.get('disk', 'unknown')}",
+        f"- Package manager: {pkg}",
+        f"- Shell: {shell}",
+        f"- Terminal: {term}",
+        f"- Python: {sys.version.split()[0]}",
+        f"- Home: {os.path.expanduser('~')}",
+        f"- Current working directory at last refresh: {os.getcwd()}",
+        "",
+        "## Cross-Platform Command Notes",
+        "",
+        "- Unix/macOS/BSD: prefer sh-compatible commands unless bash is detected.",
+        "- Android/Termux: prefer pkg, termux-setup-storage, and normal POSIX shell commands.",
+        "- Solaris/SunOS/Oracle Solaris: prefer /usr/bin sh tools, ps/netstat/ifconfig, pkg or pkgadd, and avoid GNU-only flags.",
+        "- Embedded Linux/OpenWrt/BusyBox/NAS: prefer sh/ash, busybox applets, opkg/ipkg/synopkg, and avoid GNU-only flags.",
+        "- ChromeOS/Crostini, WSL, containers, CI runners: treat as Linux but verify mounts, networking, and package permissions first.",
+        "- Proxmox/TrueNAS/pfSense/OPNsense/Unraid/SteamOS: use appliance-native tools carefully; avoid changing host networking/storage without explicit instruction.",
+        "- Immutable Linux (SteamOS, Fedora CoreOS/Silverblue/Kinoite, rpm-ostree systems, Clear Linux): prefer toolbox/container workflows or native transactional managers.",
+        "- Server Unix: AIX uses installp, HP-UX uses swinstall, IRIX uses inst, Tru64 uses setld, Haiku uses pkgman, QNX may use pkg/opkg.",
+        "- Windows: prefer cmd.exe built-ins, PowerShell, tasklist, ipconfig, route, netstat, findstr, where, and dir.",
+        "- NetBSD/OpenBSD/FreeBSD: prefer ifconfig/netstat/pkgin/pkg_add/pkg and avoid Linux-only flags.",
+        STARTUP_AUTO_END,
+    ]
+    return "\n".join(lines)
+
+def _default_startup_memory_text():
+    return "\n".join([
+        "# Prism32 Startup Memory",
+        "",
+        "This Markdown file is injected into Prism32's startup context.",
+        "Edit it with /memory edit or open the path shown by /memory path.",
+        "Keep it short, factual, and useful for future terminal work.",
+        "",
+        _startup_auto_block(),
+        "",
+        "## Hardware Tips",
+        "",
+        "- Add machine-specific CPU, RAM, storage, GPU, battery, or thermal notes here.",
+        "",
+        "## Software Tips",
+        "",
+        "- Add package manager quirks, installed language runtimes, local services, and API tools here.",
+        "",
+        "## Terminal And Shell Quirks",
+        "",
+        "- Add terminal rendering issues, shell differences, PATH notes, sudo/su quirks, and remote login details here.",
+        "",
+        "## User Workflow",
+        "",
+        "- Add preferred project directories, build/test commands, deployment habits, and naming conventions here.",
+        "",
+        "## Recurring Fixes",
+        "",
+        "- Add errors Prism32 has solved before and the fix that worked.",
+        "",
+    ])
+
+def ensure_startup_memory(refresh=False):
+    os.makedirs(_runtime_dir(), exist_ok=True)
+    if not os.path.exists(STARTUP_MEMORY_FILE):
+        _safe_write(STARTUP_MEMORY_FILE, _default_startup_memory_text())
+        return STARTUP_MEMORY_FILE
+    if refresh:
+        existing = _safe_read(STARTUP_MEMORY_FILE)
+        block = _startup_auto_block()
+        if STARTUP_AUTO_START in existing and STARTUP_AUTO_END in existing:
+            start = existing.index(STARTUP_AUTO_START)
+            end = existing.index(STARTUP_AUTO_END) + len(STARTUP_AUTO_END)
+            existing = existing[:start] + block + existing[end:]
+        else:
+            existing = block + "\n\n" + existing
+        _safe_write(STARTUP_MEMORY_FILE, existing.rstrip() + "\n")
+    return STARTUP_MEMORY_FILE
+
+def read_startup_memory():
+    ensure_startup_memory(refresh=False)
+    return _safe_read(STARTUP_MEMORY_FILE).strip()
+
+def startup_memory_context(limit=2200):
+    text = read_startup_memory()
+    if not text:
+        return ""
+    if len(text) > limit:
+        text = text[:limit] + "\n...(startup memory truncated; use /memory show or /memory path for full file)"
+    return text
+
+def refresh_memory_profile(save=True):
+    try:
+        info = get_system_info(force=True)
+    except Exception:
+        info = {}
+    profile = {
+        "updated": _now_iso(),
+        "os": info.get("os", platform.system()),
+        "arch": info.get("arch", platform.machine()),
+        "cpu": info.get("cpu", ""),
+        "ram": info.get("ram", ""),
+        "disk": info.get("disk", ""),
+        "package_manager": info.get("pkg_mgr", ""),
+        "shell": _detect_shell_name(),
+        "terminal": os.environ.get("TERM") or os.environ.get("TERM_PROGRAM") or os.environ.get("WT_SESSION") or "",
+        "python": sys.version.split()[0],
+        "home": os.path.expanduser("~"),
+        "path_separator": os.pathsep,
+    }
+    if sys.platform.startswith("win"):
+        profile["windows"] = platform.win32_ver()[0:3]
+    _mem_cache["system_profile"] = profile
+    if save:
+        save_memory(_mem_cache)
+    return profile
+
+def _probe_version(exe_path):
+    for args in ([exe_path, "--version"], [exe_path, "version"], [exe_path, "-v"]):
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, timeout=2)
+            out = (result.stdout or result.stderr or "").strip().splitlines()
+            if out:
+                return out[0][:120]
+        except Exception:
+            continue
+    return ""
+
+def detect_harnesses(probe_versions=True):
+    installed = []
+    missing = []
+    seen_paths = set()
+    for cand in HARNESS_CANDIDATES:
+        found = None
+        for exe in cand.get("executables", []):
+            try:
+                path = shutil.which(exe)
+            except Exception:
+                path = None
+            if path:
+                found = (exe, path)
+                break
+        if found:
+            exe, path = found
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen_paths:
+                continue
+            seen_paths.add(key)
+            item = dict(cand)
+            item["command"] = exe
+            item["path"] = path
+            item["version_text"] = _probe_version(path) if probe_versions else ""
+            installed.append(item)
+        else:
+            missing.append(cand.get("id", "unknown"))
+    data = {
+        "version": 1,
+        "scanned_at": _now_iso(),
+        "platform": platform.platform(),
+        "shell": _detect_shell_name(),
+        "installed": installed,
+        "missing": missing,
+    }
+    return data
+
+def save_harnesses(data):
+    _safe_write(HARNESS_FILE, json.dumps(data, indent=2) + "\n")
+
+def load_harnesses():
+    try:
+        with open(HARNESS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict) and "installed" in data:
+            return data
+    except (FileNotFoundError, IOError, json.JSONDecodeError):
+        pass
+    return {"version": 1, "scanned_at": "", "installed": [], "missing": []}
+
+def ensure_harness_scan(force=False):
+    stale = True
+    try:
+        stale = (time.time() - os.path.getmtime(HARNESS_FILE)) > 86400
+    except OSError:
+        stale = True
+    if force or stale:
+        data = detect_harnesses(probe_versions=force)
+        save_harnesses(data)
+        return data
+    return load_harnesses()
+
+def format_harnesses(data=None, verbose=True):
+    data = data or load_harnesses()
+    installed = data.get("installed", [])
+    lines = [f"Scanned: {data.get('scanned_at') or 'never'}", f"File: {HARNESS_FILE}", ""]
+    if not installed:
+        lines.append("No external AI harnesses detected.")
+        lines.append("Run /harness scan after installing tools like opencode, codex, claude, kimicode, aider, goose, or gemini.")
+        return "\n".join(lines)
+    lines.append("Detected AI harnesses:")
+    for h in installed:
+        abilities = ", ".join(h.get("abilities", [])[:4])
+        version = f" [{h.get('version_text')}]" if verbose and h.get("version_text") else ""
+        lines.append(f"- {h.get('display', h.get('id'))}: {h.get('command')} at {h.get('path')}{version}")
+        if abilities:
+            lines.append(f"  abilities: {abilities}")
+        if verbose and h.get("hint"):
+            lines.append(f"  hint: {h.get('hint')}")
+    return "\n".join(lines)
+
+def harness_context(limit=1600):
+    data = ensure_harness_scan(force=False)
+    installed = data.get("installed", [])
+    if not installed:
+        return "AI harnesses: none detected yet. Use /harness scan after installing external agent CLIs."
+    lines = ["AI HARNESS ABSORPTION: external agent CLIs detected and usable from execute blocks:"]
+    for h in installed[:8]:
+        abilities = ", ".join(h.get("abilities", [])[:4])
+        lines.append(f"- {h.get('display', h.get('id'))} command '{h.get('command')}' abilities: {abilities}. {h.get('hint', '')}")
+    lines.append("Use /harness delegate <task> to spawn a super subagent seeded with these capabilities.")
+    text = "\n".join(lines)
+    return text[:limit]
+
+def _harness_super_task(task):
+    return (
+        "SUPER HARNESS SUBAGENT TASK\n"
+        "You are a Prism32 super subagent. You can use normal execute blocks and the detected external AI harness CLIs below. "
+        "Before invoking an external harness, inspect its help/version and avoid destructive actions unless explicitly required.\n\n"
+        f"{format_harnesses(load_harnesses(), verbose=False)}\n\n"
+        f"User task: {task}"
+    )
+
+def scan_available_tools():
+    tools = {}
+    for group, names in TOOL_SCAN_GROUPS.items():
+        found = []
+        for name in names:
+            try:
+                path = shutil.which(name)
+            except Exception:
+                path = None
+            if path:
+                found.append({"name": name, "path": path})
+        tools[group] = found
+    data = {
+        "version": 1,
+        "scanned_at": _now_iso(),
+        "platform": platform.platform(),
+        "shell": _detect_shell_name(),
+        "cwd": os.getcwd(),
+        "tools": tools,
+        "harnesses": load_harnesses().get("installed", []),
+    }
+    _safe_write(EVOLVE_TOOL_FILE, json.dumps(data, indent=2) + "\n")
+    return data
+
+def load_tool_scan():
+    try:
+        with open(EVOLVE_TOOL_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, IOError, json.JSONDecodeError):
+        return scan_available_tools()
+
+def format_tool_scan(data=None):
+    data = data or load_tool_scan()
+    lines = [f"Scanned: {data.get('scanned_at')}", f"Shell: {data.get('shell')}", f"File: {EVOLVE_TOOL_FILE}", ""]
+    for group, found in sorted(data.get("tools", {}).items()):
+        names = ", ".join(item.get("name", "") for item in found) or "none"
+        lines.append(f"- {group}: {names}")
+    return "\n".join(lines)
+
+def _current_prism_source():
+    candidates = []
+    gfile = globals().get("__file__")
+    if gfile:
+        candidates.append(gfile)
+    if sys.argv and sys.argv[0]:
+        candidates.append(sys.argv[0])
+    candidates.append(os.path.join(os.getcwd(), "prism32.py"))
+    for path in candidates:
+        try:
+            real = os.path.realpath(path)
+            if os.path.basename(real) == "prism32.py" and os.path.exists(real):
+                return real
+        except Exception:
+            pass
+    return os.path.join(os.getcwd(), "prism32.py")
+
+def _default_config_snapshot():
+    return {
+        "theme": "phosphor",
+        "provider": "local",
+        "model": "deepseek-v4-flash",
+        "api_base": "http://127.0.0.1:8080",
+        "max_history": 2000,
+        "max_response_tokens": 8192,
+        "cmd_timeout": 600,
+        "max_memory_ctx": 1024,
+        "subagent_model": "",
+        "agent_name": "MDS",
+    }
+
+def evolve_doc_text():
+    help_text = globals().get("CMD_HELP", "Use /help inside Prism32 for command help.")
+    return f"""# Prism32 Evolve Mode Documentation
+
+This file is generated by Prism32 and injected into AI context when /evolve is on.
+It is designed for self-repair, temporary tooling, permanent plugins, and safe system exploration.
+
+## Runtime Paths
+
+- Main script: {_current_prism_source()}
+- Config: {Config.CONFIG_FILE if 'Config' in globals() else os.path.join(os.path.expanduser('~'), '.prism32', 'config.json')}
+- Startup memory: {STARTUP_MEMORY_FILE}
+- Plugins: {PLUGIN_DIR}
+- Temporary evolve plugins: {EVOLVE_TEMP_PLUGIN_DIR}
+- Baseline Prism32 copy: {EVOLVE_BASELINE_FILE}
+- Baseline default config: {EVOLVE_BASELINE_CONFIG_FILE}
+- Tool scan: {EVOLVE_TOOL_FILE}
+- Harness scan: {HARNESS_FILE}
+
+## Safe Self-Repair Workflow
+
+1. Inspect the failure and reproduce it with the smallest command.
+2. Compare current Prism32 to the baseline with /evolve diff.
+3. Patch only the needed area. Keep stdlib-only Python 3.7+ compatibility.
+4. Run py_compile and the focused tests before claiming success.
+5. If terminal rendering is broken, prefer plain output and avoid cursor-control changes.
+6. Never store API keys, passwords, host-specific private details, or internal server names in repo files.
+
+## Plugin Options
+
+Permanent plugins:
+
+- Put Python files in ~/.prism32/plugins/<name>.py.
+- They load on startup.
+- Each plugin may define register(api) and optional hooks.
+
+Temporary evolve plugins:
+
+- Put Python files in ~/.prism32/evolve/tmp_plugins/<name>.py.
+- They are scratch files for repair or one-off experiments.
+- Copy to ~/.prism32/plugins/ only when the user wants them to persist.
+
+Minimal permanent plugin:
+
+```python
+def register(api):
+    def hello(args, history, cmd_log):
+        print("hello from plugin")
+    api.registry.register("hello", hello, description="Example command")
+```
+
+Useful PluginAPI fields:
+
+- api.registry.register(name, handler, aliases=[], description="", category="")
+- api.inject_context(text)
+- api.http_get(url, headers=None, timeout=10)
+- api.http_post(url, data=None, headers=None, timeout=10)
+- api.config, api.memory, api.history, api.plugins
+- Hooks: on_boot, on_shutdown, on_message, on_response, on_command, on_tick
+
+## Harness Absorption
+
+Use /harness scan to detect external AI CLIs. If present, /harness delegate <task> creates a super subagent seeded with those capabilities. Always inspect a harness help screen before using it because command syntaxes differ.
+
+## Windows Compatibility Notes
+
+- Prism32 targets Python 3.7+, which covers old supported Windows installs such as Windows 7/Vista-era systems when Python 3.7 is available, plus Windows 10/11.
+- Prefer tasklist, ipconfig, route print, netstat -ano, findstr, where, dir, cmd.exe, and PowerShell over Unix-only tools.
+- Avoid ANSI-heavy assumptions on old consoles. If output looks corrupt, use a plain terminal or Windows Terminal where available.
+
+## Current Command Help Snapshot
+
+```text
+{help_text[:5000]}
+```
+"""
+
+def ensure_evolve_files(force_baseline=False, refresh_tools=False):
+    os.makedirs(EVOLVE_DIR, exist_ok=True)
+    os.makedirs(EVOLVE_BASELINE_DIR, exist_ok=True)
+    os.makedirs(EVOLVE_TEMP_PLUGIN_DIR, exist_ok=True)
+    _safe_write(EVOLVE_DOC_FILE, evolve_doc_text())
+    source = _current_prism_source()
+    if (force_baseline or not os.path.exists(EVOLVE_BASELINE_FILE)) and os.path.exists(source):
+        try:
+            shutil.copy2(source, EVOLVE_BASELINE_FILE)
+        except Exception:
+            pass
+    if force_baseline or not os.path.exists(EVOLVE_BASELINE_CONFIG_FILE):
+        _safe_write(EVOLVE_BASELINE_CONFIG_FILE, json.dumps(_default_config_snapshot(), indent=2) + "\n")
+    if refresh_tools or not os.path.exists(EVOLVE_TOOL_FILE):
+        scan_available_tools()
+    return EVOLVE_DOC_FILE
+
+def evolve_context(limit=5200):
+    ensure_evolve_files(refresh_tools=False)
+    tools = format_tool_scan(load_tool_scan())
+    doc = _safe_read(EVOLVE_DOC_FILE).strip()
+    text = (
+        "EVOLVE MODE ACTIVE\n"
+        "Prism32 may create temporary or permanent stdlib-only plugins, compare against its baseline, and use tool scans for self-repair.\n\n"
+        f"{doc}\n\nTOOL SCAN SUMMARY\n{tools}\n"
+    )
+    if len(text) > limit:
+        text = text[:limit] + "\n...(evolve context truncated; use /evolve docs and /evolve tools for full details)"
+    return text
+
+def evolve_diff(limit_lines=220):
+    ensure_evolve_files(refresh_tools=False)
+    source = _current_prism_source()
+    try:
+        with open(EVOLVE_BASELINE_FILE, "r", encoding="utf-8", errors="replace") as f:
+            base = f.readlines()
+        with open(source, "r", encoding="utf-8", errors="replace") as f:
+            cur = f.readlines()
+    except Exception as e:
+        return f"Diff unavailable: {e}"
+    diff = list(difflib.unified_diff(base, cur, fromfile="baseline/prism32.py", tofile=source, lineterm=""))
+    if not diff:
+        return "No differences from evolve baseline."
+    shown = diff[:limit_lines]
+    if len(diff) > limit_lines:
+        shown.append(f"... ({len(diff) - limit_lines} more diff lines)")
+    return "\n".join(shown)
+
+def _sanitize_plugin_name(name):
+    name = name.strip().lower().replace(" ", "_")
+    name = re.sub(r"[^a-z0-9_]", "_", name)
+    name = re.sub(r"_+", "_", name).strip("_")
+    return name or "evolve_plugin"
+
+def evolve_plugin_template(name):
+    cmd_name = name.replace("_", "-")
+    return f'''"""Prism32 evolve plugin: {name}
+
+Stdlib-only. Generated by /evolve plugin.
+"""
+
+def register(api):
+    def {name}_cmd(args, history, cmd_log):
+        print("{cmd_name}: ready")
+        if args:
+            print("args:", args)
+
+    api.registry.register("{cmd_name}", {name}_cmd, description="Evolve-generated helper command")
+'''
+
+def write_evolve_plugin(kind, name):
+    safe = _sanitize_plugin_name(name)
+    if kind == "permanent":
+        directory = PLUGIN_DIR
+    else:
+        directory = EVOLVE_TEMP_PLUGIN_DIR
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, safe + ".py")
+    if not os.path.exists(path):
+        _safe_write(path, evolve_plugin_template(safe))
+    return path
 
 # ── Soul (persistent custom rules) ────────────────────────────
 
@@ -1151,9 +1747,8 @@ def learn_command(cmd_name, success=True, duration=0):
     entry["total_time"] += duration
     _MEMORY_DIRTY = True
     _MEMORY_FLUSH_COUNTER += 1
-    if _MEMORY_FLUSH_COUNTER >= 10:
-        _flush_memory()
-        _MEMORY_FLUSH_COUNTER = 0
+    _flush_memory()
+    _MEMORY_FLUSH_COUNTER = 0
 
 def learn_error(error_msg, context=""):
     mem = load_memory()
@@ -1200,7 +1795,15 @@ def memory_context():
     parts.append(f"disk:{info.get('disk', '')[:10]}")
     parts.append(f"ip:{info.get('ip', '')}")
     parts.append(f"cwd:{os.getcwd()}")
-    parts.append(f"user:{os.getenv('USER', '?')}")
+    parts.append(f"user:{os.getenv('USER') or os.getenv('USERNAME') or '?'}")
+    profile = mem.get("system_profile", {})
+    if profile:
+        if profile.get("shell"):
+            parts.append(f"shell:{os.path.basename(profile.get('shell', ''))[:16]}")
+        if profile.get("package_manager"):
+            parts.append(f"pkg:{profile.get('package_manager')}")
+        if profile.get("terminal"):
+            parts.append(f"term:{str(profile.get('terminal'))[:16]}")
     from datetime import datetime
     parts.append(f"time:{datetime.now().strftime('%H:%M')}")
     # Learned patterns
@@ -1216,6 +1819,12 @@ def memory_context():
     sess = mem.get("session_count", 0)
     if sess:
         parts.append(f"sessions:{sess}")
+    try:
+        hdata = load_harnesses()
+        if hdata.get("installed"):
+            parts.append("harness:" + ",".join(h.get("id", "?") for h in hdata.get("installed", [])[:3]))
+    except Exception:
+        pass
     result = " [" + " | ".join(parts) + "]" if parts else ""
     limit = getattr(Config, "MAX_MEMORY_CTX", 1024)
     if limit <= 0:
@@ -1226,7 +1835,8 @@ def memory_context():
 def _cleanup():
     _flush_memory()
 
-    print("\r\x1b[?25h\x1b[0m", end="", flush=True)
+    if ansi_enabled():
+        print("\r" + SHOW + RST, end="", flush=True)
 atexit.register(_cleanup)
 
 _shutdown_flag = False
@@ -1266,16 +1876,104 @@ signal.signal(signal.SIGINT, _handle_sigterm)
 
 # ── Platform Detection ──────────────────────────────────────────
 
+_legacy_plat = sys.platform.lower()
 class Platform:
     """Cross-platform detection and compatibility."""
-    
-    LINUX = sys.platform.startswith("linux")
-    MACOS = sys.platform == 'darwin'
-    WINDOWS = sys.platform == 'win32'
-    BSD = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
+
+    LINUX = _legacy_plat.startswith("linux")
+    MACOS = _legacy_plat == 'darwin'
+    WINDOWS = _legacy_plat == 'win32'
+    BSD = 'bsd' in _legacy_plat or _legacy_plat.startswith('netbsd')
+    IRIX = _legacy_plat.startswith('irix')
+    HPUX = _legacy_plat.startswith('hp-ux') or _legacy_plat.startswith('hpux')
+    AIX = _legacy_plat.startswith('aix')
+    SOLARIS = _legacy_plat.startswith('sunos')  # sunos5 = Solaris 10+
+    TRU64 = _legacy_plat.startswith('osf1')     # Tru64 / Digital UNIX
+    HAIKU = _legacy_plat.startswith('haiku')
+    QNX = _legacy_plat.startswith('nto') or _legacy_plat.startswith('qnx')
+    MINIX = _legacy_plat.startswith('minix')
+    CYGWIN = _legacy_plat.startswith('cygwin')
+    MSYS = _legacy_plat.startswith('msys') or _legacy_plat.startswith('mingw')
+    ZOS = _legacy_plat.startswith('zos')
+    IBM_I = _legacy_plat.startswith('os400') or _legacy_plat.startswith('as400')
+    OPENVMS = 'openvms' in _legacy_plat or _legacy_plat.startswith('vms')
     TERMUX = LINUX and os.environ.get('TERMUX_VERSION', '') != ''
     ANDROID = TERMUX or os.environ.get('ANDROID_ROOT', '') != ''
-    
+
+    @staticmethod
+    def _read_key_value_file(path):
+        data = {}
+        try:
+            with open(path) as f:
+                for line in f:
+                    if '=' in line:
+                        key, val = line.split('=', 1)
+                        data[key.strip()] = val.strip().strip('"')
+        except Exception:
+            pass
+        return data
+
+    @staticmethod
+    def _linux_release_name():
+        data = Platform._read_key_value_file('/etc/os-release')
+        return data.get('PRETTY_NAME') or data.get('NAME') or ""
+
+    @staticmethod
+    def is_wsl():
+        if os.environ.get('WSL_DISTRO_NAME') or os.environ.get('WSL_INTEROP'):
+            return True
+        try:
+            with open('/proc/version') as f:
+                return 'microsoft' in f.read().lower()
+        except Exception:
+            return False
+
+    @staticmethod
+    def is_container():
+        if os.environ.get('container') or os.path.exists('/.dockerenv') or os.path.exists('/run/.containerenv'):
+            return True
+        try:
+            with open('/proc/1/cgroup') as f:
+                text = f.read().lower()
+            return any(x in text for x in ('docker', 'kubepods', 'containerd', 'podman', 'lxc'))
+        except Exception:
+            return False
+
+    @staticmethod
+    def _linux_special_name():
+        checks = [
+            ('/etc/unraid-version', 'Unraid'),
+            ('/etc/truenas-release', 'TrueNAS SCALE'),
+            ('/etc/ix-release', 'TrueNAS SCALE'),
+            ('/etc/openwrt_release', 'OpenWrt'),
+            ('/etc/os-release', ''),
+        ]
+        for path, name in checks:
+            if name and os.path.exists(path):
+                return name
+        if os.path.exists('/etc/pve') or shutil.which('pveversion'):
+            return 'Proxmox VE'
+        if os.path.exists('/mnt/chromeos') or os.path.exists('/dev/.cros_milestone'):
+            return 'ChromeOS/Crostini'
+        return ""
+
+    @staticmethod
+    def get_windows_name():
+        """Return a friendly Windows version name without requiring new APIs."""
+        try:
+            release, version, csd, ptype = platform.win32_ver()
+            build = 0
+            parts = (version or "").split('.')
+            if len(parts) >= 3:
+                build = int(parts[2])
+            if release == "10" and build >= 22000:
+                return "Windows 11"
+            if release:
+                return f"Windows {release}"
+        except Exception:
+            pass
+        return "Windows"
+
     @staticmethod
     def get_system():
         """Get the operating system name."""
@@ -1285,24 +1983,107 @@ class Platform:
             return "Android"
         if Platform.MACOS:
             return "macOS"
-        elif Platform.LINUX:
+        if Platform.IRIX:
+            return "IRIX"
+        if Platform.HPUX:
+            return "HP-UX"
+        if Platform.AIX:
+            return "AIX"
+        if Platform.SOLARIS:
             try:
-                with open('/etc/os-release') as f:
-                    for line in f:
-                        if line.startswith('PRETTY_NAME'):
-                            return line.split('=', 1)[1].strip().strip('"')
+                with open('/etc/release') as f:
+                    first = f.readline().strip()
+                    if first:
+                        return first
             except Exception:
                 pass
-            return "Linux"
-        elif Platform.WINDOWS:
-            return "Windows"
-        elif Platform.BSD:
+            try:
+                result = subprocess.run(['uname', '-sr'], capture_output=True, text=True)
+                if result.returncode == 0 and result.stdout.strip():
+                    return result.stdout.strip()
+            except Exception:
+                pass
+            return "Solaris/SunOS"
+        if Platform.TRU64:
+            return "Tru64"
+        if Platform.HAIKU:
+            return "Haiku"
+        if Platform.QNX:
+            return "QNX Neutrino"
+        if Platform.MINIX:
+            return "MINIX"
+        if Platform.CYGWIN:
+            return "Cygwin"
+        if Platform.MSYS:
+            return "MSYS2/MinGW"
+        if Platform.ZOS:
+            return "IBM z/OS"
+        if Platform.IBM_I:
+            return "IBM i PASE"
+        if Platform.OPENVMS:
+            return "OpenVMS"
+        if Platform.LINUX:
+            special = Platform._linux_special_name()
+            base = special or Platform._linux_release_name()
+            for rel in ('/etc/redhat-release', '/etc/SuSE-release',
+                        '/etc/slackware-version', '/etc/gentoo-release'):
+                try:
+                    with open(rel) as f:
+                        base = base or f.readline().strip()
+                except Exception:
+                    pass
+            try:
+                import subprocess
+                result = subprocess.run(['uname', '-sr'], capture_output=True, text=True)
+                if result.returncode == 0 and not base:
+                    base = result.stdout.strip()
+            except Exception:
+                pass
+            base = base or "Linux"
+            tags = []
+            if Platform.is_wsl():
+                tags.append("WSL")
+            if Platform.is_container():
+                tags.append("container")
+            if os.path.exists('/.flatpak-info'):
+                tags.append("Flatpak sandbox")
+            return base + (" (" + ", ".join(tags) + ")" if tags else "")
+        if Platform.WINDOWS:
+            return Platform.get_windows_name()
+        if Platform.BSD:
+            for path in ('/etc/version', '/etc/platform', '/conf/base/etc/version'):
+                try:
+                    with open(path) as f:
+                        val = f.readline().strip()
+                    low = val.lower()
+                    if 'pfsense' in low:
+                        return 'pfSense'
+                    if 'opnsense' in low:
+                        return 'OPNsense'
+                    if 'truenas' in low or 'freenas' in low:
+                        return val
+                except Exception:
+                    pass
+            if os.path.exists('/etc/rc.freenas'):
+                return 'TrueNAS/FreeNAS'
             return "BSD"
         return platform.system()
-    
+
     @staticmethod
     def get_arch():
-        """Get system architecture."""
+        """Get system architecture, with custom chip override support.
+
+        Resolution order:
+        1. PRISM32_ARCH environment variable (manual override)
+        2. Exact match in built-in arch_map
+        3. Prefix match in built-in arch_map
+        4. Config.CUSTOM_ARCH_MAP (user-defined patterns, supports * wildcard)
+        5. platform.machine() raw value
+        """
+        override = os.environ.get('PRISM32_ARCH', '')
+        if override:
+            return override
+
         machine = platform.machine()
         arch_map = {
             'x86_64': 'x86_64',
@@ -1312,13 +2093,23 @@ class Platform:
             'i486': 'i686',
             'i586': 'i686',
             'i686': 'i686',
+            'i86pc': 'Solaris x86',
             'aarch64': 'ARM64',
+            'aarch64_be': 'ARM64 BE',
             'arm64': 'ARM64',
+            'armv8l': 'ARMv8',
+            'armv8': 'ARMv8',
             'armv7l': 'ARMv7',
             'armv7': 'ARMv7',
+            'armv7a': 'ARMv7',
+            'armhf': 'ARM hard-float',
             'armv6l': 'ARMv6',
             'armv6': 'ARMv6',
+            'armv5tel': 'ARMv5TE',
+            'armel': 'ARM soft-float',
             'arm': 'ARM',
+            'loongarch64': 'LoongArch 64',
+            'loong64': 'LoongArch 64',
             'riscv64': 'RISC-V 64',
             'riscv32': 'RISC-V 32',
             'riscv': 'RISC-V',
@@ -1329,18 +2120,68 @@ class Platform:
             'powerpc64': 'PowerPC 64',
             'mips': 'MIPS',
             'mips64': 'MIPS64',
+            'mips64el': 'MIPS64 LE',
             'mipsel': 'MIPS LE',
+            'mipsisa32r2el': 'MIPS32r2 LE',
+            'mipsisa32r6el': 'MIPS32r6 LE',
+            'mipsisa64r6el': 'MIPS64r6 LE',
             'sparc': 'SPARC',
             'sparc64': 'SPARC 64',
+            'sparcv9': 'SPARC 64',
+            'sun4u': 'SPARC 64',
+            'sun4v': 'SPARC 64',
+            'sun4us': 'SPARC 64',
+            'sun4m': 'SPARC',
+            'sun4d': 'SPARC',
+            'sun4': 'SPARC',
             's390': 'S/390',
             's390x': 'S/390x',
+            'zarch': 'IBM Z',
             'alpha': 'Alpha',
             'hppa': 'PA-RISC',
             'parisc': 'PA-RISC',
             'ia64': 'Itanium',
+            'rs6000': 'POWER',
+            'power': 'POWER',
+            'powerpcspe': 'PowerPC SPE',
+            'pmac': 'PowerPC',
+            'e2k': 'Elbrus',
+            'vax': 'VAX',
+            'IP': 'MIPS',  # SGI IP* (IP27, IP30, IP35)
         }
-        return arch_map.get(machine, machine)
-    
+
+        # 1. Exact match
+        result = arch_map.get(machine)
+        if result:
+            return result
+
+        # 2. Prefix match for entries that are prefixes of the machine string
+        for pattern, label in sorted(arch_map.items(), key=lambda x: -len(x[0])):
+            if machine.startswith(pattern):
+                return label
+
+        # 3. Custom user-defined arch map (supports * wildcard)
+        machine_lower = machine.lower()
+        for pattern, label in Config.CUSTOM_ARCH_MAP.items():
+            pat = pattern.lower()
+            if '*' in pat:
+                prefix, suffix = pat.split('*', 1)
+                if machine_lower.startswith(prefix) and machine_lower.endswith(suffix):
+                    return label
+            elif machine_lower == pat or machine.startswith(pattern):
+                return label
+
+        return machine
+
+    @staticmethod
+    def _run_cmd(args):
+        try:
+            import subprocess
+            result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+            return result.stdout.strip()
+        except Exception:
+            return ""
+
     @staticmethod
     def get_cpu():
         """Get CPU model name."""
@@ -1351,26 +2192,47 @@ class Platform:
                         if line.startswith('model name'):
                             return line.split(':')[1].strip()
             elif Platform.MACOS:
-                import subprocess
-                result = subprocess.run(['sysctl', '-n', 'machdep.cpu.brand_string'], 
-                                      capture_output=True, text=True)
-                return result.stdout.strip()
+                return Platform._run_cmd(['sysctl', '-n', 'machdep.cpu.brand_string'])
             elif Platform.WINDOWS:
-                import subprocess
-                result = subprocess.run(['wmic', 'cpu', 'get', 'name'],
-                                      capture_output=True, text=True)
-                lines = result.stdout.strip().split('\n')
+                result = Platform._run_cmd(['wmic', 'cpu', 'get', 'name'])
+                lines = result.strip().split('\n')
                 if len(lines) > 1:
                     return lines[1].strip()
             elif Platform.BSD:
-                import subprocess
-                result = subprocess.run(['sysctl', '-n', 'hw.model'],
-                                      capture_output=True, text=True)
-                return result.stdout.strip() or "Unknown CPU"
+                return Platform._run_cmd(['sysctl', '-n', 'hw.model']) or "Unknown CPU"
+            elif Platform.AIX:
+                out = Platform._run_cmd(['prtconf'])
+                for line in out.split('\n'):
+                    if 'Processor Type' in line or 'Number Of Processors' in line:
+                        return line.split(':')[-1].strip()
+                return Platform._run_cmd(['lsattr', '-El', 'proc0', '-a', 'type']) or "Unknown CPU"
+            elif Platform.HPUX:
+                out = Platform._run_cmd(['machinfo'])
+                for line in out.split('\n'):
+                    if 'processor' in line.lower() and 'Intel' in line or 'model' in line.lower():
+                        return line.strip()
+                return Platform._run_cmd(['ioscan', '-kfC', 'processor']) or "Unknown CPU"
+            elif Platform.SOLARIS:
+                out = Platform._run_cmd(['psrinfo', '-v'])
+                for line in out.split('\n'):
+                    if 'processor' in line.lower() and 'operates' in line.lower():
+                        return line.strip()
+                return Platform._run_cmd(['isainfo', '-v']) or "Unknown CPU"
+            elif Platform.IRIX:
+                out = Platform._run_cmd(['hinv'])
+                for line in out.split('\n'):
+                    if 'CPU' in line or 'Processor' in line or 'MIPS' in line:
+                        return line.strip()
+                return "Unknown CPU"
+            elif Platform.TRU64:
+                out = Platform._run_cmd(['sizer', '-v'])
+                if out:
+                    return out
+                return Platform._run_cmd(['psrinfo']) or "Unknown CPU"
         except Exception:
             pass
         return platform.processor() or "Unknown CPU"
-    
+
     @staticmethod
     def get_ram():
         """Get total RAM in MB."""
@@ -1380,60 +2242,164 @@ class Platform:
                     total = int(f.readline().split()[1])
                     return total // 1024
             elif Platform.MACOS:
-                import subprocess
-                result = subprocess.run(['sysctl', '-n', 'hw.memsize'], 
-                                      capture_output=True, text=True)
-                return int(result.stdout.strip()) // (1024 * 1024)
+                return int(Platform._run_cmd(['sysctl', '-n', 'hw.memsize']) or '0') // (1024 * 1024)
             elif Platform.WINDOWS:
-                import subprocess
-                result = subprocess.run(['wmic', 'OS', 'get', 'TotalVisibleMemorySize'],
-                                      capture_output=True, text=True)
-                lines = result.stdout.strip().split('\n')
+                result = Platform._run_cmd(['wmic', 'OS', 'get', 'TotalVisibleMemorySize'])
+                lines = result.strip().split('\n')
                 if len(lines) > 1:
                     return int(lines[1].strip()) // 1024
             elif Platform.BSD:
-                import subprocess
-                result = subprocess.run(['sysctl', '-n', 'hw.physmem'],
-                                      capture_output=True, text=True)
-                return int(result.stdout.strip()) // (1024 * 1024)
+                return int(Platform._run_cmd(['sysctl', '-n', 'hw.physmem']) or '0') // (1024 * 1024)
+            elif Platform.AIX:
+                out = Platform._run_cmd(['prtconf'])
+                for line in out.split('\n'):
+                    if 'Memory' in line or 'Good Size' in line:
+                        parts = line.split()
+                        for p in parts:
+                            try:
+                                return int(p)
+                            except ValueError:
+                                continue
+                return 0
+            elif Platform.HPUX:
+                out = Platform._run_cmd(['machinfo'])
+                for line in out.split('\n'):
+                    if 'Memory' in line or 'RAM' in line or 'Physical' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p == 'MB':
+                                return int(parts[i-1])
+                            if p == 'GB':
+                                return int(float(parts[i-1]) * 1024)
+                return 0
+            elif Platform.SOLARIS:
+                out = Platform._run_cmd(['prtconf'])
+                for line in out.split('\n'):
+                    if 'Memory' in line or 'memory' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p in ('MB', 'megabytes'):
+                                return int(parts[i-1])
+                            if p in ('GB', 'gigabytes'):
+                                return int(float(parts[i-1]) * 1024)
+                return 0
+            elif Platform.IRIX:
+                out = Platform._run_cmd(['hinv'])
+                for line in out.split('\n'):
+                    if 'Memory' in line or 'Main memory' in line:
+                        parts = line.split()
+                        for i, p in enumerate(parts):
+                            if p == 'MB':
+                                return int(parts[i-1])
+                            if p == 'GB':
+                                return int(float(parts[i-1]) * 1024)
+                return 0
+            elif Platform.TRU64:
+                out = Platform._run_cmd(['uerf', '-r', '300'])
+                if not out:
+                    out = Platform._run_cmd(['vmstat', '-P'])
+                return 0
         except Exception:
             pass
         return 0
-    
+
     @staticmethod
     def get_uptime():
         """Get system uptime as string."""
         try:
+            secs = 0
             if Platform.LINUX:
                 with open('/proc/uptime') as f:
                     secs = float(f.read().split()[0])
             elif Platform.MACOS or Platform.BSD:
-                import subprocess, re
-                result = subprocess.run(['sysctl', '-n', 'kern.boottime'],
-                                      capture_output=True, text=True)
-                import time
-                m = re.search(r'sec\s*=\s*(\d+)', result.stdout)
+                import re, time
+                result = Platform._run_cmd(['sysctl', '-n', 'kern.boottime'])
+                m = re.search(r'sec\s*=\s*(\d+)', result)
                 boot_time = int(m.group(1)) if m else 0
                 secs = time.time() - boot_time
+            elif Platform.AIX:
+                import re
+                out = Platform._run_cmd(['uptime'])
+                m = re.search(r'up\s+(\d+)\s+days?', out)
+                if m:
+                    return f"{m.group(1)}d 0h"
+                m = re.search(r'up\s+(\d+):(\d+)', out)
+                if m:
+                    return f"0d {m.group(1)}h"
+                return "N/A"
+            elif Platform.HPUX:
+                import re
+                out = Platform._run_cmd(['uptime'])
+                m = re.search(r'up\s+(\d+)\s+days?', out)
+                if m:
+                    return f"{m.group(1)}d 0h"
+                m = re.search(r'up\s+(\d+):(\d+)', out)
+                if m:
+                    return f"0d {m.group(1)}h"
+                return "N/A"
+            elif Platform.SOLARIS:
+                import re
+                out = Platform._run_cmd(['prtconf', '-v'])
+                out2 = Platform._run_cmd(['kstat', '-p', 'unix:0:system_misc:boot_time'])
+                if out2:
+                    try:
+                        boot_time = int(out2.split()[-1])
+                        import time
+                        secs = time.time() - boot_time
+                    except (ValueError, IndexError):
+                        out = Platform._run_cmd(['uptime'])
+                        m = re.search(r'up\s+(\d+)\s+days?', out)
+                        if m:
+                            return f"{m.group(1)}d 0h"
+                        return "N/A"
+                else:
+                    return "N/A"
+            elif Platform.IRIX:
+                import re
+                out = Platform._run_cmd(['uptime'])
+                m = re.search(r'up\s+(\d+)\s+days?', out)
+                if m:
+                    return f"{m.group(1)}d 0h"
+                return "N/A"
+            elif Platform.TRU64:
+                import re
+                out = Platform._run_cmd(['uptime'])
+                m = re.search(r'up\s+(\d+)\s+days?', out)
+                if m:
+                    return f"{m.group(1)}d 0h"
+                return "N/A"
+            elif Platform.WINDOWS:
+                out = Platform._run_cmd(['wmic', 'os', 'get', 'lastbootuptime', '/value'])
+                for line in out.split('\n'):
+                    if line.lower().startswith('lastbootuptime='):
+                        stamp = line.split('=', 1)[1].strip()[:14]
+                        try:
+                            boot = datetime.strptime(stamp, '%Y%m%d%H%M%S')
+                            secs = (datetime.now() - boot).total_seconds()
+                            break
+                        except Exception:
+                            return "N/A"
+                else:
+                    return "N/A"
             else:
                 return "N/A"
-            
+
             days = int(secs // 86400)
             hours = int((secs % 86400) // 3600)
             return f"{days}d {hours}h"
         except Exception:
             return "N/A"
-    
+
     @staticmethod
     def get_package_manager():
         """Detect available package manager (OS-aware)."""
-        # Use sys.platform directly — Platform.get_system() returns friendly
-        # names like 'macOS', 'BSD', or 'Ubuntu 22.04.4 LTS' that are not
-        # reliable for platform matching.
         plat = sys.platform.lower()
 
-        # OS-specific priority order
-        if plat == 'darwin':
+        if Platform.TERMUX:
+            check_order = [
+                ('pkg', 'termux-pkg'), ('apt', 'apt'), ('apt-get', 'apt'),
+            ]
+        elif plat == 'darwin':
             check_order = [
                 ('brew', 'brew'), ('port', 'macports'),
                 ('pkgin', 'pkgin'), ('pkg_add', 'pkg_add'), ('pkg', 'pkg'),
@@ -1445,9 +2411,13 @@ class Platform:
             ]
         elif 'linux' in plat:
             check_order = [
-                ('apt', 'apt'), ('apt-get', 'apt'), ('dnf', 'dnf'), ('yum', 'yum'),
+                ('apt', 'apt'), ('apt-get', 'apt'), ('dnf', 'dnf'), ('microdnf', 'microdnf'), ('tdnf', 'tdnf'), ('yum', 'yum'),
                 ('pacman', 'pacman'), ('zypper', 'zypper'), ('apk', 'apk'),
-                ('nix-env', 'nix'), ('snap', 'snap'), ('flatpak', 'flatpak'),
+                ('rpm-ostree', 'rpm-ostree'), ('swupd', 'swupd'),
+                ('opkg', 'opkg'), ('ipkg', 'ipkg'), ('emerge', 'emerge'),
+                ('xbps-install', 'xbps'), ('eopkg', 'eopkg'), ('slackpkg', 'slackpkg'),
+                ('pkgtool', 'pkgtool'), ('guix', 'guix'), ('nix-env', 'nix'),
+                ('snap', 'snap'), ('flatpak', 'flatpak'), ('synopkg', 'synopkg'),
                 ('brew', 'brew'), ('port', 'macports'),
                 ('pkgin', 'pkgin'), ('pkg_add', 'pkg_add'), ('pkg', 'pkg'),
             ]
@@ -1455,13 +2425,52 @@ class Platform:
             check_order = [
                 ('winget', 'winget'), ('choco', 'chocolatey'), ('scoop', 'scoop'),
             ]
+        elif 'hp-ux' in plat or 'hpux' in plat:
+            check_order = [
+                ('swinstall', 'swinstall'), ('swlist', 'swinstall'),
+            ]
+        elif plat.startswith('aix'):
+            check_order = [
+                ('installp', 'installp'), ('yum', 'yum'), ('rpm', 'rpm'),
+            ]
+        elif plat.startswith('sunos'):
+            check_order = [
+                ('pkg', 'solaris-pkg'), ('pkgin', 'pkgin'), ('pkgadd', 'pkgadd'), ('pkgutil', 'pkgutil'), ('pkgrm', 'pkgadd'),
+            ]
+        elif Platform.HAIKU:
+            check_order = [
+                ('pkgman', 'pkgman'),
+            ]
+        elif Platform.QNX:
+            check_order = [
+                ('pkg', 'qnx-pkg'), ('opkg', 'opkg'),
+            ]
+        elif Platform.CYGWIN:
+            check_order = [
+                ('apt-cyg', 'apt-cyg'), ('setup-x86_64', 'cygwin-setup'), ('setup-x86', 'cygwin-setup'),
+            ]
+        elif Platform.MSYS:
+            check_order = [
+                ('pacman', 'pacman'),
+            ]
+        elif plat.startswith('irix'):
+            check_order = [
+                ('inst', 'inst'), ('versions', 'inst'),
+            ]
+        elif plat.startswith('osf1'):
+            check_order = [
+                ('setld', 'setld'), ('dpkg', 'dpkg'), ('rpm', 'rpm'),
+            ]
         else:
             check_order = [
                 ('brew', 'brew'), ('port', 'macports'),
-                ('apt', 'apt'), ('apt-get', 'apt'), ('dnf', 'dnf'), ('yum', 'yum'),
-                ('pacman', 'pacman'), ('zypper', 'zypper'), ('apk', 'apk'),
-                ('nix-env', 'nix'), ('snap', 'snap'), ('flatpak', 'flatpak'),
+                ('apt', 'apt'), ('apt-get', 'apt'), ('dnf', 'dnf'), ('microdnf', 'microdnf'), ('tdnf', 'tdnf'), ('yum', 'yum'),
+                ('pacman', 'pacman'), ('zypper', 'zypper'), ('apk', 'apk'), ('rpm-ostree', 'rpm-ostree'), ('swupd', 'swupd'), ('opkg', 'opkg'), ('ipkg', 'ipkg'),
+                ('emerge', 'emerge'), ('xbps-install', 'xbps'), ('eopkg', 'eopkg'), ('slackpkg', 'slackpkg'),
+                ('guix', 'guix'), ('nix-env', 'nix'), ('snap', 'snap'), ('flatpak', 'flatpak'),
                 ('pkgin', 'pkgin'), ('pkg_add', 'pkg_add'), ('pkg', 'pkg'),
+                ('swinstall', 'swinstall'), ('inst', 'inst'), ('setld', 'setld'),
+                ('installp', 'installp'), ('pkgadd', 'pkgadd'), ('pkgman', 'pkgman'), ('pkgutil', 'pkgutil'),
             ]
 
         for cmd_name, name in check_order:
@@ -1472,19 +2481,32 @@ class Platform:
                 pass
 
         return None
-    
+
     @staticmethod
     def get_install_command(package):
         """Get the install command for the detected package manager."""
         pm = Platform.get_package_manager()
-        
+
         commands = {
             'apt': f'sudo apt-get install -y {package}',
             'dnf': f'sudo dnf install -y {package}',
+            'microdnf': f'sudo microdnf install -y {package}',
+            'tdnf': f'sudo tdnf install -y {package}',
             'yum': f'sudo yum install -y {package}',
             'pacman': f'sudo pacman -S --noconfirm {package}',
             'zypper': f'sudo zypper install -y {package}',
             'apk': f'sudo apk add {package}',
+            'rpm-ostree': f'sudo rpm-ostree install {package} && systemctl reboot',
+            'swupd': f'sudo swupd bundle-add {package}',
+            'termux-pkg': f'pkg install -y {package}',
+            'opkg': f'opkg install {package}',
+            'ipkg': f'ipkg install {package}',
+            'emerge': f'sudo emerge {package}',
+            'xbps': f'sudo xbps-install -S {package}',
+            'eopkg': f'sudo eopkg install -y {package}',
+            'slackpkg': f'sudo slackpkg install {package}',
+            'pkgtool': f'sudo pkgtool # install {package} manually',
+            'guix': f'guix install {package}',
             'nix': f'nix-env -iA {package}',
             'snap': f'sudo snap install {package}',
             'flatpak': f'flatpak install -y flathub {package}',
@@ -1493,20 +2515,49 @@ class Platform:
             'pkgin': f'sudo pkgin install {package}',
             'pkg_add': f'sudo pkg_add {package}',
             'pkg': f'sudo pkg install -y {package}',
+            'pkgman': f'pkgman install {package}',
+            'qnx-pkg': f'pkg install {package}',
             'winget': f'winget install {package}',
             'chocolatey': f'choco install {package}',
             'scoop': f'scoop install {package}',
+            'swinstall': f'sudo swinstall -x mount_all=false {package}',
+            'inst': f'sudo inst -f {package}',
+            'setld': f'sudo setld -l {package}',
+            'installp': f'sudo installp -acgXd . {package}',
+            'solaris-pkg': f'sudo pkg install {package}',
+            'pkgutil': f'sudo pkgutil -i {package}',
+            'pkgadd': f'sudo pkgadd -d . {package}',
+            'apt-cyg': f'apt-cyg install {package}',
+            'cygwin-setup': f'setup-x86_64 -q -P {package}',
+            'synopkg': f'synopkg # install {package} from Package Center or Entware',
         }
-        
+
         return commands.get(pm, f'echo "Install {package} using your package manager"')
-    
+
+    @staticmethod
+    def get_ip():
+        """Get a best-effort primary IPv4 address without platform tools."""
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            try:
+                return socket.gethostbyname(socket.gethostname())
+            except Exception:
+                return "N/A"
+
     @staticmethod
     def get_network_command():
         """Get the appropriate network command."""
-        if Platform.MACOS or Platform.BSD:
-            return "ifconfig"
-        return "ip"
-    
+        if Platform.WINDOWS:
+            return "ipconfig"
+        if Platform.LINUX:
+            return "ip"
+        return "ifconfig"
+
     @staticmethod
     def is_root():
         """Check if running as root."""
@@ -1519,7 +2570,7 @@ class Platform:
 
 class Config:
     API_BASE = "http://127.0.0.1:8080"
-    MODEL = "qwen/qwen3.7-max"
+    MODEL = "deepseek/deepseek-v4-flash"
     API_KEY = ""
     MAX_HISTORY = 2000
     CMD_TIMEOUT = 600
@@ -1580,6 +2631,7 @@ class Config:
     DEBUG = False  # Debug logging enabled
     CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "config.json")
     CUSTOM_THEME = None  # User-defined theme name
+    CUSTOM_ARCH_MAP = {}  # User-defined arch pattern -> label mappings
     
     @classmethod
     def save_config(cls):
@@ -1604,6 +2656,7 @@ class Config:
             "thinking_effort": cls.THINKING_EFFORT,
             "max_memory_ctx": cls.MAX_MEMORY_CTX,
             "agent_name": cls.AGENT_NAME,
+            "custom_arch_map": cls.CUSTOM_ARCH_MAP,
         }
         
         with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -1645,6 +2698,8 @@ class Config:
             if "subagent_model" in data: cls.SUBAGENT_MODEL = data["subagent_model"]
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
+            if "custom_arch_map" in data and isinstance(data["custom_arch_map"], dict):
+                cls.CUSTOM_ARCH_MAP = data["custom_arch_map"]
             if "providers" in data:
                 for prov_name, prov_cfg in data["providers"].items():
                     if prov_name not in PROVIDER_REGISTRY:
@@ -1789,24 +2844,84 @@ register_theme("slate",
     accent="\x1b[34m", warn="\x1b[38;5;130m", err="\x1b[31m",
     glow="\x1b[5;38;5;238m", bar="")
 
+# ── Legacy 16-color / retro terminal themes ──────────────────
+# These use ONLY standard ANSI 16-color codes (30-37, 90-97, 40-47, 100-107)
+# plus SGR attributes (1-7). No 256-color (38;5;N) sequences.
+# Safe on: IRIX iris-ansi, HP-UX hpterm, AIX xterm, Solaris CDE, DEC VTxxx,
+#          old xterm, rxvt, and any terminal with basic ANSI color support.
+
+register_theme("synthcity",
+    primary="\x1b[96m", bright="\x1b[95m", dim="\x1b[36m",
+    accent="\x1b[95m", warn="\x1b[93m", err="\x1b[91m",
+    glow="\x1b[5;95m", bar="\x1b[45m")
+
+register_theme("outrun",
+    primary="\x1b[95m", bright="\x1b[93m", dim="\x1b[35m",
+    accent="\x1b[96m", warn="\x1b[92m", err="\x1b[91m",
+    glow="\x1b[5;95m", bar="\x1b[104m")
+
+register_theme("laserdisc",
+    primary="\x1b[94m", bright="\x1b[96m", dim="\x1b[34m",
+    accent="\x1b[95m", warn="\x1b[93m", err="\x1b[91m",
+    glow="\x1b[5;96m", bar="\x1b[44m")
+
+register_theme("vapordark",
+    primary="\x1b[95m", bright="\x1b[97m", dim="\x1b[35m",
+    accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
+    glow="\x1b[5;95m", bar="\x1b[45m")
+
+register_theme("chromecrt",
+    primary="\x1b[92m", bright="\x1b[97m", dim="\x1b[32m",
+    accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
+    glow="\x1b[5;92m", bar="\x1b[42m")
+
+register_theme("sgi",
+    primary="\x1b[96m", bright="\x1b[97m", dim="\x1b[36m",
+    accent="\x1b[94m", warn="\x1b[93m", err="\x1b[91m",
+    glow="\x1b[5;36m", bar="\x1b[46m")
+
+register_theme("dec",
+    primary="\x1b[32m", bright="\x1b[92m", dim="\x1b[2;32m",
+    accent="\x1b[33m", warn="\x1b[33m", err="\x1b[91m",
+    glow="\x1b[5;92m", bar="\x1b[42m")
+
+register_theme("monoamber",
+    primary="\x1b[33m", bright="\x1b[93m", dim="\x1b[2;33m",
+    accent="\x1b[93m", warn="\x1b[93m", err="\x1b[91m",
+    glow="\x1b[5;33m", bar="\x1b[43m")
+
+register_theme("iris",
+    primary="\x1b[37m", bright="\x1b[97m", dim="\x1b[2;37m",
+    accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
+    glow="\x1b[5;37m", bar="\x1b[44m")
+
+register_theme("hpterm",
+    primary="\x1b[92m", bright="\x1b[93m", dim="\x1b[32m",
+    accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
+    glow="\x1b[5;92m", bar="\x1b[46m")
+
 # ── Model Providers ────────────────────────────────────────────
 
 # ── Provider Registry (built-ins) ──────────────────────
-register_provider("local", display_name="Local (llama.cpp)", api_base="http://127.0.0.1:8080", model="qwen-3.7", description="Local llama.cpp server")
-register_provider("ollama", display_name="Ollama (localhost)", api_base="http://localhost:11434/v1", model="qwen3:14b", description="Local Ollama server")
+register_provider("local", display_name="Local (llama.cpp)", api_base="http://127.0.0.1:8080", model="deepseek-v4-flash", description="Local llama.cpp server")
+register_provider("ollama", display_name="Ollama (localhost)", api_base="http://localhost:11434/v1", model="deepseek-v4-flash", description="Local Ollama server")
 register_provider("openai", display_name="OpenAI", api_base="https://api.openai.com/v1", model="gpt-4o", description="OpenAI GPT-4o (requires API key)")
 register_provider("anthropic", display_name="Anthropic", api_base="https://api.anthropic.com/v1", model="claude-sonnet-4-20250514", description="Anthropic Claude (requires API key)")
 register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", description="Groq fast inference")
 register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", description="Together AI inference")
-register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="qwen/qwen3.7-max", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)")
+register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)")
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)")
 
 
 _T_CACHE = {}
 def T():
+    if not ansi_enabled():
+        return _PLAIN_THEME
     theme = Config.THEME
     if theme not in _T_CACHE:
-        _T_CACHE[theme] = THEME_REGISTRY.get(theme, THEME_REGISTRY.get("phosphor", {}))
+        data = dict(THEME_REGISTRY.get(theme, THEME_REGISTRY.get("phosphor", {})))
+        data.setdefault("ok", data.get("bright", ""))
+        _T_CACHE[theme] = data
     return _T_CACHE[theme]
 
 def _clear_theme_cache():
@@ -1823,6 +2938,8 @@ DIM  = "\x1b[2m"
 HIDE = "\x1b[?25l"
 SHOW = "\x1b[?25h"
 CLS  = "\x1b[2J\x1b[H"
+_ANSI_ENABLED = None
+_PLAIN_THEME = {"primary": "", "bright": "", "dim": "", "accent": "", "warn": "", "err": "", "glow": "", "bar": "", "ok": ""}
 
 def _no_braces(s):
     """Escape curly braces so content can be safely used in f-strings."""
@@ -1835,16 +2952,57 @@ def strip_ansi(text):
 
 def _supports_ansi():
     """Check if terminal supports ANSI escape codes."""
-    if 'NO_COLOR' in os.environ or os.environ.get('TERM') in ('dumb', 'emacs', ''):
+    term = os.environ.get('TERM', '').lower()
+    if 'NO_COLOR' in os.environ:
         return False
     if Platform.WINDOWS:
         try:
             import ctypes
-            return ctypes.windll.kernel32.GetConsoleMode(
-                ctypes.windll.kernel32.GetStdHandle(-11), ctypes.byref(ctypes.c_uint32())) != 0
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetStdHandle(-11)
+            mode = ctypes.c_uint32()
+            if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                return False
+            # Windows 10+ supports virtual terminal sequences when enabled.
+            if kernel32.SetConsoleMode(handle, mode.value | 0x0004):
+                return True
+            return False
         except Exception:
             return False
-    return sys.stdout.isatty()
+    if term in ('dumb', 'emacs', '', 'none', 'unknown'):
+        return False
+    if not sys.stdout.isatty():
+        return False
+    if term:
+        vt100_compat = (
+            'vt100', 'xterm', 'ansi', 'linux', 'rxvt', 'putty',
+            'dtterm', 'nsterm', 'konsole', 'gnome', 'screen',
+            'tmux', 'iris-ansi', 'hpterm',
+        )
+        if any(t in term for t in vt100_compat):
+            return True
+        try:
+            import subprocess
+            result = subprocess.run(['tput', 'colors'], capture_output=True, text=True, timeout=2)
+            if result.returncode == 0 and result.stdout.strip().isdigit():
+                return int(result.stdout.strip()) >= 8
+        except Exception:
+            pass
+    return True
+
+def ansi_enabled():
+    global _ANSI_ENABLED
+    if _ANSI_ENABLED is None:
+        _ANSI_ENABLED = _supports_ansi()
+    return _ANSI_ENABLED
+
+def apply_ansi_compat():
+    """Disable escape sequences on consoles that cannot handle them."""
+    global RST, BOLD, DIM, HIDE, SHOW, CLS
+    if ansi_enabled():
+        return
+    RST = BOLD = DIM = HIDE = SHOW = CLS = ""
+    _clear_theme_cache()
 
 # ── Persistent footer / scroll region ───────────────────────
 _term_size = os.terminal_size((80, 24))
@@ -1861,6 +3019,9 @@ def update_terminal_size():
 def set_scroll_region():
     """Reserve bottom line for the footer; everything else scrolls above."""
     global _footer_reserved
+    if not ansi_enabled() or not sys.stdout.isatty():
+        _footer_reserved = False
+        return
     _footer_reserved = True
     h = _term_size.lines
     if h > 1:
@@ -1871,6 +3032,8 @@ def reset_scroll_region():
     """Reset scrolling region to full screen."""
     global _footer_reserved
     _footer_reserved = False
+    if not ansi_enabled():
+        return
     sys.stdout.write("\x1b[r")
     sys.stdout.flush()
 
@@ -1879,6 +3042,8 @@ def release_footer_for_output():
     if not _footer_reserved:
         return
     reset_scroll_region()
+    if not ansi_enabled():
+        return
     h = _term_size.lines
     if h > 0:
         sys.stdout.write(f"\x1b[{h};1H\r\x1b[K\n")
@@ -1886,12 +3051,14 @@ def release_footer_for_output():
 
 def move_to_footer():
     """Move cursor to the bottom line (reserved footer)."""
+    if not ansi_enabled():
+        return
     sys.stdout.write(f"\x1b[{_term_size.lines};1H")
     sys.stdout.flush()
 
 def move_to_scroll_bottom():
     """Move cursor to the last line of the scroll region (just above footer)."""
-    if not _footer_reserved:
+    if not _footer_reserved or not ansi_enabled():
         return
     h = _term_size.lines
     if h > 1:
@@ -1902,7 +3069,7 @@ def move_to_scroll_bottom():
 
 def clear_footer():
     """Clear the footer line."""
-    if not _footer_reserved:
+    if not _footer_reserved or not ansi_enabled():
         return
     move_to_footer()
     sys.stdout.write("\x1b[K")
@@ -1922,13 +3089,25 @@ def activity_vector(history=None, frame=0, busy=False):
 
 def draw_footer(status_bar, spin_char=None):
     """Draw the footer at the bottom of the screen."""
-    if not _footer_reserved:
+    if not _footer_reserved or not ansi_enabled():
         return
     t = T()
     indicator = spin_char if spin_char is not None else activity_vector()
     clear_footer()
     sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
     sys.stdout.flush()
+
+def read_footer_input(status_bar):
+    """Read one line from the reserved footer without confusing readline."""
+    if not _footer_reserved:
+        t = T()
+        return input(rl_prompt(f" {t['primary']}prism32>{RST} ")).strip()
+    draw_footer(status_bar)
+    line = sys.stdin.readline()
+    if line == "":
+        raise EOFError
+    clear_footer()
+    return line.strip()
 
 # ── Interjection (type while AI streams) ─────────────────────
 
@@ -2041,9 +3220,14 @@ def _interjection_poll():
                             _INTERJECTION_HAS_TYPED = True
                     continue
                 if ch in ('\n', '\r'):
-                    if _INTERJECTION_BUF:
-                        _INTERJECTION_HISTORY.append(_INTERJECTION_BUF)
-                    result = _INTERJECTION_BUF
+                    result = _INTERJECTION_BUF.strip()
+                    if not result:
+                        _INTERJECTION_BUF = ""
+                        _INTERJECTION_CURSOR = 0
+                        _INTERJECTION_HAS_TYPED = False
+                        _draw_interjection_footer()
+                        return None
+                    _INTERJECTION_HISTORY.append(result)
                     _INTERJECTION_BUF = ""
                     _INTERJECTION_CURSOR = 0
                     _INTERJECTION_RESULT = result
@@ -2682,7 +3866,7 @@ def banner():
     for line in art:
         print(f"  {line}")
     print(f"{RST}")
-    print(f"{d}  v6.6 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.7 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
@@ -2712,7 +3896,8 @@ def get_mem():
         with open('/proc/meminfo') as f:
             return int(f.readline().split()[1]) // 1024
     except Exception:
-        return 0
+        ram = Platform.get_ram()
+        return ram if ram > 0 else 0
 
 # ── System Info ──────────────────────────────────────────────
 
@@ -2776,7 +3961,7 @@ def display_system_info():
 # ── Shell Execution ──────────────────────────────────────────
 
 def _pty_su_root(cmd, timeout=None):
-    """Run command as root via pty-based su (BSD needs a TTY for su)."""
+    """Run command as root via pty-based su (platforms needing a TTY for su)."""
     if select is None:
         return "[ERROR] select module not available on this platform"
     if pty is None:
@@ -2789,7 +3974,18 @@ def _pty_su_root(cmd, timeout=None):
         return "[ERROR] su not found on this system"
     pid, fd = pty.fork()
     if pid == 0:
-        os.execv(su_path, ["su", "root", "-c", cmd])
+        if Platform.HPUX:
+            os.execv(su_path, ["su", "root", "-c", cmd])
+        elif Platform.AIX:
+            os.execv(su_path, ["su", "root", "-c", cmd])
+        elif Platform.SOLARIS:
+            os.execv(su_path, ["su", "root", "-c", cmd])
+        elif Platform.IRIX:
+            os.execv(su_path, ["su", "root", "-c", cmd])
+        elif Platform.TRU64:
+            os.execv(su_path, ["su", "root", "-c", cmd])
+        else:
+            os.execv(su_path, ["su", "root", "-c", cmd])
     else:
         time.sleep(0.3)
         os.write(fd, (password + "\n").encode())
@@ -2842,6 +4038,30 @@ def _try_plugin_cmd(c):
             v = _quantum.get(key)
             return f"Quantum: {key} = {v}" if v is not None else f"Key '{key}' not found"
         return f"Usage: /quantum <key>:<value> or /quantum <key>:"
+    if cmd_name in ('/harness', 'harness'):
+        sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "show"
+        if sub == "scan":
+            return format_harnesses(ensure_harness_scan(force=True))
+        if sub == "context":
+            return harness_context()
+        if sub == "path":
+            return HARNESS_FILE
+        return format_harnesses(load_harnesses())
+    if cmd_name in ('/evolve', 'evolve'):
+        sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "context"
+        if sub == "tools":
+            return format_tool_scan(scan_available_tools())
+        if sub in ("diff", "compare"):
+            return evolve_diff()
+        if sub in ("docs", "doc"):
+            ensure_evolve_files(refresh_tools=False)
+            return _safe_read(EVOLVE_DOC_FILE)[:4000]
+        return evolve_context()
+    if cmd_name in ('/memory', 'memory'):
+        sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "startup"
+        if sub in ("path", "paths"):
+            return f"startup_memory={STARTUP_MEMORY_FILE}\nmemory_json={MEMORY_FILE}"
+        return startup_memory_context(limit=3000)
     if registry.get(cmd_name):
         return registry.dispatch_capture(cmd_name, cmd_args)
     return None
@@ -2850,12 +4070,9 @@ def run_cmd(cmd, timeout=None):
     if timeout is None:
         timeout = Config.CMD_TIMEOUT
     try:
-        if Platform.BSD and Config.ROOT_PASS and ('su' in cmd or 'sudo' in cmd):
-            return _pty_su_root(cmd, timeout)
-        env = None
         if Config.ROOT_PASS and ('su' in cmd or 'sudo' in cmd):
-            env = {**os.environ, "ROOT_PASS": Config.ROOT_PASS}
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout, env=env)
+            return _pty_su_root(cmd, timeout)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         out = result.stdout + result.stderr
         return out[-4000:] if len(out) > 4000 else out
     except subprocess.TimeoutExpired:
@@ -2950,6 +4167,7 @@ Read a specific key using:
 
 Use /remember <text> to store important findings in long-term memory.
 Use /recall <query> to search past memories from any agent.
+Detected external AI harnesses are listed in context. If useful, inspect their help first and use them through execute blocks.
 """
 
 class SubAgent:
@@ -3007,10 +4225,12 @@ class SubAgent:
                     self.error = resp or "No response"
                     self.result = f"[SUBAGENT ERROR] {self.error}"
                     break
-                resp = handle_ask_blocks(resp, self._history)
+                resp, _asked = handle_ask_blocks(resp, self._history, allow_input=False, return_asked=True)
                 commands = extract_blocks(resp, 'execute')
                 if commands:
                     clean = clean_response(resp)
+                    if resp.strip():
+                        self._history.append({"role": "assistant", "content": resp})
                     for c in commands:
                         c = c.strip()
                         plugin_result = _try_plugin_cmd(c)
@@ -3105,18 +4325,19 @@ Use /remember <text> to store important findings in long-term memory (persists a
 Use /recall <query> to search past memories when you need relevant context on a topic.
 Use /subagents to list running or completed subagents.
 Skills are reusable workflows stored in ~/.prism32/skills/. Use /skill-list to see them and /skill-load <name> to activate a skill's instructions in context.
+Use /harness scan to detect external AI agent CLIs and /harness delegate <task> to launch a super subagent seeded with those capabilities.
+Use /evolve on when Prism32 needs self-repair/plugin-generation docs, baseline comparison, and local tool exploration.
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
 
 CROSS-PLATFORM RULES:
-1. Detect the OS first: uname -s (Linux/Darwin/macOS/NetBSD/FreeBSD/OpenBSD/Windows)
-2. Use the system's actual package manager: apt/apt-get (Debian/Ubuntu), dnf/yum (Fedora/RHEL), pacman (Arch), zypper (openSUSE), apk (Alpine), nix (NixOS), snap/flatpak (universal Linux), brew/port (macOS), pkgin/pkg_add/pkg (BSD), winget/choco/scoop (Windows). Prefer the OS-native manager over universal ones.
-3. Use appropriate network command: ip/ss (Linux), ifconfig/netstat (macOS/BSD), Get-NetAdapter (Windows PowerShell)
-4. For root access on Linux: echo "$ROOT_PASS" | su -c "command" or use sudo
-5. For root access on BSD: su root -c "command" (password injected automatically)
-6. For root access on macOS: sudo command (will prompt for password)
-7. On Windows, use PowerShell or cmd; avoid Unix-only utilities
+1. Detect the OS first: uname -s when available, plus /sysinfo context. Targets include Linux, Android/Termux, ChromeOS/Crostini, WSL/WSL2, Docker/Podman/Kubernetes/CI containers, Proxmox, TrueNAS, pfSense, OPNsense, Unraid, SteamOS, macOS, BSD, Windows, SunOS/Solaris/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX, MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, OpenVMS, and embedded BusyBox systems.
+2. Use the system's actual package manager: apt/apt-get, dnf/microdnf/tdnf/yum, pacman, zypper, apk, rpm-ostree, swupd, opkg/ipkg, emerge, xbps-install, eopkg, slackpkg, guix, nix, brew/port, pkgin/pkg_add/pkg, Solaris pkg/pkgadd/pkgutil, swinstall, inst, setld, installp, pkgman, winget/choco/scoop. Prefer OS-native over universal ones.
+3. Use appropriate network command: ip/ss (modern Linux), busybox/ip/ifconfig/netstat (embedded), ifconfig/netstat (macOS/BSD/Solaris/old Unix), ipconfig/route/netstat/Get-NetAdapter (Windows). In containers/CI, check namespace and mounted filesystem limits before changing networking.
+4. Prefer POSIX sh syntax on unknown Unix, embedded systems, containers, Solaris, AIX, HP-UX, IRIX, Tru64, QNX, and appliance/NAS platforms. Avoid GNU-only flags unless GNU tools are detected.
+5. On appliances and immutable systems (Proxmox, TrueNAS, pfSense, OPNsense, Unraid, SteamOS, Fedora CoreOS/Silverblue/Kinoite, Clear Linux), inspect documentation/tooling first and avoid host storage/network changes unless explicitly requested.
+6. For root access on Linux: echo "$ROOT_PASS" | su -c "command" or use sudo. For BSD/old Unix: su root -c "command". For macOS: sudo command. On Windows, use PowerShell or cmd; avoid Unix-only utilities unless in Cygwin/MSYS/WSL.
 
 GENERAL RULES:
 1. ALWAYS run commands to investigate - don't just suggest them
@@ -3131,9 +4352,11 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2):
     # Filter empty messages
     clean_messages = []
     for m in messages:
-        if m.get("content", "").strip():
-            clean_messages.append(m)
-        elif m.get("role") in ("system", "assistant"):
+        content = m.get("content", "")
+        if isinstance(content, list):
+            if content:
+                clean_messages.append(m)
+        elif str(content).strip():
             clean_messages.append(m)
     if not clean_messages:
         clean_messages = messages[:1]
@@ -3344,6 +4567,14 @@ def clean_response(text):
         clean = re.sub(rf'```{tag}\n.*?```', '', clean, flags=re.DOTALL)
     return clean.strip()
 
+def clean_ask_blocks(text):
+    """Remove ask blocks while preserving execute blocks for the agent loop."""
+    clean = text
+    if '</think>' in clean:
+        clean = clean.split('</think>')[-1].strip()
+    clean = re.sub(r'```ask\n.*?```', '', clean, flags=re.DOTALL)
+    return clean.strip()
+
 # ── Context Builder ──────────────────────────────────────────
 
 def build_context():
@@ -3354,6 +4585,10 @@ def build_context():
         extra = "\n" + "\n".join(_PluginHooks._extra_context) + "\n"
     soul = read_soul()
     soul_block = f"\nCUSTOM RULES (soul.md):\n{soul}\n" if soul else ""
+    startup_mem = startup_memory_context()
+    startup_block = f"\nSTARTUP MEMORY ({STARTUP_MEMORY_FILE}):\n{startup_mem}\n" if startup_mem else ""
+    harness_block = f"\n{harness_context()}\n"
+    evolve_block = f"\n{evolve_context()}\n" if _EVOLVE_MODE else ""
     
     # List available plugin commands that the AI can invoke via execute blocks
     plugin_cmds = [cmd.name for cmd in registry.all()
@@ -3367,13 +4602,15 @@ def build_context():
         f"CPU: {info.get('cpu', '')}\nRAM: {info.get('ram', '')}\n"
         f"Disk: {info.get('disk', '')}\nIP: {info.get('ip', '')}\n"
         f"Uptime: {info.get('uptime', '')}\nCWD: {os.getcwd()}\n"
-        f"Memory:{mem}\n{extra}{soul_block}{plugin_block}\nPROMPTSHARD status: {read_promptshard().get('status', 'active')} | Captain agent delegates using /delegate and /spawn with quantum context syncing."
+        f"Memory:{mem}\n{extra}{startup_block}{soul_block}{harness_block}{evolve_block}{plugin_block}\nPROMPTSHARD status: {read_promptshard().get('status', 'active')} | Captain agent delegates using /delegate and /spawn with quantum context syncing."
     )
 
 # ── User Interaction (ask / interject) ──────────────────────
 
 def ask_user(question):
     t = T()
+    if _footer_reserved:
+        release_footer_for_output()
     print(f"\n{t['warn']}+ QUESTION FROM AI:{RST}")
     box("AI NEEDS INPUT", question, "warn")
     try:
@@ -3382,27 +4619,32 @@ def ask_user(question):
         answer = ""
     return answer
 
-def handle_ask_blocks(resp, history, goal_mode=False):
+def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_asked=False):
     t = T()
     questions = extract_blocks(resp, 'ask')
     if not questions:
-        return resp
+        return (resp, False) if return_asked else resp
     
-    if goal_mode:
+    if goal_mode or not allow_input:
         # In goal mode, don't ask questions - strip them and continue
-        cleaned = clean_response(resp)
+        cleaned = clean_ask_blocks(resp)
         if not cleaned:
-            # Force the model to execute commands instead of asking
-            cleaned = "Run commands. Do not ask questions."
-        viz.status("Stripped question blocks in goal mode", "warning")
-        return cleaned
+            if allow_input:
+                # Force the model to execute commands instead of asking
+                cleaned = "Run commands. Do not ask questions."
+            else:
+                joined = " | ".join(q.strip() for q in questions if q.strip())
+                cleaned = f"[SUBAGENT NEEDS INPUT] {joined}" if joined else "[SUBAGENT NEEDS INPUT]"
+        if goal_mode:
+            viz.status("Stripped question blocks in goal mode", "warning")
+        return (cleaned, True) if return_asked else cleaned
     
     for q in questions:
         answer = ask_user(q.strip())
         history.append({"role": "assistant", "content": f"[User was asked]: {q.strip()}"})
         history.append({"role": "user", "content": f"[User answered]: {answer}"})
-    cleaned = clean_response(resp)
-    return cleaned
+    cleaned = clean_ask_blocks(resp)
+    return (cleaned, True) if return_asked else cleaned
 
 # ── Goal Mode ────────────────────────────────────────────────
 
@@ -3549,7 +4791,7 @@ def cmd_goal(goal_text, history, cmd_log):
 
 # ── Dynamic command names ──────────────────────────────────
 _ALL_CMDS = registry.names() | {
-    'agentname', 'api', 'apikey', 'autosave', 'bash', 'cat', 'clear', 'collect', 'config', 'debug', 'delegate', 'delete', 'edit', 'exit', 'export', 'find', 'forget', 'git', 'goal', 'grep', 'help', 'history', 'key', 'load', 'loadcfg', 'log', 'ls', 'maxhistory', 'maxsteps', 'maxtokens', 'memories', 'memory', 'model', 'net', 'ports', 'procs', 'provider', 'providers', 'q', 'quantum', 'quit', 'recall', 'remember', 'resume', 'rootpass', 'sam', 'save', 'savecfg', 'session', 'sessions', 'skill-create', 'skill-delete', 'skill-list', 'skill-load', 'spawn', 'stream', 'subagent-model', 'subagents', 'sysinfo', 'temperature', 'theme', 'thinking', 'timeout', 'update', 'usage', 'plugins'
+    'agentname', 'api', 'apikey', 'arch', 'autosave', 'bash', 'cat', 'clear', 'collect', 'config', 'debug', 'delegate', 'delete', 'edit', 'evolve', 'exit', 'export', 'find', 'forget', 'git', 'goal', 'grep', 'harness', 'help', 'history', 'key', 'load', 'loadcfg', 'log', 'ls', 'maxhistory', 'maxsteps', 'maxtokens', 'memories', 'memory', 'model', 'net', 'ports', 'procs', 'provider', 'providers', 'q', 'quantum', 'quit', 'recall', 'remember', 'resume', 'rootpass', 'sam', 'save', 'savecfg', 'session', 'sessions', 'skill-create', 'skill-delete', 'skill-list', 'skill-load', 'spawn', 'stream', 'subagent-model', 'subagents', 'sysinfo', 'temperature', 'theme', 'thinking', 'timeout', 'update', 'usage', 'plugins'
 , 'memctx', 'memory'
 }
 
@@ -3586,12 +4828,17 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
 
  {bold}System{reset}
    /sysinfo             System information
+   /arch [set <label>]  Show or override architecture detection
+   /arch rm <pattern>   Remove a custom arch mapping
+   /arch clear          Clear all custom arch mappings
    /procs               Top processes by CPU
    /net                 Network interfaces + routes
    /ports               Open listening ports
    /debug               Toggle debug logging
    /log                 Show debug log
-   /memory              Show memory stats
+    /memory              Show memory stats and startup memory help
+    /memory show         Show editable startup memory Markdown
+    /memory edit         Edit startup memory in $EDITOR/notepad
 
  {bold}Session{reset}
    /save [title]        Save current session
@@ -3607,16 +4854,19 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
    /savecfg             Save config to disk
    /loadcfg             Load config from disk
    /usage               Show API usage (OpenRouter)
-   /theme               Cycle theme (21 built-in themes)
-   /plugins             List loaded plugins
-   /soul [show|set|...]  Manage persistent custom rules (soul.md)
-   /update [dir]        Git pull + reinstall from project directory
+   /theme               Cycle theme (31 built-in themes)
+    /plugins             List loaded plugins
+    /soul [show|set|...]  Manage persistent custom rules (soul.md)
+    /harness [scan]      Detect external AI agent harness CLIs
+    /evolve [on|docs]    Self-repair docs, baseline, tool scan mode
+    /update [dir]        Git pull + reinstall from project directory
    /help                This help
    /quit                Exit
 
  {bold}Subagents{reset}
-   /delegate <task>     Sync subagent (--provider <name> for different provider)
-   /spawn <task>        Async subagent (--provider <name> for different provider)
+    /delegate <task>     Sync subagent (--provider <name> for different provider)
+    /spawn <task>        Async subagent (--provider <name> for different provider)
+    /harness delegate    Super subagent with absorbed AI harness tools
    /subagents           List running/completed subagents
    /collect <id>        Get result from a completed async subagent
    /quantum [k]:[v]     View/write shared session context
@@ -3651,36 +4901,114 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
 
  
 
+def cmd_arch(args_str, history, cmd_log):
+    """Display or override architecture detection."""
+    t = T()
+    args = args_str.strip()
+    if not args:
+        detected = Platform.get_arch()
+        raw = platform.machine()
+        print(f"  {t['bright']}Detected arch:{RST} {detected}")
+        print(f"  {t['dim']}Raw machine:{RST} {raw}")
+        if Config.CUSTOM_ARCH_MAP:
+            print(f"  {t['dim']}Custom mappings:{RST}")
+            for pat, label in Config.CUSTOM_ARCH_MAP.items():
+                print(f"    {pat} -> {label}")
+        print(f"  {t['dim']}Override:{RST} PRISM32_ARCH env var or /arch set <label>")
+        return
+    sub = args.split(None, 1)
+    if sub[0] == 'set' and len(sub) > 1:
+        Config.CUSTOM_ARCH_MAP[platform.machine()] = sub[1]
+        Config.save_config()
+        print(f"  {t['bright']}+ Custom arch mapping:{RST} {platform.machine()} -> {sub[1]}")
+    elif sub[0] == 'rm':
+        if len(sub) > 1 and sub[1] in Config.CUSTOM_ARCH_MAP:
+            del Config.CUSTOM_ARCH_MAP[sub[1]]
+            Config.save_config()
+            print(f"  {t['bright']}- Removed mapping for:{RST} {sub[1]}")
+        else:
+            print(f"  {t['warn']}No mapping found for:{RST} {sub[1] if len(sub) > 1 else '(none)'}")
+    elif sub[0] == 'clear':
+        Config.CUSTOM_ARCH_MAP.clear()
+        Config.save_config()
+        print(f"  {t['bright']}* All custom arch mappings cleared{RST}")
+    else:
+        Config.CUSTOM_ARCH_MAP[platform.machine()] = args
+        Config.save_config()
+        print(f"  {t['bright']}+ Custom arch label:{RST} {platform.machine()} -> {args}")
+
 def cmd_sysinfo():
     display_system_info()
 
 def cmd_procs():
-    if Platform.LINUX:
+    if Platform.WINDOWS:
+        out = run_cmd("tasklist /v")
+    elif Platform.LINUX:
         out = run_cmd("ps aux --sort=-%cpu | head -12")
     elif Platform.MACOS:
         out = run_cmd("ps aux -r | head -12")
     elif Platform.BSD:
         out = run_cmd("ps aux -r | head -12")
+    elif Platform.AIX:
+        out = run_cmd("ps aux -k pcpu | head -12")
+    elif Platform.HPUX:
+        out = run_cmd("ps -e -o pcpu,pid,user,args | sort -rn | head -12")
+    elif Platform.SOLARIS:
+        out = run_cmd("ps -eo pcpu,pid,user,args -o pcpu | sort -rn | head -12")
+    elif Platform.IRIX:
+        out = run_cmd("ps -eo pcpu,pid,user,args | sort -rn | head -12")
+    elif Platform.TRU64:
+        out = run_cmd("ps aux | head -12")
     else:
         out = run_cmd("ps aux | head -12")
     box("TOP PROCESSES", out, "primary")
-    if Platform.LINUX:
+    if Platform.WINDOWS:
+        mem = run_cmd("wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /Value")
+        if not mem.strip():
+            mem = "Use Task Manager or systeminfo for detailed memory usage."
+    elif Platform.LINUX:
         mem = run_cmd("free -h")
     elif Platform.MACOS:
         mem = run_cmd("vm_stat | head -10")
     elif Platform.BSD:
         mem = run_cmd("vmstat -s | head -10")
+    elif Platform.AIX or Platform.HPUX:
+        mem = run_cmd("vmstat -s | head -10")
+    elif Platform.SOLARIS:
+        mem = run_cmd("vmstat -s | head -10")
+    elif Platform.IRIX:
+        mem = run_cmd("top -n 1 2>/dev/null | head -5")
+    elif Platform.TRU64:
+        mem = run_cmd("vmstat -P | head -10")
     else:
         mem = f"RAM: {Platform.get_ram()} MB"
     box("MEMORY", mem, "accent")
 
 def cmd_net():
-    if Platform.LINUX:
+    if Platform.WINDOWS:
+        out = run_cmd("ipconfig /all")
+        routes = run_cmd("route print")
+    elif Platform.LINUX:
         out = run_cmd("ip -br addr 2>/dev/null")
         routes = run_cmd("ip route 2>/dev/null | head -5")
     elif Platform.MACOS or Platform.BSD:
         out = run_cmd("ifconfig -a 2>/dev/null | head -30")
         routes = run_cmd("netstat -rn -f inet 2>/dev/null | head -5")
+    elif Platform.AIX:
+        out = run_cmd("ifconfig -a 2>/dev/null | head -30")
+        routes = run_cmd("netstat -rn 2>/dev/null | head -5")
+    elif Platform.HPUX:
+        out = run_cmd("ifconfig 2>/dev/null | head -30")
+        routes = run_cmd("netstat -rn 2>/dev/null | head -5")
+    elif Platform.SOLARIS:
+        out = run_cmd("ifconfig -a 2>/dev/null | head -30")
+        routes = run_cmd("netstat -rn 2>/dev/null | head -5")
+    elif Platform.IRIX:
+        out = run_cmd("ifconfig -a 2>/dev/null | head -30")
+        routes = run_cmd("netstat -rn 2>/dev/null | head -5")
+    elif Platform.TRU64:
+        out = run_cmd("ifconfig -a 2>/dev/null | head -30")
+        routes = run_cmd("netstat -rn 2>/dev/null | head -5")
     else:
         out = run_cmd("ifconfig 2>/dev/null | head -20")
         routes = ""
@@ -3689,7 +5017,9 @@ def cmd_net():
         box("ROUTES", routes, "dim")
 
 def cmd_ports():
-    if Platform.LINUX:
+    if Platform.WINDOWS:
+        out = run_cmd("netstat -ano")
+    elif Platform.LINUX:
         out = run_cmd("ss -tlnp 2>/dev/null | head -20")
         if not out.strip():
             out = run_cmd("netstat -tlnp 2>/dev/null | head -20")
@@ -3699,6 +5029,16 @@ def cmd_ports():
         out = run_cmd("sockstat -4 -l 2>/dev/null | head -20")
         if not out.strip():
             out = run_cmd("netstat -an -f inet 2>/dev/null | grep LISTEN | head -20")
+    elif Platform.AIX:
+        out = run_cmd("netstat -Aan 2>/dev/null | head -20")
+    elif Platform.HPUX:
+        out = run_cmd("netstat -an 2>/dev/null | grep LISTEN | head -20")
+    elif Platform.SOLARIS:
+        out = run_cmd("netstat -an 2>/dev/null | grep LISTEN | head -20")
+    elif Platform.IRIX:
+        out = run_cmd("netstat -an 2>/dev/null | head -20")
+    elif Platform.TRU64:
+        out = run_cmd("netstat -an 2>/dev/null | head -20")
     else:
         out = run_cmd("netstat -an 2>/dev/null | head -20")
     box("LISTENING PORTS", out, "warn")
@@ -3793,6 +5133,233 @@ def cmd_export(session_history, filename=None):
     except Exception as e:
         print(f"  {t['err']}! Error: {e}{RST}")
 
+def _open_editor(path):
+    editor = os.environ.get("EDITOR")
+    if not editor:
+        if Platform.WINDOWS:
+            editor = os.environ.get("VISUAL") or "notepad"
+        else:
+            editor = "nano"
+    if Platform.WINDOWS and editor.lower() in ("notepad", "notepad.exe"):
+        subprocess.run([editor, path])
+        return
+    subprocess.run([editor, path], check=False)
+
+def cmd_memory(args_str=""):
+    t = T()
+    parts = args_str.split(None, 1)
+    subcmd = parts[0].lower() if parts else ""
+    subarg = parts[1] if len(parts) > 1 else ""
+
+    if subcmd in ("show", "startup", "notes"):
+        content = read_startup_memory()
+        box("STARTUP MEMORY", content if content else "(empty)", "accent")
+        print(f"  {t['dim']}File: {STARTUP_MEMORY_FILE}{RST}")
+        return
+    if subcmd == "path":
+        ensure_startup_memory(refresh=False)
+        print(f"  Startup memory: {t['bright']}{STARTUP_MEMORY_FILE}{RST}")
+        print(f"  JSON memory:    {t['bright']}{MEMORY_FILE}{RST}")
+        print(f"  Harness scan:   {t['bright']}{HARNESS_FILE}{RST}")
+        return
+    if subcmd == "edit":
+        ensure_startup_memory(refresh=False)
+        try:
+            _open_editor(STARTUP_MEMORY_FILE)
+            print(f"  {t['bright']}Startup memory edited: {STARTUP_MEMORY_FILE}{RST}")
+        except Exception as e:
+            print(f"  {t['err']}Edit failed: {e}{RST}")
+            print(f"  {t['dim']}Open manually: {STARTUP_MEMORY_FILE}{RST}")
+        return
+    if subcmd == "append":
+        if not subarg:
+            print("  Usage: /memory append <note>")
+            return
+        ensure_startup_memory(refresh=False)
+        existing = _safe_read(STARTUP_MEMORY_FILE)
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+        _safe_write(STARTUP_MEMORY_FILE, existing.rstrip() + f"\n\n- {stamp}: {subarg}\n")
+        print(f"  {t['bright']}+ Startup memory note appended{RST}")
+        return
+    if subcmd == "refresh":
+        ensure_startup_memory(refresh=True)
+        refresh_memory_profile(save=True)
+        print(f"  {t['bright']}+ Startup memory auto snapshot refreshed{RST}")
+        print(f"  {t['dim']}File: {STARTUP_MEMORY_FILE}{RST}")
+        return
+    if subcmd == "reset":
+        _safe_write(STARTUP_MEMORY_FILE, _default_startup_memory_text())
+        refresh_memory_profile(save=True)
+        print(f"  {t['warn']}Startup memory reset to template.{RST}")
+        return
+    if subcmd in ("json", "stats", ""):
+        mem = load_memory()
+        stats = mem.get('command_stats', {})
+        errors = mem.get('error_patterns', {})
+        sess = mem.get('session_count', 0)
+        profile = mem.get('system_profile', {})
+        lines = [f" Sessions:    {sess}",
+                f" Commands tracked: {len(stats)}",
+                f" Error patterns:   {len(errors)}",
+                f" Startup file:     {STARTUP_MEMORY_FILE}",
+                "", " Startup Profile:"]
+        if profile:
+            for key in ("os", "arch", "shell", "terminal", "package_manager", "python"):
+                if profile.get(key):
+                    lines.append(f"   {key:<16} {profile.get(key)}")
+        else:
+            lines.append("   (run /memory refresh)")
+        lines.append("")
+        lines.append(" Top Commands:")
+        for name, data in sorted(stats.items(), key=lambda x: -x[1]['uses'])[:8]:
+            u = data['uses']
+            fc = data['failures']
+            tt = data['total_time']
+            avg = tt / u if u > 0 else 0
+            pct = fc / u * 100 if u > 0 else 0
+            lines.append(f"   {name:<14} {u:>4}x  fail:{pct:>6.2f}%  avg:{avg:.1f}s")
+        if errors:
+            lines.append("")
+            lines.append(" Recurring Errors:")
+            for err, edata in sorted(errors.items(), key=lambda x: -x[1]['count'])[:5]:
+                lines.append(f"   {edata['count']}x  {err[:50]}")
+        sug = get_memory_suggestions()
+        if sug:
+            lines.append("")
+            lines.append(" Suggestions:")
+            for s in sug[:3]:
+                lines.append(f"   * {s}")
+        lines.append("")
+        lines.append(" Commands: /memory show | edit | append <note> | refresh | path | reset | json")
+        box("MEMORY", "\n".join(lines), "accent")
+        return
+    print("  Usage: /memory [show|edit|append <note>|refresh|path|reset|json]")
+
+def cmd_harness(args_str, history, cmd_log):
+    t = T()
+    parts = args_str.split(None, 1)
+    subcmd = parts[0].lower() if parts else "show"
+    subarg = parts[1] if len(parts) > 1 else ""
+    if subcmd in ("show", "list", ""):
+        box("AI HARNESSES", format_harnesses(load_harnesses()), "accent")
+        return
+    if subcmd == "scan":
+        data = ensure_harness_scan(force=True)
+        box("AI HARNESSES", format_harnesses(data), "accent")
+        return
+    if subcmd == "context":
+        box("HARNESS CONTEXT", harness_context(), "primary")
+        return
+    if subcmd == "path":
+        print(f"  Harness scan file: {t['bright']}{HARNESS_FILE}{RST}")
+        return
+    if subcmd == "clear":
+        try:
+            os.remove(HARNESS_FILE)
+            print(f"  {t['bright']}Harness scan cleared. Run /harness scan to rebuild.{RST}")
+        except OSError:
+            print(f"  {t['dim']}No harness scan file to clear.{RST}")
+        return
+    if subcmd in ("delegate", "super"):
+        if not subarg:
+            print("  Usage: /harness delegate <task>")
+            return
+        ensure_harness_scan(force=False)
+        sa = SubAgent(_harness_super_task(subarg))
+        sa.run()
+        _quantum.put(f"harness_super_{sa.id}_result", sa.result)
+        if sa.result:
+            ltm_store(sa.result, source=f"harness_super_{sa.id}", summary=f"Harness super subagent: {subarg[:80]}", tags=["subagent", "harness"])
+        history.append({"role": "user", "content": f"[Harness super subagent {sa.id} completed]\nTask: {subarg}\nResult: {(sa.result or '')[:2000]}"})
+        return
+    print("  Usage: /harness [show|scan|context|delegate <task>|path|clear]")
+
+def cmd_evolve(args_str, history, cmd_log):
+    global _EVOLVE_MODE
+    t = T()
+    parts = args_str.split(None, 2)
+    subcmd = parts[0].lower() if parts else "on"
+    subarg = parts[1] if len(parts) > 1 else ""
+    rest = parts[2] if len(parts) > 2 else ""
+
+    if subcmd in ("on", "setup", "start", ""):
+        ensure_harness_scan(force=False)
+        ensure_startup_memory(refresh=True)
+        refresh_memory_profile(save=True)
+        ensure_evolve_files(force_baseline=(subcmd == "setup"), refresh_tools=True)
+        _EVOLVE_MODE = True
+        if history:
+            history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
+        lines = [
+            "Evolve mode is ON.",
+            f"Docs:     {EVOLVE_DOC_FILE}",
+            f"Tools:    {EVOLVE_TOOL_FILE}",
+            f"Baseline: {EVOLVE_BASELINE_FILE}",
+            f"Memory:   {STARTUP_MEMORY_FILE}",
+            "Commands: /evolve docs | tools | diff | plugin temp <name> | plugin permanent <name> | off",
+        ]
+        box("EVOLVE", "\n".join(lines), "bright")
+        return
+    if subcmd == "off":
+        _EVOLVE_MODE = False
+        if history:
+            history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
+        print(f"  {t['bright']}Evolve mode is OFF.{RST}")
+        return
+    if subcmd == "status":
+        ensure_evolve_files(refresh_tools=False)
+        lines = [
+            f"Mode:     {'ON' if _EVOLVE_MODE else 'OFF'}",
+            f"Docs:     {EVOLVE_DOC_FILE}",
+            f"Tools:    {EVOLVE_TOOL_FILE}",
+            f"Baseline: {EVOLVE_BASELINE_FILE}",
+            f"Temp plugins: {EVOLVE_TEMP_PLUGIN_DIR}",
+        ]
+        box("EVOLVE STATUS", "\n".join(lines), "accent")
+        return
+    if subcmd in ("docs", "doc"):
+        ensure_evolve_files(refresh_tools=False)
+        text = _safe_read(EVOLVE_DOC_FILE).strip()
+        box("EVOLVE DOCS", text[:5000] + ("\n...(truncated)" if len(text) > 5000 else ""), "primary")
+        print(f"  {t['dim']}File: {EVOLVE_DOC_FILE}{RST}")
+        return
+    if subcmd == "context":
+        box("EVOLVE CONTEXT", evolve_context(), "primary")
+        return
+    if subcmd == "tools":
+        data = scan_available_tools()
+        box("EVOLVE TOOL SCAN", format_tool_scan(data), "accent")
+        return
+    if subcmd in ("diff", "compare"):
+        box("EVOLVE BASELINE DIFF", evolve_diff(), "warn")
+        return
+    if subcmd == "baseline":
+        if subarg in ("refresh", "reset"):
+            ensure_evolve_files(force_baseline=True, refresh_tools=False)
+            print(f"  {t['warn']}Baseline refreshed from current Prism32 source.{RST}")
+        else:
+            ensure_evolve_files(refresh_tools=False)
+            print(f"  Baseline source: {t['bright']}{EVOLVE_BASELINE_FILE}{RST}")
+            print(f"  Baseline config: {t['bright']}{EVOLVE_BASELINE_CONFIG_FILE}{RST}")
+            print("  Use /evolve diff to compare current Prism32 with the baseline.")
+        return
+    if subcmd == "plugin":
+        kind = subarg.lower()
+        name = rest.strip()
+        if kind not in ("temp", "temporary", "permanent", "perm") or not name:
+            print("  Usage: /evolve plugin temp <name>")
+            print("         /evolve plugin permanent <name>")
+            return
+        kind = "permanent" if kind in ("permanent", "perm") else "temp"
+        path = write_evolve_plugin(kind, name)
+        print(f"  {t['bright']}Plugin template written:{RST} {path}")
+        if kind == "temp":
+            print(f"  {t['dim']}Temporary plugins are scratch files. Copy into {PLUGIN_DIR} to auto-load on startup.{RST}")
+        else:
+            print(f"  {t['dim']}Restart Prism32 or run /plugins after restart to load it.{RST}")
+        return
+    print("  Usage: /evolve [on|off|status|docs|context|tools|diff|baseline|plugin]")
+
 # ── Main Loop ────────────────────────────────────────────────
 
 def main():
@@ -3816,6 +5383,9 @@ def main():
     parser.add_argument("--goal", "-g", help="Run in goal mode and exit")
     parser.add_argument("--set-timeout", type=int, help="Set command timeout in seconds and exit")
     parser.add_argument("--update", help="Update prism32 from a URL or file path and exit")
+    parser.add_argument("--setup-runtime", action="store_true", help="Refresh startup memory, harness scan, and evolve baseline, then exit")
+    parser.add_argument("--harness-scan", action="store_true", help="Scan for external AI harness CLIs, then exit")
+    parser.add_argument("--evolve-setup", action="store_true", help="Create evolve docs/baseline/tool scan, then exit")
     args = parser.parse_args()
 
     # Auto-load saved config, then CLI args override
@@ -3838,6 +5408,7 @@ def main():
         Config.save_config()
     if args.temperature is not None:
         Config.TEMPERATURE = args.temperature
+    apply_ansi_compat()
     if args.set_timeout is not None:
         Config.CMD_TIMEOUT = max(1, args.set_timeout)
         Config.save_config()
@@ -3846,6 +5417,24 @@ def main():
     if args.update:
         _do_git_update(args.update)
         return
+    if args.setup_runtime or args.harness_scan or args.evolve_setup:
+        if args.setup_runtime:
+            ensure_startup_memory(refresh=True)
+            refresh_memory_profile(save=True)
+            data = ensure_harness_scan(force=True)
+            ensure_evolve_files(force_baseline=True, refresh_tools=True)
+            print(f"Runtime setup complete. Harnesses detected: {len(data.get('installed', []))}")
+            print(f"Startup memory: {STARTUP_MEMORY_FILE}")
+            print(f"Evolve docs: {EVOLVE_DOC_FILE}")
+        else:
+            if args.harness_scan:
+                data = ensure_harness_scan(force=True)
+                print(format_harnesses(data))
+            if args.evolve_setup:
+                ensure_evolve_files(force_baseline=True, refresh_tools=True)
+                print(f"Evolve docs: {EVOLVE_DOC_FILE}")
+                print(f"Evolve baseline: {EVOLVE_BASELINE_FILE}")
+        return
 
     t = T()
 
@@ -3853,6 +5442,9 @@ def main():
     banner()
 
     load_plugins()
+    ensure_startup_memory(refresh=False)
+    refresh_memory_profile(save=True)
+    ensure_harness_scan(force=False)
     if not args.no_boot:
         boot_sequence()
 
@@ -3886,9 +5478,8 @@ def main():
     while True:
         if not _footer_reserved:
             set_scroll_region()
-        draw_footer(build_status_bar(history=history))
         try:
-            user_input = input().strip()
+            user_input = read_footer_input(build_status_bar(history=history))
         except (EOFError, KeyboardInterrupt):
             print()
             reset_scroll_region()
@@ -3897,23 +5488,22 @@ def main():
 
         if not user_input:
             continue
-        release_footer_for_output()
+        is_slash = user_input.startswith("/")
+        parts = user_input.lstrip("/").split(None, 1) if is_slash else []
+        cmd = parts[0].lower() if parts else ""
+        args_str = parts[1] if len(parts) > 1 else ""
+
+        if is_slash:
+            release_footer_for_output()
         _PluginHooks.fire_message(user_input)
         # Clear interject recall on new input
         _LAST_INTERJECT = ""
 
-        # Echo user message in scroll region
+        # Echo user message in the scroll region when the footer is active.
         move_to_scroll_bottom()
         print(f" {t['primary']}You:{RST} {user_input}")
 
-        is_slash = user_input.startswith("/")
-        parts = user_input.lstrip("/").split(None, 1)
-        cmd = parts[0].lower()
-        args_str = parts[1] if len(parts) > 1 else ""
-
-        if not is_slash:
-            pass
-        elif cmd in ("quit", "exit", "q"):
+        if cmd in ("quit", "exit", "q"):
             save_current_session(history, cmd_log)
             learn_session(len(history), len(cmd_log))
             suggestions = get_memory_suggestions()
@@ -3930,15 +5520,16 @@ def main():
 
 
         # ── Plugin command dispatch ─────────────────────────────
-        if registry.dispatch(cmd, args_str, history, cmd_log):
+        if is_slash and registry.dispatch(cmd, args_str, history, cmd_log):
             learn_command(cmd, success=True, duration=0)
             _PluginHooks.fire_command(cmd, args_str, None)
             save_current_session(history, cmd_log)
             continue
 
         # ── Built-in commands ──
-        learn_command(cmd, success=True, duration=0)
-        _PluginHooks.fire_command(cmd, args_str, None)
+        if is_slash:
+            learn_command(cmd, success=True, duration=0)
+            _PluginHooks.fire_command(cmd, args_str, None)
         if cmd == 'help':
             print(f"\n{CMD_HELP.format(bold=BOLD, reset=RST)}\n")
             continue
@@ -3947,6 +5538,11 @@ def main():
             history = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}]
             cmd_log.clear()
             print(f"  {t['bright']}+ History cleared{RST}\n")
+            continue
+
+        if cmd == 'arch':
+            cmd_arch(args_str, history, cmd_log)
+            print()
             continue
 
         if cmd == 'sysinfo':
@@ -4735,33 +6331,21 @@ def main():
             continue
 
         if cmd == 'memory':
-            mem = load_memory()
-            stats = mem.get('command_stats', {})
-            errors = mem.get('error_patterns', {})
-            sess = mem.get('session_count', 0)
-            lines = [f" Sessions:    {sess}",
-                    f" Commands tracked: {len(stats)}",
-                    f" Error patterns:   {len(errors)}",
-                    "", " Top Commands:"]
-            for name, data in sorted(stats.items(), key=lambda x: -x[1]['uses'])[:8]:
-                u = data['uses']
-                fc = data['failures']
-                tt = data['total_time']
-                avg = tt / u if u > 0 else 0
-                pct = fc / u * 100 if u > 0 else 0
-                lines.append(f"   {name:<14} {u:>4}x  fail:{pct:>6.2f}%  avg:{avg:.1f}s")
-            if errors:
-                lines.append("")
-                lines.append(" Recurring Errors:")
-                for err, edata in sorted(errors.items(), key=lambda x: -x[1]['count'])[:5]:
-                    lines.append(f"   {edata['count']}x  {err[:50]}")
-            sug = get_memory_suggestions()
-            if sug:
-                lines.append("")
-                lines.append(" Suggestions:")
-                for s in sug[:3]:
-                    lines.append(f"   * {s}")
-            box("MEMORY", "\n".join(lines), "accent")
+            cmd_memory(args_str)
+            print()
+            if history:
+                history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
+            continue
+
+        if cmd == 'harness':
+            cmd_harness(args_str, history, cmd_log)
+            print()
+            if history:
+                history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
+            continue
+
+        if cmd == 'evolve':
+            cmd_evolve(args_str, history, cmd_log)
             print()
             continue
 
@@ -5166,6 +6750,9 @@ def main():
             spin = None
             try:
                 if Config.STREAM:
+                    if not _footer_reserved:
+                        set_scroll_region()
+                    draw_footer(build_status_bar(history=history))
                     move_to_scroll_bottom()
                     _interjection_start()
                     resp = ask_ai(history)
@@ -5191,7 +6778,7 @@ def main():
                 inj = _INTERJECTION_RESULT
                 _INTERJECTION_RESULT = None
                 if resp:
-                    history.append({"role": "assistant", "content": resp})
+                    history.append({"role": "assistant", "content": resp + "\n\n[assistant response interrupted by user interjection]"})
                 history.append({"role": "user", "content": inj})
                 move_to_scroll_bottom()
                 print(f" {T()['primary']}You:{RST} {inj}")
@@ -5201,13 +6788,19 @@ def main():
                 box("AI ERROR", resp or "No response", "err")
                 break
 
-            resp = handle_ask_blocks(resp, history)
+            resp, asked = handle_ask_blocks(resp, history, return_asked=True)
             commands = extract_blocks(resp, 'execute')
+            clean = clean_response(resp)
+
+            if asked and not commands and not clean:
+                save_current_session(history, cmd_log)
+                continue
 
             if commands:
-                clean = clean_response(resp)
                 if clean and iteration == 0 and not Config.STREAM:
                     box("AI ANALYSIS", clean, "accent")
+                if resp.strip():
+                    history.append({"role": "assistant", "content": resp})
 
                 for c in commands:
                     c = c.strip()
@@ -5229,7 +6822,9 @@ def main():
                     else:
                         history.append({"role": "user", "content": continuation})
             else:
-                clean = clean_response(resp)
+                if not clean:
+                    box("AI ERROR", "Empty response", "err")
+                    break
                 if not Config.STREAM:
                     t2 = T()
                     print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  Prism32 — MegaDyne Systems Installer v6.6
+#  Prism32 — MegaDyne Systems Installer v6.7
 #  Idempotent, validated, user-friendly
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -20,6 +20,7 @@ RUNTIME_DIR="$HOME/.prism32"
 SESSIONS_DIR="$RUNTIME_DIR/sessions"
 SKILLS_DIR="$RUNTIME_DIR/skills"
 PLUGINS_DIR="$RUNTIME_DIR/plugins"
+EVOLVE_DIR="$RUNTIME_DIR/evolve"
 CONFIG_FILE="$RUNTIME_DIR/config.json"
 CONFIG_BACKUP="$RUNTIME_DIR/config.json.bak.$(date +%s)"
 LOG_FILE="$RUNTIME_DIR/install.log"
@@ -90,7 +91,7 @@ EP_MODELS_FALLBACK=(
 # ═══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${CY}${BLD}  +========================================+${RST}"
-echo -e "${CY}${BLD}  |       Prism32 Installer v6.6           |${RST}"
+echo -e "${CY}${BLD}  |       Prism32 Installer v6.7           |${RST}"
 echo -e "${CY}${BLD}  |   MegaDyne Systems (MDS) Edition       |${RST}"
 echo -e "${CY}${BLD}  +========================================+${RST}"
 echo ""
@@ -191,7 +192,7 @@ else
 fi
 hash -r 2>/dev/null || true
 
-mkdir -p "$RUNTIME_DIR" "$SESSIONS_DIR" "$SKILLS_DIR" "$PLUGINS_DIR" && ok "Directories created"
+mkdir -p "$RUNTIME_DIR" "$SESSIONS_DIR" "$SKILLS_DIR" "$PLUGINS_DIR" "$EVOLVE_DIR" && ok "Directories created"
 touch "$LOG_FILE"
 
 # ═══════════════════════════════════════════════════════════════
@@ -430,6 +431,11 @@ else
   warn "Python $py_ver — upgrade to >= 3.7 for best compatibility"
 fi
 
+echo -e "  ${DIM}Refreshing startup memory, harness scan, and evolve baseline...${RST}"
+"$PY3" "$SRC_FILE" --setup-runtime >/dev/null 2>&1 \
+  && ok "Runtime memory/harness/evolve setup complete" \
+  || warn "Runtime setup skipped — run: prism32 --setup-runtime"
+
 # ═══════════════════════════════════════════════════════════════
 #  9. Verify
 # ═══════════════════════════════════════════════════════════════
@@ -445,6 +451,9 @@ echo -e "  ${DIM}$HELP_OUT${RST}"
 echo ""
 sub "Skills:     $SKILLS_DIR"
 sub "Plugin dir: $PLUGINS_DIR"
+sub "Startup memory: $RUNTIME_DIR/startup_memory.md"
+sub "Harnesses:  $RUNTIME_DIR/harnesses.json"
+sub "Evolve:     $EVOLVE_DIR"
 sub "Sessions:   $SESSIONS_DIR"
 sub "Soul:       $RUNTIME_DIR/soul.md"
 sub "Config:     $CONFIG_FILE"
@@ -477,7 +486,7 @@ if [ -n "${api_key+x}" ]; then
   echo ""
 fi
 
-echo -e "${DIM}  MegaDyne Systems (MDS) — Prism32 v6.6${RST}"
+echo -e "${DIM}  MegaDyne Systems (MDS) — Prism32 v6.7${RST}"
 echo ""
 
 # vim: set ts=2 sw=2 et:

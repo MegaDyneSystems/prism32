@@ -4,7 +4,7 @@ build-backend = "setuptools.backends._legacy:_Backend"
 
 [project]
 name = "prism32"
-version = "6.6.0"
+version = "6.7.0"
 description = "Retro AI Terminal Agent — MegaDyne Systems"
 readme = "README.md"
 license = {text = "MIT"}

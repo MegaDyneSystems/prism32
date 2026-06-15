@@ -1,15 +1,15 @@
-PRISM32(TM) V6.6 - INTERACTIVE TERMINAL AGENT
+PRISM32(TM) V6.7 - INTERACTIVE TERMINAL AGENT
 MEGADYNE SYSTEMS (MDS) - LICENSED SOFTWARE
 
                       (C) COPYRIGHT 2026
            MEGADYNE SYSTEMS - ALL RIGHTS RESERVED
 
-                      DOCUMENT NO. MDS-P32-66
+                      DOCUMENT NO. MDS-P32-67
                     FIRST EDITION (JUNE 2026)
 
 
                         -----------------
-                        PRISM32(TM) V6.6
+                        PRISM32(TM) V6.7
                         -----------------
 
                    MEGADYNE SYSTEMS CORPORATION
@@ -19,9 +19,9 @@ MEGADYNE SYSTEMS (MDS) - LICENSED SOFTWARE
 
 
 
-                                                       MDS-P32-66
+                                                       MDS-P32-67
 
-PRISM32(TM) V6.6 OPERATOR'S GUIDE
+PRISM32(TM) V6.7 OPERATOR'S GUIDE
 
                                TABLE OF CONTENTS
 
@@ -38,15 +38,21 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE
   7.0  COLOR THEMES ............................................... 12
   8.0  CONFIGURATION FILE .......................................... 13
   9.0  API PROVIDER CONFIGURATION .................................. 14
-  10.0 PLUGIN PROGRAMMING INTERFACE ............................... 15
-  11.0 DIAGNOSTIC INFORMATION ..................................... 17
+10.0 PLUGIN PROGRAMMING INTERFACE ............................... 15
+   10.1 PLUGIN REGISTRATION ....................................... 15
+   10.2 LIFECYCLE HOOKS ........................................... 15
+   10.3 EXAMPLE ................................................... 16
+   10.4 PLUGIN COMMANDS IN EXECUTE BLOCKS ......................... 16
+   10.5 AI PLUGIN GENERATION PROMPT ............................... 16
+   10.6 EXAMPLE USAGE ............................................. 16
+   11.0 QUANTUM ENTANGLEMENT SHARED CONTEXT ............................ 17
   12.0 RESTRICTIONS AND LIMITATIONS ............................... 18
   13.0 SYSTEM MESSAGES ............................................ 19
   14.0 INDEX ...................................................... 20
 
 
                                                                PAGE 1
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 1.0  SYSTEM OVERVIEW
      ===============
@@ -58,13 +64,43 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      THE OPERATOR COMMUNICATES WITH THE AI SUBSYSTEM USING
      NATURAL LANGUAGE INPUT FROM A STANDARD TERMINAL.
 
-     THE SYSTEM OPERATES ON THE FOLLOWING PLATFORMS:
+THE SYSTEM OPERATES ON THE FOLLOWING PLATFORMS:
 
-          - LINUX (ALL DISTRIBUTIONS)
-          - MACOS
-          - FREEBSD / NETBSD / OPENBSD
-          - MICROSOFT WINDOWS (PARTIAL SUPPORT)
-          - Android Termux
+           - LINUX (ALL DISTRIBUTIONS)
+           - MACOS
+           - FREEBSD / NETBSD / OPENBSD
+           - MICROSOFT WINDOWS (PARTIAL SUPPORT)
+           - WSL / WSL2
+           - CHROMEOS / CROSTINI LINUX CONTAINERS
+           - ANDROID / TERMUX
+           - DOCKER / PODMAN / KUBERNETES / CI RUNNERS
+           - PROXMOX VE
+           - TRUENAS / FREENAS
+           - PFSENSE / OPNSENSE
+           - UNRAID
+           - OPENMEDIAVAULT
+           - STEAMOS / STEAM DECK
+           - FEDORA COREOS / SILVERBLUE / KINOITE
+           - CLEAR LINUX
+           - PHOTON OS / VMWARE APPLIANCES
+           - NIXOS / GUIX SYSTEM
+           - IRIX (IRIS-ANSI TERMINAL)
+           - HP-UX (HPTERM)
+           - AIX (AIXTERM)
+           - SUNOS / ORACLE SOLARIS (XTERM, SPARC OR X86)
+           - ORACLE LINUX
+           - ILLUMOS / OPENINDIANA / OMNIOS / SMARTOS
+           - OPENWRT / BUSYBOX / ENTWARE EMBEDDED LINUX
+           - SYNOLOGY DSM / QNAP NAS SHELLS (BEST EFFORT)
+           - HAIKU
+           - QNX NEUTRINO
+           - MINIX
+           - CYGWIN / MSYS2 / MINGW
+           - ISH / JAILBROKEN IOS (BEST EFFORT)
+           - IBM Z/OS AND IBM I PASE (EXPERIMENTAL)
+           - OPENVMS (EXPERIMENTAL)
+           - TRU64 (XTERM)
+           - ANY VT100/VT220/VT320 COMPATIBLE TERMINAL
 
           NOTE: THE SYSTEM REQUIRES PYTHON VERSION 3.7 OR LATER.
 
@@ -119,7 +155,7 @@ F. SELF-EVOLVING MEMORY - THE SYSTEM TRACKS COMMAND
 
 
                                                                PAGE 2
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 2.0  PROGRAM REQUIREMENTS
      ====================
@@ -132,31 +168,28 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
           | PROCESSOR   | 486           | pentium            |
           |             | OR EQUIVALENT |                    |
           |-------------+---------------+--------------------|
-          | MEMORY      | 64 MB         | 512 MB             |
+          | MEMORY      | 16 MB         | 64 MB              |
           |-------------+---------------+--------------------|
-          | DISK        | 10 MB         | 100 MB             |
+          | DISK        | 2 MB          | 64 MB              |
           |-------------+---------------+--------------------|
           | TERMINAL    | ANSI (VT100)  | ANSI (VT220)       |
           |             | OR EQUIVALENT | OR EQUIVALENT      |
           +--------------------------------------------------+
 
-NOTE: FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY
-                 USE THE --SLOW-CPU FLAG.  THIS DISABLES THE
-                 SPINNER THREAD, RESPONSE STREAMING, AND AUTO
-                 MEMORY FLUSHING FOR REDUCED OVERHEAD.
-
-                 USE --TURBO TO EXPLICITLY ENABLE FULL SPEED
-                 (STREAMING + SPINNER, WHICH IS THE DEFAULT).
+      NOTE: FOR SYSTEMS WITH LIMITED PROCESSING CAPACITY
+                  USE THE --SLOW-CPU FLAG.  THIS DISABLES THE
+                  SPINNER THREAD, RESPONSE STREAMING, AND AUTO
+                  MEMORY FLUSHING FOR REDUCED CPU OVERHEAD.
 
      2.2  SOFTWARE REQUIREMENTS
 
 - PYTHON INTERPRETER, VERSION 3.7 OR LATER
            - NETWORK CONNECTION TO THE AI MODEL API ENDPOINT
-           - BASH SHELL (FOR THE INSTALLER PROGRAM)
+           - BASH SHELL (FOR UNIX INSTALLER) OR POWERSHELL (WINDOWS)
            - Optional: Paramiko (for remote SSH functions)
 
                                                                PAGE 3
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 3.0  INSTALLATION PROCEDURE
      ======================
@@ -184,7 +217,8 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
           F. PROMPT FOR API PROVIDER AND MODEL SELECTION.
           G. TEST API CONNECTIVITY.
           H. WRITE THE CONFIGURATION FILE.
-          I. VERIFY INSTALLATION.
+          I. REFRESH STARTUP MEMORY, HARNESS SCAN, AND EVOLVE BASELINE.
+          J. VERIFY INSTALLATION.
 
           THE INSTALLER PROMPTS FOR THE FOLLOWING:
 
@@ -202,6 +236,16 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
           INSTALLATION:
 
                $ python3 prism32.py --api http://127.0.0.1:8080
+
+          WINDOWS INSTALLATION:
+
+               PS> powershell -ExecutionPolicy Bypass -File install.ps1
+
+          THE WINDOWS INSTALLER WRITES PRISM32 TO THE USER LOCAL
+          APPLICATION DATA DIRECTORY AND CREATES A PRISM32.CMD SHIM.
+          PYTHON 3.7+ IS REQUIRED.  OLDER WINDOWS SYSTEMS SUCH AS
+          WINDOWS 7/VISTA-ERA INSTALLS NEED A COMPATIBLE PYTHON 3.7
+          INSTALLATION; WINDOWS 10/11 CAN USE CURRENT PYTHON RELEASES.
 
       3.4  NETBSD/I386 PREPARATION
 
@@ -241,7 +285,99 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 $ su root -c "mkdir -p /usr/local/bin && ln -sf \
                    /home/$USER/.local/bin/prism32 /usr/local/bin/prism32"
 
-3.5  FLOPPY DISK INSTALLATION
+3.5  ANDROID / TERMUX INSTALLATION
+
+     TERMUX IS THE SUPPORTED ANDROID ENVIRONMENT.  INSTALL PYTHON
+     AND GIT, THEN RUN PRISM32 DIRECTLY:
+
+              $ pkg update
+              $ pkg install python git
+              $ git clone https://github.com/your-org/prism32.git
+              $ cd prism32
+              $ python prism32.py --setup-runtime
+              $ python prism32.py
+
+     OPTIONAL STORAGE ACCESS:
+
+              $ termux-setup-storage
+
+     NOTES:
+
+          - PACKAGE MANAGER DETECTS AS TERMUX PKG.
+          - RUNTIME FILES ARE STORED IN ~/.PRISM32/.
+          - IF COLORS OR FOOTER RENDER BADLY, USE:
+              $ NO_COLOR=1 python prism32.py
+
+3.6  SUNOS / ORACLE INSTALLATION
+
+     ORACLE SOLARIS AND SUNOS ARE SUPPORTED WHEN PYTHON 3.7+
+     IS AVAILABLE.  SUPPORTED ARCHITECTURE LABELS INCLUDE
+     SPARC, SPARC64/SUN4U/SUN4V, AND SOLARIS X86/I86PC.
+
+     ORACLE SOLARIS:
+
+              $ python3 prism32.py --setup-runtime
+              $ python3 prism32.py
+
+     ORACLE SOLARIS PACKAGE MANAGERS ARE DETECTED AS:
+
+              PKG       -> sudo pkg install <package>
+              PKGADD    -> sudo pkgadd -d . <package>
+              PKGUTIL   -> sudo pkgutil -i <package>
+
+     ORACLE LINUX IS DETECTED THROUGH /ETC/OS-RELEASE AND USES
+     ITS NATIVE PACKAGE MANAGER, USUALLY DNF OR YUM.
+
+     NOTES:
+
+          - PREFER /USR/BIN SH-COMPATIBLE COMMANDS.
+          - AVOID GNU-ONLY FLAGS UNLESS GNU COREUTILS ARE INSTALLED.
+          - NETWORK TOOLS DEFAULT TO IFCONFIG AND NETSTAT.
+
+3.7  OBSCURE, SERVER, AND EMBEDDED TARGETS
+
+     PRISM32 IS STDLIB-ONLY PYTHON 3.7+ AND USES BEST-EFFORT
+     PLATFORM ADAPTATION.  IF PYTHON 3.7+ AND A COMMAND SHELL ARE
+     AVAILABLE, PRISM32 SHOULD START AND PROVIDE AI/SHELL WORKFLOW.
+
+     EXTRA SERVER AND EMBEDDED TARGETS INCLUDE:
+
+          - CHROMEOS / CROSTINI, WSL / WSL2
+          - DOCKER, PODMAN, KUBERNETES PODS, CI RUNNERS
+          - PROXMOX VE, OPENMEDIAVAULT, UNRAID
+          - TRUENAS / FREENAS, PFSENSE / OPNSENSE
+          - STEAMOS / STEAM DECK
+          - FEDORA COREOS, SILVERBLUE, KINOITE, RPM-OSTREE SYSTEMS
+          - CLEAR LINUX, PHOTON OS, VMWARE APPLIANCES
+          - NIXOS, GUIX SYSTEM, WOLFI / CHAINGUARD IMAGES
+          - ILLUMOS, OPENINDIANA, OMNIOS, SMARTOS
+          - OPENWRT, BUSYBOX, ENTWARE, YOCTO, BUILDROOT
+          - SYNOLOGY DSM AND QNAP NAS SHELLS
+          - HAIKU, QNX NEUTRINO, MINIX
+          - CYGWIN, MSYS2, MINGW
+          - ISH / JAILBROKEN IOS (BEST EFFORT)
+          - IBM Z/OS AND IBM I PASE (EXPERIMENTAL)
+          - OPENVMS (EXPERIMENTAL)
+
+     PACKAGE MANAGERS DETECTED INCLUDE:
+
+          APT/APT-GET, DNF, MICRODNF, TDNF, YUM, PACMAN, ZYPPER,
+          APK, RPM-OSTREE, SWUPD, OPKG, IPKG, EMERGE, XBPS-INSTALL,
+          EOPKG, SLACKPKG, GUIX, NIX-ENV, BREW, PORT, PKGIN,
+          PKG_ADD, PKG, PKGADD, PKGUTIL, PKGMAN, SWINSTALL, INST,
+          SETLD, INSTALLP, WINGET, CHOCO, SCOOP, SYNOPKG.
+
+     FOR UNKNOWN UNIX OR EMBEDDED SYSTEMS:
+
+              $ python3 prism32.py --setup-runtime
+              $ python3 prism32.py
+
+     IF ONLY BUSYBOX/ASH IS AVAILABLE, PREFER SIMPLE POSIX
+     COMMANDS AND AVOID GNU-ONLY FLAGS.  STORE PLATFORM QUIRKS IN:
+
+              ~/.prism32/startup_memory.md
+
+3.8  FLOPPY DISK INSTALLATION
 
      PRISM32 FITS ON A STANDARD 1.44MB FLOPPY DISK (ALL FILES
      TOTAL APPROXIMATELY 260 KB, WITH 82% FREE SPACE).  THIS
@@ -305,7 +441,7 @@ $ su root -c "mkdir -p /usr/local/bin && ln -sf \
 
 
                                                                PAGE 5
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 4.0  OPERATOR COMMANDS
      =================
@@ -342,6 +478,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
       | GREP (P,F)   | SEARCH FILE CONTENTS                      |
       | GIT          | GIT STATUS AND DIFF SUMMARY               |
       | IMAGE (P)    | SEND IMAGE TO AI (FILE OR URL)            |
+      | ARCH         | SHOW OR OVERRIDE ARCHITECTURE LABEL       |
       +----------------------------------------------------------+
 
      4.3  SYSTEM INFORMATION
@@ -386,8 +523,10 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
       | CONFIG       | DISPLAY CURRENT CONFIGURATION             |
       | SAVECFG      | SAVE CONFIGURATION TO DISK                |
       | LOADCFG      | LOAD CONFIGURATION FROM DISK              |
-      | MEMORY       | DISPLAY SELF-EVOLVING MEMORY STATS        |
+      | MEMORY       | MEMORY STATS; SHOW/EDIT STARTUP MEMORY    |
       | MEMCTX (N)   | SET MEMORY CONTEXT CHARACTER LIMIT        |
+      | HARNESS      | SCAN EXTERNAL AI AGENT HARNESSES          |
+      | EVOLVE       | SELF-REPAIR DOCS, BASELINE, TOOL SCAN     |
       | THINKING (L) | SET REASONING EFFORT (OFF/LOW/MED/HIGH)   |
       | DEBUG        | TOGGLE DEBUG LOGGING                      |
       | LOG          | SHOW DEBUG LOG                            |
@@ -438,19 +577,21 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 4.8  SLASH COMMANDS
 
-           /HELP         /QUIT         /GOAL      /THEME
-           /MODEL        /PROVIDER     /PLUGINS   /DEBUG
-           /LOG          /CONFIG       /MEMORY    /MEMCTX
-           /THINKING     /MAXSTEPS     /SAVECFG   /LOADCFG
-           /IMAGE        /SOUL         /AGENTNAME /ROOTPASS
-           /STREAM       /TEMPERATURE  /TIMEOUT   /AUTOSAVE
-           /AUTO         /SHARD        /QUANTUM   /SCRAPE
-           /DELEGATE     /SPAWN        /SUBAGENTS /COLLECT
-           /SKILL-CREATE /SKILL-LIST   /SKILL-LOAD /SKILL-DELETE
+/HELP         /QUIT         /GOAL      /THEME
+            /MODEL        /PROVIDER     /PLUGINS   /DEBUG
+            /LOG          /CONFIG       /MEMORY    /MEMCTX
+            /THINKING     /MAXSTEPS     /SAVECFG   /LOADCFG
+            /IMAGE        /SOUL         /AGENTNAME /ROOTPASS
+            /STREAM       /TEMPERATURE  /TIMEOUT   /AUTOSAVE
+            /AUTO         /SHARD        /QUANTUM   /ARCH
+            /DELEGATE     /SPAWN        /SUBAGENTS /COLLECT
+            /SKILL-CREATE /SKILL-LIST   /SKILL-LOAD /SKILL-DELETE
+            /REMEMBER     /RECALL       /FORGET   /MEMORIES
+            /HARNESS      /EVOLVE
 
 
                                                                PAGE 9
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 5.0  AUTONOMOUS GOAL MODE
      =====================
@@ -488,7 +629,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 
                                                                PAGE 10
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 5.5  ACTIVE TASK MODE
      =================
@@ -534,7 +675,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 
                                                                PAGE 11
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 6.0  COMMAND LINE PARAMETERS
      =======================
@@ -571,12 +712,12 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 
                                                                PAGE 12
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 7.0  COLOR THEMES
       =============
 
-      THE SYSTEM PROVIDES 21 COLOR THEMES:
+      THE SYSTEM PROVIDES 31 COLOR THEMES:
 
            PHOSPHOR    GREEN ON BLACK (DEFAULT)
            AMBER       AMBER ON BLACK
@@ -600,17 +741,59 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
            DAYLIGHT    DARK TEAL ON WHITE
            SLATE       DARK SLATE ON WHITE
 
+      16-COLOR COMPATIBLE THEMES (ALL TERMINALS):
+
+           SYNTHCITY   CYAN/MAGENTA RETRO SYNTHWAVE
+           OUTRUN      HOT PINK/CYAN OUTRUN AESTHETIC
+           LASERDISC   DEEP BLUE/CYAN 80S LASERDISC
+           VAPORDARK   PURPLE/PINK/VAPORWAVE
+           CHROMECRT   BRIGHT GREEN CRT PHOSPHOR
+           SGI         IRIX INDIGO TEAL/GREY
+           DEC         VT220 GREEN MONOCHROME
+           MONOAMBER   AMBER MONOCHROME
+           IRIS        IRIX CDE GREY/BLUE
+           HPTERM      HP-UX GREEN/CYAN
+
      CYCLE THEMES AT THE CONSOLE:
 
           prism32> theme
 
      OR AT INVOCATION:
 
-          $ prism32 --theme amber
+           $ prism32 --theme amber
+
+      16-COLOR COMPATIBILITY:
+
+           THE 10 THEMES ABOVE (SYNTHCITY THROUGH HPTERM) USE
+           ONLY STANDARD ANSI 16-COLOR CODES (30-37, 90-97,
+           40-47) WITH SGR ATTRIBUTES (1-7). THEY ARE COMPATIBLE
+           WITH:
+           - IRIX (IRIS-ANSI TERMINAL, XSGI)
+           - HP-UX (HPTERM, XTERM)
+           - AIX (AIXTERM, XTERM)
+           - SOLARIS (CDE, XTERM)
+           - TRU64 (XTERM)
+           - ALL VT100/VT220/VT320 COMPATIBLE TERMINALS
+           - OLD XTERM, RXVTR, PUTTY, SCREEN, TMUX
+
+      LEGACY OS DETECTION:
+
+           PRISM32 AUTO-DETECTS IRIX, HP-UX, AIX, SOLARIS,
+           AND TRU64 AND ADJUSTS SYSTEM COMMANDS (PS, IFCONFIG,
+           NETSTAT, VMSTAT) AND CPU/RAM/UPTIME QUERIES TO USE
+           OS-NATIVE UTILITIES. PACKAGE MANAGERS (INST, SWINSTALL,
+           INSTALLP, PKGADD, SETLD) ARE DETECTED AUTOMATICALLY.
+
+      CUSTOM ARCHITECTURE:
+
+           SET PRISM32_ARCH ENV VAR TO OVERRIDE ARCHITECTURE
+           LABEL. USE /ARCH SET <LABEL> TO PERSIST A CUSTOM
+           MAPPING, OR ADD PATTERNS TO CUSTOM_ARCH_MAP IN
+           CONFIG.JSON (SUPPORTS * WILDCARD).
 
 
-                                                               PAGE 13
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+                                                                PAGE 13
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 8.0  CONFIGURATION FILE
      ===================
@@ -628,8 +811,9 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
       | API_BASE             | HTTP://     | API ENDPOINT URL        |
       |                      | 127.0.0.1   |                         |
       |                      | :8080       |                         |
-      | MODEL                | QWEN/QWEN3  | AI MODEL IDENTIFIER     |
-      |                      | .7-MAX      |                         |
+| MODEL                | DEEPSEEK/   | AI MODEL IDENTIFIER     |
+|                      | DEEPSEEK-V4 |                         |
+|                      | -FLASH      |                         |
       | API_KEY              | ""          | API AUTHENTICATION KEY  |
       | PROVIDER             | LOCAL       | ACTIVE PROVIDER         |
       | MAX_HISTORY          | 2000        | MAX MESSAGES IN HISTORY |
@@ -638,7 +822,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
       | GOAL_MAX_STEPS       | 50          | MAX GOAL STEPS          |
       | AUTO_SAVE_INTERVAL   | 0           | AUTO-SAVE INTERVAL      |
       |                      |             | (0 = SAVE ON INTERACT)  |
-      | STREAM               | TRUE        | ENABLE STREAMING        |
+      | STREAM               | FALSE       | ENABLE STREAMING        |
       | DEBUG                | FALSE       | DEBUG LOGGING           |
       | MAX_MEMORY_CTX       | 1024        | MEMORY CONTEXT CHARS    |
       | SLOW_CPU             | FALSE       | SLOW-CPU MODE           |
@@ -657,7 +841,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 
                                                                PAGE 14
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 9.0  API PROVIDER CONFIGURATION
      ==========================
@@ -701,7 +885,7 @@ SWITCHING:
 
 
                                                                PAGE 15
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 10.0 PLUGIN PROGRAMMING INTERFACE
      =============================
@@ -752,15 +936,22 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      10.3 EXAMPLE
 
-          DEF REGISTER(API):
-              API.REGISTRY.REGISTER("HELLO", CMD_HELLO)
+DEF REGISTER(API):
+          API.REGISTRY.REGISTER("HELLO", CMD_HELLO)
+          API.REGISTRY.REGISTER("STATS", CMD_STATS)
 
-          DEF ON_MESSAGE(API, TEXT):
-              IF "PING" IN TEXT.LOWER():
-                  API.INJECT_CONTEXT("(PING DETECTED)")
+      DEF ON_MESSAGE(API, TEXT):
+          IF "PING" IN TEXT.LOWER():
+              API.INJECT_CONTEXT("(PING DETECTED)")
 
-DEF CMD_HELLO(ARGS, HISTORY, CMD_LOG):
-               PRINT("HELLO, WORLD!")
+      DEF CMD_HELLO(ARGS, HISTORY, CMD_LOG):
+          PRINT("HELLO, WORLD!")
+
+      DEF CMD_STATS(ARGS, HISTORY, CMD_LOG):
+          PRINT(F"SESSION LENGTH: {LEN(HISTORY)} MESSAGES")
+
+      # PLACE IN ~/.PRISM32/PLUGINS/HELLO.PY
+      # LOADED AUTOMATICALLY ON NEXT STARTUP
 
       10.4 PLUGIN COMMANDS IN EXECUTE BLOCKS
 
@@ -772,6 +963,69 @@ DEF CMD_HELLO(ARGS, HISTORY, CMD_LOG):
              AUTO-URL DETECTION    INJECTS SCRAPED TEXT WHEN URLS
                                    ARE DETECTED IN OPERATOR INPUT
              STDLIB ONLY           USES API.HTTP_GET(), NO PIP
+
+      10.5 AI PLUGIN GENERATION PROMPT
+
+           COPY AND PASTE THE FOLLOWING PROMPT TO ANY AI CHATBOT
+           TO GENERATE A PRISM32 PLUGIN:
+
+```
+You are a Python 3.7+ code generator. Generate a PRISM32 plugin
+following these specifications:
+
+## File location
+Save to ~/.prism32/plugins/<name>.py
+
+## API object (PluginAPI) passed to register()
+- api.registry: CommandRegistry
+  - .register(name, handler, aliases=[], description="", category="", hidden=False)
+    handler sig: def handler(args_str, history, cmd_log): print(...)
+  - .dispatch_capture(name, args_str) -> str  (captures print output)
+  - .get(name) -> Command
+  - .names() -> set
+- api.register_provider(id, **config)  -- register AI provider
+- api.register_theme(name, **colors)   -- register color theme
+- api.config: Config object (MODEL, API_BASE, API_KEY, THEME, etc.)
+- api.memory: dict {command_stats, error_patterns, session_count, ...}
+- api.history: list of {"role": ..., "content": ...} dicts
+- api.inject_context(text)  -- add text to AI system prompt
+- api.schedule(interval_sec, callback)  -- periodic callback
+- api.http_get(url, headers={}, timeout=10) -> str
+- api.http_post(url, data=None, headers={}, timeout=10) -> str
+- api.log(msg)  -- print with [plugin:name] prefix
+- api.plugins: dict of loaded modules
+
+## Lifecycle hooks (define any subset in your module)
+def on_boot(api):          -- called at startup
+def on_shutdown(api):      -- called on graceful exit
+def on_message(api, text):  -- called per user input
+def on_response(api, text): -- called per AI response
+def on_command(api, name, args, result): -- called after any command
+def on_tick(api):           -- called every ~5 seconds
+
+## Module-level function required
+def register(api):
+    # Register commands, providers, themes, hooks here
+
+## Requirements
+- Pure stdlib Python 3.7+ only (no pip)
+- Use api.log() for diagnostics, not print()
+- Plugin path: ~/.prism32/plugins/<name>.py
+- Loaded automatically on next startup
+```
+
+      10.6 EXAMPLE USAGE
+
+           PROVIDE THE FOLLOWING TO THE AI CHATBOT AFTER THE ABOVE
+           PROMPT TO GENERATE A SPECIFIC PLUGIN:
+
+```
+Generate a PRISM32 plugin called "weather" that:
+1. Registers a /weather <city> command
+2. Uses api.http_get() to fetch weather from wttr.in
+3. Displays temperature and conditions in a styled box
+4. No pip dependencies
+```
 
 
 11.0 QUANTUM ENTANGLEMENT SHARED CONTEXT
@@ -847,30 +1101,78 @@ DEF CMD_HELLO(ARGS, HISTORY, CMD_LOG):
 
 
 13.0 DIAGNOSTIC INFORMATION
-     =======================
+      =======================
 
-     11.1 LOG FILES
+      13.1 LOG FILES
 
           ~/.PRISM32/INSTALL.LOG    INSTALLATION LOG
           ~/.PRISM32/DEBUG.LOG      DEBUG LOG (/DEBUG COMMAND)
           ~/.PRISM32/ERRORLOG.TXT   GOAL MODE CAPTURE
 
-     11.2 MEMORY SYSTEM
+     13.2 MEMORY SYSTEM
 
           ~/.PRISM32/MEMORY.JSON TRACKS COMMAND USAGE, ERROR
-          PATTERNS, AND SESSION COUNT.  AUTOMATICALLY CONSOLIDATED
-          TO TOP 30 COMMANDS AND TOP 15 ERROR PATTERNS.
+          PATTERNS, SYSTEM PROFILE, AND SESSION COUNT.  AUTOMATICALLY
+          CONSOLIDATED TO TOP 30 COMMANDS AND TOP 15 ERROR PATTERNS.
+
+          ~/.PRISM32/STARTUP_MEMORY.MD IS A HUMAN-EDITABLE STARTUP
+          MEMORY FILE.  IT IS INJECTED INTO AI CONTEXT AT STARTUP
+          AND IS INTENDED FOR HARDWARE NOTES, SOFTWARE TIPS,
+          TERMINAL/SHELL QUIRKS, USER WORKFLOW, AND RECURRING FIXES.
 
           COMMANDS:
 
-               /MEMORY    DISPLAY MEMORY STATS
-               /MEMCTX N  SET CONTEXT CHARACTER LIMIT (0=OFF)
+               /MEMORY             DISPLAY MEMORY STATS
+               /MEMORY SHOW        SHOW STARTUP_MEMORY.MD
+               /MEMORY EDIT        EDIT STARTUP_MEMORY.MD
+               /MEMORY APPEND TXT  APPEND A NOTE
+               /MEMORY REFRESH     REFRESH AUTO-DETECTED SNAPSHOT
+               /MEMORY PATH        SHOW FILE LOCATIONS
+               /MEMCTX N           SET CONTEXT CHARACTER LIMIT (0=OFF)
 
-     11.3 API USAGE
+13.3 HARNESS ABSORPTION
 
-          /USAGE DISPLAYS API CONSUMPTION (OPENROUTER ONLY).
+           ~/.PRISM32/HARNESSES.JSON STORES DETECTED EXTERNAL AI
+           AGENT COMMANDS SUCH AS OPENCODE, CODEX, CLAUDE CODE,
+           KIMICODE, AIDER, GEMINI, GOOSE, AND CURSOR-AGENT.
+           DETECTED CAPABILITIES ARE INJECTED INTO THE AI SYSTEM
+           CONTEXT SO PRISM32 CAN USE THEM AS ADDITIONAL TOOLS.
 
-11.4 SESSION STORAGE
+           COMMANDS:
+
+               /HARNESS             SHOW DETECTED HARNESSES
+               /HARNESS SCAN        RESCAN PATH FOR AI AGENT CLIS
+               /HARNESS CONTEXT     SHOW AGENT-VISIBLE CONTEXT
+               /HARNESS DELEGATE T  SPAWN SUPER SUBAGENT FOR TASK T
+               /HARNESS PATH        SHOW HARNESSES.JSON LOCATION
+
+13.4 EVOLVE MODE
+
+           ~/.PRISM32/EVOLVE/ CONTAINS SYSTEM DOCUMENTATION,
+           TOOL SCANS, TEMPORARY PLUGIN SPACE, AND A BASELINE COPY
+           OF PRISM32.PY PLUS A DEFAULT CONFIG SNAPSHOT.
+
+           EVOLVE MODE INJECTS SELF-REPAIR AND PLUGIN-CREATION
+           DOCUMENTATION INTO AI CONTEXT.  IT HELPS THE AGENT
+           COMPARE AGAINST THE BASELINE, CREATE TEMPORARY OR
+           PERMANENT PLUGINS, AND SEE WHICH LOCAL TOOLS EXIST.
+
+           COMMANDS:
+
+               /EVOLVE ON              ENABLE EVOLVE CONTEXT
+               /EVOLVE OFF             DISABLE EVOLVE CONTEXT
+               /EVOLVE DOCS            SHOW GENERATED DOCS
+               /EVOLVE TOOLS           RESCAN LOCAL TOOLS
+               /EVOLVE DIFF            DIFF CURRENT FILE VS BASELINE
+               /EVOLVE BASELINE        SHOW BASELINE PATHS
+               /EVOLVE PLUGIN TEMP N   CREATE TEMP PLUGIN TEMPLATE
+               /EVOLVE PLUGIN PERMANENT N CREATE PERMANENT TEMPLATE
+
+13.5 API USAGE
+
+           /USAGE DISPLAYS API CONSUMPTION (OPENROUTER ONLY).
+
+13.6 SESSION STORAGE
 
            SESSIONS ARE AUTO-SAVED TO ~/.PRISM32/SESSIONS/
            AFTER EACH INTERACTION (CONFIGURABLE VIA AUTOSAVE
@@ -879,7 +1181,7 @@ DEF CMD_HELLO(ARGS, HISTORY, CMD_LOG):
 
 
                                                                PAGE 18
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 12.0 RESTRICTIONS AND LIMITATIONS
      =============================
@@ -903,13 +1205,45 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      12.4 MICROSOFT WINDOWS LIMITATIONS
 
-          THE READLINE MODULE IS NOT AVAILABLE, LIMITING COMMAND
-          HISTORY AND LINE EDITING.
-          THE SIGTERM SIGNAL IS NOT AVAILABLE (USE CTRL+C).
-          SELECT() DOES NOT SUPPORT STDIN POLLING.
-          THE FIND AND GREP COMMANDS USE OS-FALLBACK PATHS.
+          WINDOWS IS SUPPORTED WHEN PYTHON 3.7+ IS AVAILABLE.
+          PRACTICAL LEGACY FLOOR: WINDOWS 7/VISTA-ERA SYSTEMS WITH
+          A COMPATIBLE PYTHON 3.7 INSTALLATION.  WINDOWS 10/11 ARE
+          SUPPORTED WITH CURRENT PYTHON RELEASES.
 
-     12.5 DISCLAIMER
+          THE READLINE MODULE IS NOT AVAILABLE, LIMITING COMMAND
+          HISTORY AND LINE EDITING.  SELECT() DOES NOT SUPPORT STDIN
+          POLLING, SO STREAMING INTERJECTION IS DISABLED ON WINDOWS.
+          OLD CONSOLES WITHOUT ANSI/VT SUPPORT FALL BACK TO A PLAIN
+          PROMPT INSTEAD OF THE PERSISTENT FOOTER.
+
+          NATIVE WINDOWS FALLBACKS ARE USED FOR COMMON SYSTEM TOOLS:
+          PROCS=TASKLIST, NET=IPCONFIG/ROUTE PRINT, PORTS=NETSTAT,
+          GREP=FINDSTR, FIND=DIR.
+
+     12.5 OBSCURE AND EMBEDDED PLATFORM LIMITATIONS
+
+          PRISM32 CAN RUN ONLY WHERE PYTHON 3.7+ AND A USABLE SHELL
+          EXIST.  SOME SERVER AND EMBEDDED OPERATING SYSTEMS HAVE
+          NON-GNU USERLANDS, LIMITED TERMINALS, READ-ONLY ROOT FILE
+          SYSTEMS, MISSING SSL CERTIFICATES, OR NO PACKAGE MANAGER.
+
+          ON UNKNOWN UNIX, BUSYBOX, SOLARIS, AIX, HP-UX, IRIX,
+          TRU64, QNX, NAS, AND APPLIANCE SHELLS, PREFER PORTABLE
+          POSIX SH COMMANDS AND AVOID GNU-ONLY OPTIONS UNLESS
+          DETECTED.  USE /MEMORY EDIT TO RECORD PLATFORM QUIRKS.
+
+          IN CONTAINERS, CI RUNNERS, WSL, AND CHROMEOS/CROSTINI,
+          NETWORKING, MOUNTS, SYSTEMD, PRIVILEGE ESCALATION, AND
+          PACKAGE INSTALLATION MAY BE NAMESPACE-LIMITED.  INSPECT
+          THE ENVIRONMENT BEFORE MODIFYING SYSTEM STATE.
+
+          ON APPLIANCE OR IMMUTABLE SYSTEMS SUCH AS PROXMOX,
+          TRUENAS, PFSENSE, OPNSENSE, UNRAID, STEAMOS, FEDORA
+          COREOS/SILVERBLUE/KINOITE, CLEAR LINUX, AND PHOTON OS,
+          USE VENDOR-SUPPORTED TOOLS AND AVOID HOST STORAGE OR
+          NETWORK CHANGES UNLESS EXPLICITLY REQUESTED.
+
+     12.6 DISCLAIMER
 
           THIS SOFTWARE IS PROVIDED WITHOUT WARRANTY OF ANY
           KIND, EXPRESS OR IMPLIED.  SEE THE LICENSE FILE FOR
@@ -917,7 +1251,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 
                                                                PAGE 19
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 13.0 SYSTEM MESSAGES
      ================
@@ -951,7 +1285,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
 
                                                                PAGE 20
-PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
+PRISM32(TM) V6.7 OPERATOR'S GUIDE                         MDS-P32-67
 
 14.0 INDEX
      =======
@@ -959,6 +1293,7 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 - A -
 
      ACTIVE TASK MODE .................... 10
+     ANDROID / TERMUX .................... 3
      API ENDPOINT ........................ 13, 14
      API KEY ............................. 11, 13
      AUTOMATION SYSTEM ................... 9
@@ -977,14 +1312,20 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
 
      DEBUG LOG ........................... 17
 
+     - E -
+
+      EMBEDDED TARGETS .................... 3
+      EVOLVE MODE ......................... 17
+
      - G -
 
      GOAL MODE ........................... 9
 
      - H -
 
-     HISTORY COMMAND ..................... 7
-     HOOKS, LIFECYCLE .................... 15
+      HARNESS ABSORPTION .................. 17
+      HISTORY COMMAND ..................... 7
+      HOOKS, LIFECYCLE .................... 15
 
      - I -
 
@@ -1003,11 +1344,12 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      MESSAGES, SYSTEM .................... 19
      MODEL, AI ........................... 11
 
-     - P -
+- P -
 
-     PLUGINS ............................. 15
-     PLUGIN COMMANDS IN EXECUTE BLOCKS .. 15
-     PROMPTSHARD SYSTEM .................. 12
+      PLUGINS ............................. 15
+      PLUGIN COMMANDS IN EXECUTE BLOCKS .. 16
+      PLUGIN GENERATION PROMPT ........... 16
+      PROMPTSHARD SYSTEM .................. 17
      PROVIDER CONFIGURATION .............. 14
 
      - Q -
@@ -1024,8 +1366,10 @@ PRISM32(TM) V6.6 OPERATOR'S GUIDE                         MDS-P32-66
      SECRETS VAULT ....................... 12
      SESSION MANAGEMENT .................. 7
      SHELL COMMAND EXECUTION ............. 7
-     SLOW-CPU MODE .................... 11, 13
-     SUBAGENTS ........................... 10
+      SLOW-CPU MODE .................... 11, 13
+      SOLARIS / SUNOS / ORACLE ............ 3
+      STARTUP MEMORY ...................... 17
+      SUBAGENTS ........................... 10
      SYSTEM MESSAGES ..................... 19
 
      - T -
