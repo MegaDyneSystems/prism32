@@ -34,8 +34,8 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/megadyne/prism32"
-Repository = "https://github.com/megadyne/prism32.git"
+Homepage = "https://github.com/MegaDyneSystems/prism32"
+Repository = "https://github.com/MegaDyneSystems/prism32.git"
 
 [tool.setuptools]
 py-modules = ["prism32"]

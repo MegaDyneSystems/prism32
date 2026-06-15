@@ -11,19 +11,19 @@ This README is the full operator guide. A shorter GitHub front-page summary is i
 Install and start on Unix/Linux/macOS/BSD:
 
 ```sh
-git clone https://github.com/megadynesystems/prism32.git && cd prism32 && bash install.sh && prism32
+git clone https://github.com/MegaDyneSystemssystems/prism32.git && cd prism32 && bash install.sh && prism32
 ```
 
 No-root install:
 
 ```sh
-git clone https://github.com/megadynesystems/prism32.git && cd prism32 && bash install.sh -y && ~/.local/bin/prism32
+git clone https://github.com/MegaDyneSystemssystems/prism32.git && cd prism32 && bash install.sh -y && ~/.local/bin/prism32
 ```
 
 Run directly without install:
 
 ```sh
-git clone https://github.com/megadynesystems/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
+git clone https://github.com/MegaDyneSystemssystems/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
 ```
 
 Most-used first commands inside Prism32:
@@ -72,7 +72,7 @@ Press Escape.
 Unix, Linux, macOS, and BSD:
 
 ```sh
-git clone https://github.com/megadyne/prism32.git
+git clone https://github.com/MegaDyneSystems/prism32.git
 cd prism32
 bash install.sh
 prism32
@@ -81,13 +81,13 @@ prism32
 Non-root user-local install:
 
 ```sh
-git clone https://github.com/megadyne/prism32.git && cd prism32 && bash install.sh -y
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh -y
 ```
 
 Run without installing:
 
 ```sh
-git clone https://github.com/megadyne/prism32.git
+git clone https://github.com/MegaDyneSystems/prism32.git
 cd prism32
 python3 prism32.py --setup-runtime
 python3 prism32.py
@@ -96,7 +96,7 @@ python3 prism32.py
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/megadyne/prism32.git
+git clone https://github.com/MegaDyneSystems/prism32.git
 cd prism32
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 prism32
@@ -107,7 +107,7 @@ Android Termux:
 ```sh
 pkg update
 pkg install python git
-git clone https://github.com/megadyne/prism32.git
+git clone https://github.com/MegaDyneSystems/prism32.git
 cd prism32
 python prism32.py --setup-runtime
 python prism32.py

@@ -7,7 +7,7 @@ Full manual: `README.md`.
 ## Fastest Start
 
 ```sh
-git clone https://github.com/megadyne/prism32.git && cd prism32 && bash install.sh && prism32
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh && prism32
 ```
 
 Most-used commands:
@@ -36,31 +36,31 @@ Press Escape to stop active AI work, API waits, foreground commands, or goal mod
 Unix, Linux, macOS, BSD:
 
 ```sh
-git clone https://github.com/megadyne/prism32.git && cd prism32 && bash install.sh
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh
 ```
 
 User-local non-root install:
 
 ```sh
-git clone https://github.com/megadyne/prism32.git && cd prism32 && bash install.sh -y
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh -y
 ```
 
 Run without installing:
 
 ```sh
-git clone https://github.com/megadyne/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
 ```
 
 Windows PowerShell:
 
 ```powershell
-git clone https://github.com/megadyne/prism32.git; cd prism32; powershell -ExecutionPolicy Bypass -File .\install.ps1
+git clone https://github.com/MegaDyneSystems/prism32.git; cd prism32; powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Termux:
 
 ```sh
-pkg update && pkg install python git && git clone https://github.com/megadyne/prism32.git && cd prism32 && python prism32.py --setup-runtime && python prism32.py
+pkg update && pkg install python git && git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && python prism32.py --setup-runtime && python prism32.py
 ```
 
 ## Why It Is Different
