@@ -27,12 +27,18 @@ LOG_FILE="$RUNTIME_DIR/install.log"
 NEED_ROOT=0
 AUTO=0
 
-# ── macOS: find Python 3 framework if not in PATH ──
+# ── Find Python 3 (macOS frameworks, BSD pkgsrc, etc.) ──
+PY3=""
 if ! command -v python3 &>/dev/null; then
-  for py in /Library/Frameworks/Python.framework/Versions/*/bin/python3; do
+  for py in \
+    /Library/Frameworks/Python.framework/Versions/*/bin/python3 \
+    /usr/pkg/bin/python3.[0-9]* \
+    /usr/local/bin/python3 \
+    /usr/bin/python3 \
+  ; do
     [ -x "$py" ] && PY3="$py" && break
   done
-  [ -z "$PY3" ] && { echo "Python 3 not found. Install from https://python.org"; exit 1; }
+  [ -z "${PY3:-}" ] && { echo "Python 3 not found. Install from https://python.org"; exit 1; }
 else
   PY3="python3"
 fi
