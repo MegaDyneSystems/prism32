@@ -11,19 +11,19 @@ This README is the full operator guide. A shorter GitHub front-page summary is i
 Install and start on Unix/Linux/macOS/BSD:
 
 ```sh
-git clone https://github.com/MegaDyneSystemssystems/prism32.git && cd prism32 && bash install.sh && prism32
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh && prism32
 ```
 
 No-root install:
 
 ```sh
-git clone https://github.com/MegaDyneSystemssystems/prism32.git && cd prism32 && bash install.sh -y && ~/.local/bin/prism32
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh -y && ~/.local/bin/prism32
 ```
 
 Run directly without install:
 
 ```sh
-git clone https://github.com/MegaDyneSystemssystems/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
+git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
 ```
 
 Most-used first commands inside Prism32:
