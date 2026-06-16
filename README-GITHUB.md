@@ -1,6 +1,6 @@
 # Prism32
 
-Prism32 is a tiny but powerful terminal AI agent. It is one Python file, stdlib-only, and built for real terminals, old machines, servers, BSD boxes, macOS, Linux, Termux, Windows, containers, and weird Unix systems where a browser-based AI tool is too heavy.
+Prism32 is a self-extending, self-repairing terminal AI super-agent. One Python file, stdlib-only. A real Jarvis. A DIY Palantir. It generates plugins for itself, delegates to subagents, absorbs external AI harnesses, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling.
 
 Full manual: `README.md`.
 
@@ -65,16 +65,21 @@ pkg update && pkg install python git && git clone https://github.com/MegaDyneSys
 
 ## Why It Is Different
 
-- No pip dependencies, no Node.js, no browser runtime, no database.
-- Talks to OpenAI-compatible APIs: local llama.cpp, Ollama, OpenAI, Groq, Together, OpenRouter, custom gateways, and compatible proxies.
-- Runs shell commands from AI `execute` blocks and feeds results back until the task is done.
-- `/goal <task>` runs autonomous multi-step work with a configurable step limit.
-- `/delegate` and `/spawn` create subagents for synchronous or async work.
-- Plugins in `~/.prism32/plugins/*.py` can add slash commands, providers, themes, context, timers, and HTTP helpers.
-- `/extend <goal>` can ask the configured model to generate, syntax-check, write, load, and immediately use a task-specific plugin.
-- Memory files keep machine notes, long-term notes, custom rules, tool scans, sessions, and evolve baselines.
-- Harness absorption detects external AI CLIs such as OpenCode, Codex CLI, Claude Code, Aider, Gemini CLI, Goose, and Cursor Agent.
-- Press Escape to stop streaming, API waits, foreground commands, and goal mode.
+Prism32 is a self-extending, self-repairing, multi-agent command system. It is not a chat window — it is a real Jarvis, a DIY Palantir that grows more powerful every time you use it.
+
+The agent bootstraps itself: auto-detects OS and CPU, scans local tools, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, and persists everything it learns into memory files that survive restarts. It can do all of this autonomously from inside execute blocks mid-task without operator approval.
+
+- **Self-evolution without guardrails.** The agent inspects its own source, diffs against a baseline, generates plugins to fix gaps, syntax-checks them, loads them immediately, and uses the new commands in the same session. It can git-pull and reinstall itself.
+- **Hot-swappable plugins the agent creates for itself.** `/extend temp add a command that ingests MQTT from this Zigbee network` — the model generates a stdlib Python plugin, Prism32 validates and loads it, and the agent calls the new command in its next execute block. No restart. No pip. No human.
+- **Quantum context as a shared brain.** Subagents drop results into a thread-safe key-value store. The main agent reads them without polling. Every agent sees every other agent's findings. System prompts rebuild mid-task with the latest state.
+- **Model mixing for cost and speed.** Talk to a strong model. Subagents run on cheap fast ones. Thousands of tokens of infrastructure scanning happen on a free-tier model while your main session stays on the expensive reasoning model. `/delegate scan this subnet --provider groq` costs almost nothing.
+- **Harness absorption.** Prism32 detects every other AI CLI on the machine and can coordinate them as tools. It becomes the commander over every AI agent installed on the system.
+- **The peripheral surface is the entire Linux device tree.** GPIO, I2C, SPI, serial, CAN, SDR, cameras, Zigbee sticks, Z-Wave, Bluetooth, motor controllers, relays. If Linux has a /dev node for it, the agent can script against it. Combine with on-the-fly plugin generation for universal hardware control that learns new protocols mid-session.
+- **Platform reach means deploy anywhere.** Same binary runs on a Raspberry Pi in a robot, a Steam Deck, a jailbroken Kindle, a Tesla MCU, a DEC AlphaStation, a Synology NAS, a $15 OpenWrt travel router, an SGI Octane, and an AWS Graviton instance. Auto-detects architecture, package manager, and shell.
+- **Cost scales to zero.** Local Ollama/llama.cpp models run entirely offline. Switch to cloud models only when needed. You control cost-per-task by choosing which model does which job.
+- **Theoretically unbounded.** Because the agent writes and loads plugins, spawns subagents, absorbs external harnesses, evolves its own context, and persists everything it learns, there is no fixed feature ceiling. Every task expands the agent's capability surface. The operator describes goals. The agent builds the path.
+
+No pip dependencies. No Node.js. No browser. No database. One Python file.
 
 ## Quick Examples
 

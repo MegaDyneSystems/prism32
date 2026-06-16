@@ -1,6 +1,6 @@
 # Prism32 v6.7
 
-Prism32 is a retro terminal AI agent from MegaDyne Systems. It runs as a single Python file, talks to any OpenAI-compatible model API, executes shell commands when the model emits structured `execute` blocks, and feeds the results back until the task is complete.
+Prism32 is a self-extending, self-repairing terminal AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. A DIY Palantir. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do.
 
 It is designed for modern PC terminals and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
 
@@ -148,6 +148,34 @@ Prism32 combines several systems in one terminal harness:
 - Harness absorption: Prism32 can detect external AI CLIs such as OpenCode, Codex CLI, Claude Code, Aider, Gemini CLI, Goose, and Cursor Agent, then include their availability in context.
 - Terminal interjection while streaming: type while the AI is responding, press Enter, and your message interrupts the model.
 - Bare Escape cancellation: press Escape to stop active AI streaming, non-streaming API waits, foreground shell commands, and goal-mode work.
+
+## The Emergent Agent
+
+Prism32 is not a chatbot. It is a self-extending, self-repairing, multi-agent command system that becomes more capable the longer it runs.
+
+Each capability feeds the others. The agent bootstraps itself: it detects the OS and CPU it is running on, scans for local tools, absorbs external AI harnesses into its context, generates plugins on the fly for missing capabilities, delegates sub-tasks to subagents running different models, synchronizes state through quantum context, and records everything it learns into persistent memory files that survive restarts. None of this requires operator approval. The agent can decide to create a plugin, spawn a subagent, enable evolve mode, or absorb a harness entirely on its own, from inside an execute block, mid-task.
+
+The combination creates real emergent power:
+
+**Self-evolution without guardrails.** The agent can inspect its own source code against a baseline, diff it, generate a plugin to fix a gap, syntax-check the plugin, load it immediately, and use the new command in the same session. It can also git-pull and reinstall itself. The boundaries of what it can do expand at runtime.
+
+**Hot-swappable plugins the agent creates for itself.** `/extend temp add a command that ingests MQTT telemetry from this Zigbee network` — the model generates a stdlib Python plugin, Prism32 validates and loads it, and the agent calls the new command in its next execute block. No restart. No pip. No human needed. Temporary plugins disappear when Prism32 exits; permanent ones load on every boot.
+
+**Quantum context as a shared brain.** Every main agent, subagent, and async spawned agent reads and writes to the same thread-safe key-value store. A subagent scanning open ports drops its findings into quantum context, and the main agent picks them up without polling. Subagents running different providers see each other's results. The system prompt is rebuilt mid-task to include the latest quantum state.
+
+**Model mixing for cost and speed.** You talk to a strong model. Subagents run on cheap fast ones. Thousands of tokens of infrastructure scanning happen on a free-tier model while your main session stays on the expensive reasoning model for analysis. `/delegate scan every host on this subnet --provider groq` costs almost nothing. No other terminal agent harness lets you mix providers and models per-task with zero configuration changes.
+
+**Harness absorption.** Prism32 detects OpenCode, Codex CLI, Claude Code, Aider, Gemini CLI, Goose, Cursor Agent, and other AI CLIs on the system. It injects their capabilities into its context. It can then delegate a task to a super-subagent seeded with those tools. Prism32 becomes a coordinator over every AI agent CLI installed on the machine.
+
+**The peripheral surface is the entire Linux device tree.** USB serial adapters, GPIO pins, I2C sensors, SPI displays, CAN buses, SDR dongles, cameras, microphones, speakers, relays, motor controllers, 3D printer serial ports, Zigbee coordinators, Z-Wave sticks, Bluetooth adapters, WiFi interfaces, and anything with a /dev node. If Linux can talk to it, the agent can script against it. Combine that with on-the-fly plugin generation and you have a universal hardware controller that learns new protocols mid-session.
+
+**Platform reach means deployment everywhere.** The same Prism32 binary runs on a Raspberry Pi inside a robot, an old laptop in a garage, a Steam Deck, a jailbroken Kindle, a Tesla MCU, a DEC AlphaStation, a Synology NAS, a $15 OpenWrt travel router, an SGI Octane, and an AWS Graviton instance. It auto-detects the architecture, the package manager, and the shell, then adjusts every command it runs. Install once, deploy anywhere.
+
+**Cost scales down to zero.** Local llama.cpp or Ollama models run entirely offline on the same machine. No API costs. No cloud dependency. Use `/provider local` for private work, switch to OpenRouter for hard reasoning, and let subagents run on Groq's free tier for bulk scanning. You control the cost-per-task by choosing which model does which job.
+
+**The system is theoretically unbounded.** Because the agent can write and load plugins, spawn subagents, absorb external harnesses, evolve its own context, and persist everything it learns, there is no fixed feature ceiling. Every task expands the agent's capability surface. The operator does not configure features — they describe goals, and the agent builds the path.
+
+Prism32 is a DIY Palantir. A real Jarvis that lives in your terminal, runs on your hardware, costs what you choose to spend, and grows more powerful every time you use it.
 
 ## Requirements
 
@@ -425,9 +453,9 @@ Prism32 sends OpenAI-style `/chat/completions` requests. Providers work best whe
 
 All commands require the `/` prefix. Bare text is sent to the AI.
 
-Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/delegate`, `/spawn`, `/subagents`, `/skills`, `/auto`, `/shard`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks.
+Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/delegate`, `/spawn`, `/subagents`, `/skill-create`, `/auto delete|pause|resume|show`, `/shard reset`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks.
 
-From `execute` blocks, the model can use shell commands (the normal path), plugin-registered commands, `/quantum`, `/harness scan|context|path`, `/evolve tools|diff|docs|context`, `/extend`, and `/memory path`.
+From `execute` blocks, the model can use shell commands (the normal path), plugin-registered commands, `/quantum`, `/auto` (create/list/run automations), `/skill-list`, `/skill-load`, `/shard` (show/deploy/set/secrets/complete), `/harness scan|context|path`, `/evolve on|tools|diff|docs|context`, `/extend`, `/update`, and `/memory path`.
 
 Core:
 

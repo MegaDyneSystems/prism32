@@ -4359,6 +4359,14 @@ def _try_plugin_cmd(c, history=None):
         return format_harnesses(load_harnesses())
     if cmd_name in ('/evolve', 'evolve'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "context"
+        if sub in ("on", "setup", "start", ""):
+            global _EVOLVE_MODE
+            ensure_harness_scan(force=False)
+            ensure_startup_memory(refresh=True)
+            refresh_memory_profile(save=True)
+            ensure_evolve_files(force_baseline=(sub == "setup"), refresh_tools=True)
+            _EVOLVE_MODE = True
+            return f"Evolve mode is ON.\nDocs: {EVOLVE_DOC_FILE}\nTools: {EVOLVE_TOOL_FILE}\nBaseline: {EVOLVE_BASELINE_FILE}"
         if sub == "tools":
             return format_tool_scan(scan_available_tools())
         if sub in ("diff", "compare"):
@@ -4369,6 +4377,61 @@ def _try_plugin_cmd(c, history=None):
         return evolve_context()
     if cmd_name in ('/extend', 'extend'):
         return extend_with_plugin(cmd_args, history=history)
+    if cmd_name in ('/auto', 'auto'):
+        sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "list"
+        subarg = cmd_args.split(None, 1)[1] if ' ' in cmd_args else ""
+        if sub == "list":
+            autos = automation_list()
+            if not autos:
+                return "No automations."
+            return "\n".join(f"{a.get('id','')}: {a.get('description','')} status={a.get('status','')}" for a in autos)
+        if sub == "run":
+            automation_execute(subarg)
+            return f"Automation {subarg} started."
+        auto = automation_create_from_nl(cmd_args)
+        if auto:
+            return f"Automation created: {auto.get('description','')} type={auto.get('type')} id={auto.get('id')}"
+        return "Failed to parse automation."
+    if cmd_name in ('/skill-list', 'skill-list'):
+        skills = skill_list()
+        if not skills:
+            return "No skills."
+        return "\n".join(f"{s.get('name','')}: {s.get('description','')[:80]}" for s in skills)
+    if cmd_name in ('/skill-load', 'skill-load'):
+        name = cmd_args.strip()
+        if not name:
+            return "Usage: /skill-load <name>"
+        ok = skill_inject(name)
+        return f"Skill '{name}' loaded." if ok else f"Skill '{name}' not found."
+    if cmd_name in ('/shard', 'shard'):
+        parts = cmd_args.split(None, 1)
+        sub = parts[0].lower() if parts else "show"
+        rest = parts[1] if len(parts) > 1 else ""
+        if sub == "show" or not sub:
+            shard = read_promptshard()
+            return json.dumps(shard, indent=2)
+        if sub == "deploy":
+            shard = read_promptshard()
+            sid = shard_spawn_agent(shard)
+            return f"Shard deployed as subagent {sid}." if sid else "Shard deploy failed."
+        if sub == "set" and ':' in rest:
+            k, v = rest.split(':', 1)
+            shard = read_promptshard()
+            shard[k.strip().lower()] = v.strip()
+            write_promptshard(shard)
+            return f"Shard field '{k.strip()}' set."
+        if sub == "secrets":
+            secrets = _secrets_load()
+            return json.dumps(secrets, indent=2) if secrets else "No secrets stored."
+        if sub == "complete":
+            shard = read_promptshard()
+            shard["status"] = "completed"
+            write_promptshard(shard)
+            return "Shard marked complete."
+        return f"Shard subcommand not available from execute blocks: {sub}"
+    if cmd_name in ('/update', 'update'):
+        _do_git_update(cmd_args.strip() if cmd_args else None)
+        return "Update command issued. Check output."
     if cmd_name in ('/memory', 'memory'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "startup"
         if sub in ("path", "paths"):
@@ -4736,12 +4799,16 @@ Use /extend temp <goal> when a missing reusable capability would help complete t
 Commands you can use inside execute blocks:
 - Any shell command (the normal path).
 - /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
+- /auto <text>, /auto list, /auto run <id> (create/list/run automations).
+- /skill-list, /skill-load <name> (view and activate skills).
+- /shard show, /shard deploy, /shard set <k>:<v>, /shard secrets, /shard complete (manage promptshards).
 - /harness scan, /harness context, /harness path (detect external AI CLIs).
-- /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
+- /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
 - /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
+- /update [dir] (git pull and reinstall from local project directory).
 - /memory path, /memory paths (locate memory files).
 - Any plugin-registered command listed in context (see Available plugin commands).
-Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /memory edit, /delegate, /spawn, /subagents, /skills, /auto, /shard, and other session/config commands are operator-side only and do not work from execute blocks.
+Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /memory edit, /delegate, /spawn, /subagents, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, and other session/config/operator commands are operator-side only and do not work from execute blocks.
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
