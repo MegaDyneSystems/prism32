@@ -147,6 +147,8 @@ root() {
   if [ "$NEED_ROOT" = "1" ]; then
     if [ -n "${SU_PASS:-}" ]; then
       echo "$SU_PASS" | su -c "$*" 2>/dev/null || echo "$SU_PASS" | sudo -S sh -c "$*" 2>/dev/null
+    elif [ "$AUTO" = "1" ]; then
+      return 1
     else
       su -c "$*" 2>/dev/null || sudo sh -c "$*" 2>/dev/null
     fi
