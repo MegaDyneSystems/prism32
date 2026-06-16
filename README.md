@@ -1,6 +1,6 @@
 # Prism32 v6.7
 
-Prism32 is a self-extending, self-repairing terminal AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. A DIY Palantir. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do.
+Prism32 is a self-extending, self-repairing terminal AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do.
 
 It is designed for modern PC terminals and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
 
@@ -175,7 +175,9 @@ The combination creates real emergent power:
 
 **The system is theoretically unbounded.** Because the agent can write and load plugins, spawn subagents, absorb external harnesses, evolve its own context, and persist everything it learns, there is no fixed feature ceiling. Every task expands the agent's capability surface. The operator does not configure features — they describe goals, and the agent builds the path.
 
-Prism32 is a DIY Palantir. A real Jarvis that lives in your terminal, runs on your hardware, costs what you choose to spend, and grows more powerful every time you use it.
+**Emergent capabilities on weird hardware.** When you put an agent that can write and load its own plugins onto a device that was never designed to host an AI, the result is not a chatbot on a Pi — it is a hardware-native intelligence that reshapes what the device can do. A $15 OpenWrt travel router with a USB Zigbee stick becomes a self-healing smart-home coordinator that generates MQTT plugins for whatever devices join the network. A jailbroken Kindle on a bookshelf becomes an AI reading companion that fetches, summarizes, and cross-references your library. A Tesla MCU or Comma.ai Openpilot device diagnoses CAN bus traffic, scripts custom dashboards, and hot-loads driving-data plugins mid-route. A Raspberry Pi inside a 3D printer enclosure learns G-code patterns, generates print-monitoring plugins, and self-corrects without cloud dependency. A DEC AlphaStation from 1994 or an SGI Octane from 1997 running a local model is a literal time capsule with a modern AI brain. A Linux-based oscilloscope or logic analyzer gets an operator that understands signal analysis. An Antminer control board running Prism32 can monitor hashrate, adjust pools, and rebuild firmware configs. The pattern is the same everywhere: install, describe the goal, and the agent extends itself to meet the hardware.
+
+Prism32 is a Jarvis that lives in your terminal, runs on your hardware, costs what you choose to spend, and grows more powerful every time you use it.
 
 ## Requirements
 

@@ -1,6 +1,6 @@
 # Prism32
 
-Prism32 is a self-extending, self-repairing terminal AI super-agent. One Python file, stdlib-only. A real Jarvis. A DIY Palantir. It generates plugins for itself, delegates to subagents, absorbs external AI harnesses, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling.
+Prism32 is a self-extending, self-repairing terminal AI super-agent. One Python file, stdlib-only. A real Jarvis. It generates plugins for itself, delegates to subagents, absorbs external AI harnesses, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling.
 
 Full manual: `README.md`.
 
@@ -77,7 +77,9 @@ The agent bootstraps itself: auto-detects OS and CPU, scans local tools, absorbs
 - **The peripheral surface is the entire Linux device tree.** GPIO, I2C, SPI, serial, CAN, SDR, cameras, Zigbee sticks, Z-Wave, Bluetooth, motor controllers, relays. If Linux has a /dev node for it, the agent can script against it. Combine with on-the-fly plugin generation for universal hardware control that learns new protocols mid-session.
 - **Platform reach means deploy anywhere.** Same binary runs on a Raspberry Pi in a robot, a Steam Deck, a jailbroken Kindle, a Tesla MCU, a DEC AlphaStation, a Synology NAS, a $15 OpenWrt travel router, an SGI Octane, and an AWS Graviton instance. Auto-detects architecture, package manager, and shell.
 - **Cost scales to zero.** Local Ollama/llama.cpp models run entirely offline. Switch to cloud models only when needed. You control cost-per-task by choosing which model does which job.
-- **Theoretically unbounded.** Because the agent writes and loads plugins, spawns subagents, absorbs external harnesses, evolves its own context, and persists everything it learns, there is no fixed feature ceiling. Every task expands the agent's capability surface. The operator describes goals. The agent builds the path.
+- **Theoretically unbounded.** Because the agent writes and loads plugins, spawns subagents, absorbs external harnesses, and persists everything it learns, there is no fixed feature ceiling. Every task expands what it can do.
+
+Hardware that was never designed for an AI becomes something new. A $15 OpenWrt router with a Zigbee stick turns into a self-healing smart-home coordinator that generates MQTT plugins on the fly. A jailbroken Kindle becomes a reading companion. A Tesla MCU diagnoses its own CAN bus. A DEC AlphaStation from 1994 gets a modern AI brain. A Raspberry Pi on a 3D printer generates print-monitoring plugins mid-job. Install, describe the goal, and the agent extends itself to meet the hardware.
 
 No pip dependencies. No Node.js. No browser. No database. One Python file.
 
