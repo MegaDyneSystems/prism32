@@ -3423,7 +3423,12 @@ def _interjection_poll():
                     _draw_interjection_footer()
                 return None
             if data == b'\x1b':
-                return request_agent_cancel()
+                r, _, _ = select.select([fd], [], [], 0.05)
+                if r:
+                    data = data + os.read(fd, 4096)
+                    # Fall through so the escape-sequence state machine handles it
+                else:
+                    return request_agent_cancel()
             text = data.decode('utf-8', errors='replace')
             for ch in text:
                 if _INTERJECTION_ESCAPE:

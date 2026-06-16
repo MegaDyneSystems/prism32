@@ -125,14 +125,18 @@ def test_interjection_text_enter_sets_result_once():
 
 def test_interjection_escape_requests_cancel():
     """Bare Escape should stop the active agent operation."""
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF
     old_select = globals().get('select')
     old_read = os.read
     old_stdin = sys.stdin
 
+    call_count = [0]
     class FakeSelect:
         @staticmethod
         def select(readable, writable, exceptional, timeout):
+            call_count[0] += 1
+            if call_count[0] == 2 and timeout == 0.05:
+                return ([], [], [])  # No follow-up: genuine lone Escape
             return ([0], [], [])
 
     class FakeStdin:
@@ -149,6 +153,8 @@ def test_interjection_escape_requests_cancel():
         _INTERJECTION_CURSOR = 0
         _INTERJECTION_RESULT = None
         _INTERJECTION_HAS_TYPED = False
+        _INTERJECTION_ESCAPE = False
+        _INTERJECTION_ESCAPE_BUF = ""
         assert _interjection_poll() is _INTERJECTION_CANCEL
         assert agent_cancel_requested()
         assert _INTERJECTION_RESULT is None
@@ -160,7 +166,7 @@ def test_interjection_escape_requests_cancel():
 
 def test_interjection_arrow_escape_sequence_does_not_cancel():
     """ANSI arrow-key sequences should remain editable interjection input."""
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX
+    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _INTERJECTION_HAS_TYPED, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF
     old_select = globals().get('select')
     old_read = os.read
     old_stdin = sys.stdin
@@ -185,6 +191,8 @@ def test_interjection_arrow_escape_sequence_does_not_cancel():
         _INTERJECTION_CURSOR = 0
         _INTERJECTION_RESULT = None
         _INTERJECTION_HAS_TYPED = False
+        _INTERJECTION_ESCAPE = False
+        _INTERJECTION_ESCAPE_BUF = ""
         _INTERJECTION_HISTORY = ["previous prompt"]
         _INTERJECTION_HISTORY_IDX = -1
         assert _interjection_poll() is None
