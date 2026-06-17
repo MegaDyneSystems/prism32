@@ -200,7 +200,7 @@ elif [ "$NEED_ROOT" = "1" ]; then
 exec "$PY3" "$SRC_FILE" "\$@"
 WRAP
   chmod +x "$TMP_WRAP"
-  root cp "$TMP_WRAP" "$BIN" && root chmod +x "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; rm -f "$TMP_WRAP"; exit 1; }
+  root cp "$TMP_WRAP" "$BIN" && root chmod 755 "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; rm -f "$TMP_WRAP"; exit 1; }
   rm -f "$TMP_WRAP"
 else
   _install_wrapper "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; exit 1; }
