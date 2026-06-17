@@ -210,6 +210,18 @@ hash -r 2>/dev/null || true
 mkdir -p "$RUNTIME_DIR" "$SESSIONS_DIR" "$SKILLS_DIR" "$PLUGINS_DIR" "$EVOLVE_DIR" && ok "Directories created"
 touch "$LOG_FILE"
 
+# Copy bundled default plugins from repo into runtime plugin dir
+if [ -d "$SRC_DIR/plugins" ]; then
+  for p in "$SRC_DIR/plugins/"*.py; do
+    [ -f "$p" ] || continue
+    bn=$(basename "$p")
+    [ "$bn" = "__init__.py" ] && continue
+    if [ ! -f "$PLUGINS_DIR/$bn" ]; then
+      cp "$p" "$PLUGINS_DIR/$bn" && ok "Plugin copied: $bn"
+    fi
+  done
+fi
+
 # ═══════════════════════════════════════════════════════════════
 #  5. API config (multi-provider)
 # ═══════════════════════════════════════════════════════════════
