@@ -793,10 +793,11 @@ def harness_context(limit=1600):
     installed = data.get("installed", [])
     if not installed:
         return "AI harnesses: none detected yet. Use /harness scan after installing external agent CLIs."
-    lines = ["AI HARNESS ABSORPTION: external agent CLIs detected and usable from execute blocks:"]
+    lines = ["AI HARNESS ABSORPTION: external agent CLIs detected and usable from execute blocks. Use FULL PATHS to invoke them:"]
     for h in installed[:8]:
         abilities = ", ".join(h.get("abilities", [])[:4])
-        lines.append(f"- {h.get('display', h.get('id'))} command '{h.get('command')}' abilities: {abilities}. {h.get('hint', '')}")
+        full_path = h.get("path", "") or h.get("command", "")
+        lines.append(f"- {h.get('display', h.get('id'))}: {full_path}  abilities: {abilities}. {h.get('hint', '')}")
     lines.append("Use /harness delegate <task> to spawn a super subagent seeded with these capabilities.")
     text = "\n".join(lines)
     return text[:limit]
