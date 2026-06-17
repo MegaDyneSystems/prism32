@@ -200,7 +200,9 @@ class TestScheduleParsing(unittest.TestCase):
         result = _parse_schedule_text("tomorrow")
         self.assertIsNotNone(result)
         self.assertEqual(result[0], "oneshot")
-        tomorrow_midnight = (int(time.time()) // 86400 + 1) * 86400
+        from datetime import datetime
+        _today_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow_midnight = _today_midnight.timestamp() + 86400
         # Default time is 9:00 AM = 32400 seconds after midnight
         self.assertAlmostEqual(result[2], tomorrow_midnight + 32400, delta=60)
 

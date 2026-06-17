@@ -43,28 +43,7 @@ else
   PY3="python3"
 fi
 
-# ── macOS: fix SSL certificates ──
-if [ "$(uname -s)" = "Darwin" ]; then
-  "$PY3" -c "import urllib.request; urllib.request.urlopen('https://google.com', timeout=3)" 2>/dev/null ||
-  {
-    echo "  macOS SSL certificates need setup."
-    CERT_SCRIPT="/Applications/Python 3.*/Install Certificates.command"
-    for s in $CERT_SCRIPT; do
-      [ -x "$s" ] && "$s" 2>/dev/null && ok "SSL certificates installed" && break
-    done
-    "$PY3" -m pip install --upgrade certifi 2>/dev/null || true
-    # Verify
-    "$PY3" -c "import urllib.request; urllib.request.urlopen('https://google.com', timeout=3)" 2>/dev/null \
-      || warn "SSL still not working — run manually: open /Applications/Python\ 3.9/Install\ Certificates.command"
-  }
-fi
-
-# Parse --yes / -y flag
-for arg in "$@"; do
-  [ "$arg" = "--yes" ] || [ "$arg" = "-y" ] && AUTO=1
-done
-
-# ── ANSI ──
+# ── ANSI + log helpers (needed early for macOS SSL fix) ──
 RST='\033[0m'; BLD='\033[1m'; DIM='\033[2m'
 G='\033[92m'; Y='\033[93m'; CY='\033[96m'; R='\033[91m'
 
@@ -74,6 +53,26 @@ warn()  { log "  ${Y}w${RST} $*"; }
 fail()  { log "  ${R}!${RST} $*"; }
 header(){ echo -e "\n${CY}${BLD}--- $*${RST}"; }
 sub()   { echo -e "  ${DIM}|${RST}  $*"; }
+
+# ── macOS: fix SSL certificates ──
+if [ "$(uname -s)" = "Darwin" ]; then
+  "$PY3" -c "import urllib.request; urllib.request.urlopen('https://google.com', timeout=3)" 2>/dev/null ||
+  {
+    echo "  macOS SSL certificates need setup."
+    for s in "/Applications/Python 3.*/Install Certificates.command"; do
+      [ -x "$s" ] && "$s" 2>/dev/null && ok "SSL certificates installed" && break
+    done
+    "$PY3" -m pip install --upgrade certifi 2>/dev/null || true
+    # Verify
+    "$PY3" -c "import urllib.request; urllib.request.urlopen('https://google.com', timeout=3)" 2>/dev/null \
+      || warn "SSL still not working — run manually: open /Applications/Python\\ 3.9/Install\\ Certificates.command"
+  }
+fi
+
+# Parse --yes / -y flag
+for arg in "$@"; do
+  [ "$arg" = "--yes" ] || [ "$arg" = "-y" ] && AUTO=1
+done
 
 # ── Provider presets ──
 EP_KEYS=(local ollama openai anthropic groq together openrouter custom)
@@ -164,8 +163,14 @@ header "Step 3/9 - Backing Up"
 
 backups=0
 if [ -f "$BIN" ] || [ -L "$BIN" ]; then
-  root cp -P "$BIN" "$BIN_BACKUP" && ok "Backed up $BIN" && backups=$((backups+1))
-  root rm -f "$BIN"
+  if root cp -P "$BIN" "$BIN_BACKUP"; then
+    ok "Backed up $BIN"
+    backups=$((backups+1))
+    root rm -f "$BIN"
+  else
+    fail "Backup failed — keeping existing binary, aborting"
+    exit 1
+  fi
 fi
 if [ -f "$CONFIG_FILE" ]; then
   cp "$CONFIG_FILE" "$CONFIG_BACKUP" && ok "Backed up config" && backups=$((backups+1))
@@ -261,7 +266,7 @@ _configure_provider() {
   if [ -n "$api_key_env" ] && [ -t 0 ]; then
     local current_key="${!api_key_env:-}"
     if [ -z "$current_key" ]; then
-      read -r -p "  $api_key_env: " api_key_val
+      read -rs -p "  $api_key_env: " api_key_val; echo
     else
       api_key_val="$current_key"
       ok "$api_key_env found in environment"
@@ -271,36 +276,21 @@ _configure_provider() {
   # Fetch live model list
   echo ""
   echo -e "  ${DIM}Fetching available models...${RST}"
-  local fetch_cmd
-  if [ -n "$api_key_val" ]; then
-    fetch_cmd="\"$PY3\" -c \"
-import urllib.request, json
+  local models_raw
+  models_raw=$("$PY3" -c "
+import urllib.request, json, sys
 try:
-    url = '${api_base}/models'
+    url = sys.argv[1] + '/models'
     req = urllib.request.Request(url)
-    req.add_header('Authorization', 'Bearer ${api_key_val}')
+    if sys.argv[2]:
+        req.add_header('Authorization', 'Bearer ' + sys.argv[2])
     with urllib.request.urlopen(req, timeout=8) as r:
         data = json.loads(r.read())
         models = [m.get('id', m.get('name', '')) for m in data.get('data', data.get('models', [])) if m.get('id') or m.get('name')]
         print('|'.join(models[:200]) if models else 'FAIL')
 except Exception:
     print('FAIL')
-\" 2>/dev/null"
-  else
-    fetch_cmd="\"$PY3\" -c \"
-import urllib.request, json
-try:
-    url = '${api_base}/models'
-    with urllib.request.urlopen(url, timeout=8) as r:
-        data = json.loads(r.read())
-        models = [m.get('id', m.get('name', '')) for m in data.get('data', data.get('models', [])) if m.get('id') or m.get('name')]
-        print('|'.join(models[:200]) if models else 'FAIL')
-except Exception:
-    print('FAIL')
-\" 2>/dev/null"
-  fi
-  local models_raw
-  models_raw=$(eval "$fetch_cmd")
+" "$api_base" "$api_key_val" 2>/dev/null)
   local model_name=""
   if [ "$models_raw" = "FAIL" ] || [ -z "$models_raw" ]; then
     local fb="${EP_MODELS_FALLBACK[$pidx]}"
@@ -402,14 +392,14 @@ header "Step 7/9 - Writing Config"
 
 if [ -f "$CONFIG_FILE" ]; then
   "$PY3" -c "
-import json
-c = json.load(open('$CONFIG_FILE'))
-c['provider'] = '$PROV'
-c['model'] = '$MODEL'
-c['api_base'] = '$API_BASE'
-c['providers'] = json.loads('''$ALL_PROVIDERS''')
-json.dump(c, open('$CONFIG_FILE', 'w'), indent=2)
-" && ok "Config updated" || { fail "Config write failed"; exit 1; }
+import json, sys
+c = json.load(open(sys.argv[1]))
+c['provider'] = sys.argv[2]
+c['model'] = sys.argv[3]
+c['api_base'] = sys.argv[4]
+c['providers'] = json.loads(sys.argv[5])
+json.dump(c, open(sys.argv[1], 'w'), indent=2)
+" "$CONFIG_FILE" "$PROV" "$MODEL" "$API_BASE" "$ALL_PROVIDERS" && ok "Config updated" || { fail "Config write failed"; exit 1; }
 else
   cat > "$CONFIG_FILE" << JSONEOF
 {

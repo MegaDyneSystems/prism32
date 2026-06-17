@@ -13,6 +13,7 @@ import time
 import socket
 import shutil
 import re
+import shlex
 import signal
 import argparse
 import textwrap
@@ -155,6 +156,8 @@ class PluginAPI:
     def schedule(self, interval_sec, callback):
         """Schedule a callback to run every interval_sec seconds."""
         self._scheduled_interval = interval_sec
+        for old_t in self._timers:
+            old_t.cancel()
         t = threading.Timer(interval_sec, self._run_scheduled, [callback])
         t.daemon = True
         self._timers = [t]
@@ -533,7 +536,7 @@ def _now_iso():
 def _detect_shell_name():
     if os.environ.get("COMSPEC"):
         return os.environ.get("COMSPEC", "")
-    return os.environ.get("SHELL", "") or os.environ.get("0", "") or "unknown"
+    return os.environ.get("SHELL", "") or sys.argv[0] or "unknown"
 
 def _safe_read(path, default=""):
     try:
@@ -1552,7 +1555,8 @@ AUTOMATIONS_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "automations
 _AUTOMATION_SCHEDULER_RUNNING = False
 
 def _skill_path(name):
-    return os.path.join(SKILLS_DIR, f"{name}.json")
+    safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', name)
+    return os.path.join(SKILLS_DIR, f"{safe_name}.json")
 
 def skill_save(name, description, instructions, workflow=None, tags=None, source_session=""):
     os.makedirs(SKILLS_DIR, exist_ok=True)
@@ -1671,10 +1675,10 @@ def _auto_generate_id(description):
 def _auto_default(description, task, auto_type, interval=None, due_at=None):
     now = datetime.now()
     nxt = None
-    if auto_type == "scheduled" and interval:
-        nxt = (now.timestamp() + interval * 60)
-    elif auto_type == "oneshot" and due_at:
+    if due_at:
         nxt = due_at
+    elif auto_type == "scheduled" and interval:
+        nxt = (now.timestamp() + interval * 60)
     return {
         "id": _auto_generate_id(description),
         "type": auto_type,
@@ -1776,28 +1780,32 @@ def _parse_schedule_text(text):
     
     # "every morning" → daily at 7:00
     if text == "every morning":
-        nxt = int(now) - int(now) % 86400 + 25200  # today 07:00
+        _today_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        nxt = _today_midnight.timestamp() + 25200  # today 07:00
         if nxt <= now:
             nxt += 86400
         return ("scheduled", 1440, nxt, "daily at 7:00 AM")
     
     # "every afternoon" → daily at 13:00
     if text == "every afternoon":
-        nxt = int(now) - int(now) % 86400 + 46800
+        _today_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        nxt = _today_midnight.timestamp() + 46800
         if nxt <= now:
             nxt += 86400
         return ("scheduled", 1440, nxt, "daily at 1:00 PM")
     
     # "every evening" → daily at 18:00
     if text == "every evening":
-        nxt = int(now) - int(now) % 86400 + 64800
+        _today_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        nxt = _today_midnight.timestamp() + 64800
         if nxt <= now:
             nxt += 86400
         return ("scheduled", 1440, nxt, "daily at 6:00 PM")
     
     # "every night" / "every midnight" → daily at 0:00
     if text in ("every night", "every midnight"):
-        nxt = int(now) - int(now) % 86400
+        _today_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        nxt = _today_midnight.timestamp()
         if nxt <= now:
             nxt += 86400
         return ("scheduled", 1440, nxt, "daily at midnight")
@@ -1812,11 +1820,12 @@ def _parse_schedule_text(text):
     m = re.match(r'every\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s*$', text)
     if m:
         target_wd = day_names[m.group(1)]
-        current_wd = datetime.fromtimestamp(now).weekday()
+        _today_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        current_wd = _today_midnight.weekday()
         days_ahead = (target_wd - current_wd) % 7
         if days_ahead == 0:
             days_ahead = 7
-        nxt = int(now) - int(now) % 86400 + days_ahead * 86400 + 32400  # 9:00 AM
+        nxt = _today_midnight.timestamp() + days_ahead * 86400 + 32400  # 9:00 AM
         return ("scheduled", 10080, nxt, f"weekly on {m.group(1).title()} at 9:00 AM")
     
     # "in X minutes" / "in X hours" / "in X days"
@@ -1834,7 +1843,8 @@ def _parse_schedule_text(text):
     # "tomorrow" / "tomorrow at <time>"
     m = re.match(r'tomorrow(?:\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?)?', text)
     if m:
-        tomorrow = int(now) - int(now) % 86400 + 86400
+        _today_midnight = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        tomorrow = _today_midnight.timestamp() + 86400
         if m.group(1):
             hour = int(m.group(1))
             minute = int(m.group(2) or 0)
@@ -2008,25 +2018,31 @@ def learn_command(cmd_name, success=True, duration=0):
     _MEMORY_FLUSH_COUNTER = 0
 
 def learn_error(error_msg, context=""):
-    mem = load_memory()
-    patterns = mem.setdefault("error_patterns", {})
+    global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
+    patterns = _mem_cache.setdefault("error_patterns", {})
     fp = error_msg[:80] if error_msg else "unknown"
     entry = patterns.setdefault(fp, {"count": 0, "contexts": [], "fixed": False})
     entry["count"] += 1
     if context and len(entry["contexts"]) < 5:
         entry["contexts"].append(context[:120])
-    save_memory(mem)
+    _MEMORY_DIRTY = True
+    _MEMORY_FLUSH_COUNTER += 1
+    _flush_memory()
+    _MEMORY_FLUSH_COUNTER = 0
 
 def learn_session(history_len, cmd_count, goal_mode=False):
-    mem = load_memory()
-    mem["session_count"] = mem.get("session_count", 0) + 1
-    mem["last_session"] = {
+    global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
+    _mem_cache["session_count"] = _mem_cache.get("session_count", 0) + 1
+    _mem_cache["last_session"] = {
         "time": datetime.now().isoformat(),
         "messages": history_len,
         "commands": cmd_count,
         "goal": goal_mode
     }
-    save_memory(mem)
+    _MEMORY_DIRTY = True
+    _MEMORY_FLUSH_COUNTER += 1
+    _flush_memory()
+    _MEMORY_FLUSH_COUNTER = 0
 
 def get_memory_suggestions():
     mem = load_memory()
@@ -4392,6 +4408,17 @@ def _try_plugin_cmd(c, history=None):
             return harness_context()
         if sub == "path":
             return HARNESS_FILE
+        if sub in ("delegate", "super"):
+            task = cmd_args.split(None, 1)[1] if ' ' in cmd_args else ""
+            if not task:
+                return "Usage: /harness delegate <task>"
+            ensure_harness_scan(force=False)
+            sa = SubAgent(_harness_super_task(task))
+            sa.run()
+            _quantum.put(f"harness_super_{sa.id}_result", sa.result)
+            if sa.result:
+                ltm_store(sa.result, source=f"harness_super_{sa.id}", summary=f"Harness super subagent: {task[:80]}", tags=["subagent", "harness"])
+            return sa.result or "[Harness subagent returned no result]"
         return format_harnesses(load_harnesses())
     if cmd_name in ('/evolve', 'evolve'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "context"
@@ -4424,6 +4451,15 @@ def _try_plugin_cmd(c, history=None):
         if sub == "run":
             automation_execute(subarg)
             return f"Automation {subarg} started."
+        if sub in ("show", "delete", "pause", "resume"):
+            return f"/auto {sub} is operator-only. Use /auto create <description> or /auto list|run."
+        if sub == "create" and subarg:
+            auto = automation_create_from_nl(subarg)
+            if auto:
+                return f"Automation created: {auto.get('description','')} type={auto.get('type')} id={auto.get('id')}"
+            return "Failed to parse automation."
+        if not cmd_args:
+            return "No automations."
         auto = automation_create_from_nl(cmd_args)
         if auto:
             return f"Automation created: {auto.get('description','')} type={auto.get('type')} id={auto.get('id')}"
@@ -4473,8 +4509,9 @@ def _try_plugin_cmd(c, history=None):
         if sub in ("path", "paths"):
             return f"startup_memory={STARTUP_MEMORY_FILE}\nmemory_json={MEMORY_FILE}"
         return startup_memory_context(limit=3000)
-    if registry.get(cmd_name):
-        return registry.dispatch_capture(cmd_name, cmd_args)
+    reg_name = cmd_name[1:] if cmd_name.startswith('/') else cmd_name
+    if registry.get(reg_name):
+        return registry.dispatch_capture(reg_name, cmd_args)
     return None
 
 def _tail_cmd_output(out):
@@ -4518,7 +4555,7 @@ def run_cmd(cmd, timeout=None):
     if timeout is None:
         timeout = Config.CMD_TIMEOUT
     try:
-        if Config.ROOT_PASS and ('su' in cmd or 'sudo' in cmd):
+        if Config.ROOT_PASS and re.search(r'\bsu\b|\bsudo\b', cmd):
             return _pty_su_root(cmd, timeout)
         if _can_cancel_foreground_input():
             clear_agent_cancel()
@@ -4543,7 +4580,6 @@ def run_cmd(cmd, timeout=None):
                         suffix = ("\n" + output) if output else ""
                         return f"[CANCELLED] Command stopped by Escape{suffix}"
                     if inj is not None:
-                        _INTERJECTION_RESULT = None
                         request_agent_cancel("Command interrupted by user input")
                         _terminate_process(proc)
                         output = _tail_cmd_output(out)
@@ -4574,6 +4610,15 @@ def run_cmd(cmd, timeout=None):
                         return f"[TIMEOUT] Command exceeded {timeout}s{suffix}"
             finally:
                 _interjection_stop()
+                if proc.stdout is not None:
+                    try:
+                        proc.stdout.close()
+                    except Exception:
+                        pass
+                try:
+                    proc.wait(timeout=5)
+                except Exception:
+                    pass
             return _tail_cmd_output(out)
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
         out = result.stdout + result.stderr
@@ -4882,7 +4927,10 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
     # Trim history if too large
     clean_messages = trim_history(clean_messages, 240000)
     
-    url = f"{Config.API_BASE.rstrip('/').rstrip('v1').rstrip('/')}/v1/chat/completions"
+    _base = Config.API_BASE.rstrip('/')
+    if _base.endswith('/v1'):
+        _base = _base[:-3]
+    url = f"{_base}/v1/chat/completions"
     payload = {
         "model": Config.MODEL,
         "messages": clean_messages,
@@ -4913,7 +4961,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
         except urllib.error.HTTPError as e:
             if agent_cancel_requested(cancel_event):
                 return AGENT_CANCELLED_RESPONSE
-            body = e.read().decode()[:500]
+            body = e.read().decode('utf-8', errors='replace')[:500]
             if e.code == 401:
                 last_error = f"[HTTP ERROR 401] Authentication failed. Set a valid API key via /provider key or --api-key"
                 learn_error(last_error, f"HTTP 401: {body[:100]}")
@@ -5058,7 +5106,6 @@ def stream_response(resp, cancel_event=None):
             
             if reasoning:
                 _queue_display(reasoning, "reasoning")
-                full += reasoning
                 reasoning_mode = True
             
             if content:
@@ -5272,12 +5319,12 @@ def cmd_goal(goal_text, history, cmd_log):
             break
         if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
             if len(history) > 5:
-                history = [history[0]] + history[:-4]
+                history[:] = [history[0]] + history[:-4]
             viz.status("API error, trimming history and retrying...", "warning")
             resp = ask_ai_cancelable(history, history=history)
         if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
             # Second failure - strip back to just system + goal, retry once more
-            history = history[:2]
+            history[:] = history[:2]
             viz.status("API error again, stripping history to system+goal...", "warning")
             resp = ask_ai_cancelable(history, history=history)
         if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
@@ -5348,7 +5395,7 @@ def cmd_goal(goal_text, history, cmd_log):
 
         # Trim history if approaching context limit
         if step > 3 and len(history) > 10:
-            history = trim_history(history)
+            history[:] = trim_history(history)
         
         time.sleep(Config.GOAL_STEP_DELAY)
 
@@ -5646,7 +5693,7 @@ def cmd_find(pattern):
     if Platform.WINDOWS:
         out = run_cmd(f'dir /s /b "*{pattern}*" 2>nul')
     else:
-        out = run_cmd(f"find . -name '*{pattern}*' -type f 2>/dev/null | head -30")
+        out = run_cmd(f"find . -name {shlex.quote('*' + pattern + '*')} -type f 2>/dev/null | head -30")
     if not out.strip():
         out = "No files found"
     box(f"FIND: {pattern}", out, "accent")
@@ -5660,7 +5707,7 @@ def cmd_grep(args):
     if Platform.WINDOWS:
         out = run_cmd(f'findstr /n /i "{pat}" "{fp}" 2>nul')
     else:
-        out = run_cmd(f"grep -n -i '{pat}' '{fp}' 2>/dev/null | head -30")
+        out = run_cmd(f"grep -n -i {shlex.quote(pat)} {shlex.quote(fp)} 2>/dev/null | head -30")
     if not out.strip():
         out = "No matches"
     box(f"GREP: {pat} in {fp}", out, "accent")
@@ -6127,7 +6174,8 @@ def main():
             continue
 
         if cmd == 'clear':
-            history = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}]
+            history[:] = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}]
+            _PluginHooks._history = history
             cmd_log.clear()
             print(f"  {t['bright']}+ History cleared{RST}\n")
             continue
@@ -6246,7 +6294,8 @@ def main():
             save_current_session(history, cmd_log)
             data = cmd_session_resume()
             if data:
-                history = data.get("history", [])
+                history[:] = data.get("history", [])
+                _PluginHooks._history = history
                 cmd_log = data.get("cmd_log", [])
             print()
             continue
@@ -6256,7 +6305,8 @@ def main():
                 save_current_session(history, cmd_log)
                 loaded_history, loaded_cmd_log = cmd_session_load(args_str)
                 if loaded_history is not None:
-                    history = loaded_history
+                    history[:] = loaded_history
+                    _PluginHooks._history = history
                     cmd_log = loaded_cmd_log if loaded_cmd_log else []
                     viz.status("Session restored", "success")
             else:
@@ -6420,7 +6470,7 @@ def main():
             continue
         if cmd == 'theme':
             themes = list(THEME_REGISTRY.keys())
-            idx = (themes.index(Config.THEME) + 1) % len(themes)
+            idx = (themes.index(Config.THEME) + 1) % len(themes) if Config.THEME in themes else 0
             Config.THEME = themes[idx]
             Config.save_config()
             t = T()
@@ -7332,7 +7382,7 @@ def main():
                     else:
                         history.append({"role": "assistant", "content": resp})
                     if len(history) > Config.MAX_HISTORY:
-                        history = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
+                        history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
                 Config.save_config()
             else:
                 print(f"  Stream: {T()['bright']}{('ON' if Config.STREAM else 'OFF')}{RST}")
@@ -7444,8 +7494,8 @@ def main():
 
         # Apply both constraints: trim to max_history count, then to token budget
         if len(history) > Config.MAX_HISTORY:
-            history = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
-        history = trim_history(history, 220000)
+            history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
+        history[:] = trim_history(history, 220000)
 
         # Save session after each interaction
         save_current_session(history, cmd_log)
@@ -7479,8 +7529,11 @@ def fetch_models():
     Returns a list of model IDs/names, or empty list on failure.
     """
     try:
+        _base = Config.API_BASE.rstrip('/')
+        if _base.endswith('/v1'):
+            _base = _base[:-3]
         req = urllib.request.Request(
-            f"{Config.API_BASE.rstrip('/').rstrip('v1').rstrip('/')}/v1/models",
+            f"{_base}/v1/models",
             headers=build_headers(),
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
