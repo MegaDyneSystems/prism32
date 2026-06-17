@@ -159,7 +159,7 @@ The combination creates real emergent power:
 
 **Self-evolution without guardrails.** The agent can inspect its own source code against a baseline, diff it, generate a plugin to fix a gap, syntax-check the plugin, load it immediately, and use the new command in the same session. It can also git-pull and reinstall itself. The boundaries of what it can do expand at runtime.
 
-**Hot-swappable plugins the agent creates for itself.** `/extend temp add a command that ingests MQTT telemetry from this Zigbee network` — the model generates a stdlib Python plugin, Prism32 validates and loads it, and the agent calls the new command in its next execute block. No restart. No pip. No human needed. Temporary plugins disappear when Prism32 exits; permanent ones load on every boot.
+**Hot-swappable plugins the agent creates for itself.** `/extend temp add a command that ingests MQTT telemetry from this Zigbee network` — the model generates a stdlib Python plugin, Prism32 validates and loads it, and the agent calls the new command in its next execute block. No restart. No pip. No human needed. Temporary plugins disappear when Prism32 exits; permanent ones load on every boot, can automate long tool call chains with a temporary plugin
 
 **Quantum context as a shared brain.** Every main agent, subagent, and async spawned agent reads and writes to the same thread-safe key-value store. A subagent scanning open ports drops its findings into quantum context, and the main agent picks them up without polling. Subagents running different providers see each other's results. The system prompt is rebuilt mid-task to include the latest quantum state.
 
