@@ -1,8 +1,8 @@
 # Prism32 v6.7
 
-Prism32 is a self-extending, self-repairing terminal AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do.
+Prism32 is a self-extending, self-repairing, self-evovoling terminal AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do.
 
-It is designed for modern PC terminals and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
+It is designed for modern PC's and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
 
 This README is the full operator guide. A shorter GitHub front-page summary is in `README-GITHUB.md`.
 
@@ -151,7 +151,7 @@ Prism32 combines several systems in one terminal harness:
 
 ## The Emergent Agent
 
-Prism32 is not a chatbot. It is a self-extending, self-repairing, multi-agent command system that becomes more capable the longer it runs.
+Prism32 isn't chatbot. It is a self-extending, self-repairing, multi-agent command system that becomes more capable the longer it runs.
 
 Each capability feeds the others. The agent bootstraps itself: it detects the OS and CPU it is running on, scans for local tools, absorbs external AI harnesses into its context, generates plugins on the fly for missing capabilities, delegates sub-tasks to subagents running different models, synchronizes state through quantum context, and records everything it learns into persistent memory files that survive restarts. None of this requires operator approval. The agent can decide to create a plugin, spawn a subagent, enable evolve mode, or absorb a harness entirely on its own, from inside an execute block, mid-task.
 
@@ -169,7 +169,7 @@ The combination creates real emergent power:
 
 **The peripheral surface is the entire Linux device tree.** USB serial adapters, GPIO pins, I2C sensors, SPI displays, CAN buses, SDR dongles, cameras, microphones, speakers, relays, motor controllers, 3D printer serial ports, Zigbee coordinators, Z-Wave sticks, Bluetooth adapters, WiFi interfaces, and anything with a /dev node. If Linux can talk to it, the agent can script against it. Combine that with on-the-fly plugin generation and you have a universal hardware controller that learns new protocols mid-session.
 
-**Platform reach means deployment everywhere.** The same Prism32 binary runs on a Raspberry Pi inside a robot, an old laptop in a garage, a Steam Deck, a jailbroken Kindle, a Tesla MCU, a DEC AlphaStation, a Synology NAS, a $15 OpenWrt travel router, an SGI Octane, and an AWS Graviton instance. It auto-detects the architecture, the package manager, and the shell, then adjusts every command it runs. Install once, deploy anywhere.
+**Platform reach means deployment everywhere.** The same Prism32 binary runs on a Raspberry Pi inside a robot, an old laptop in a garage, a Steam Deck, a jailbroken Kindle, a Tesla MCU, a DEC AlphaStation, a Synology NAS, a $15 OpenWrt travel router, an SGI Octane, and an AWS Graviton instance, a bluetooth speaker. It auto-detects the architecture, the package manager, and the shell, then adjusts every command it runs. Install once, deploy anywhere.
 
 **Cost scales down to zero.** Local llama.cpp or Ollama models run entirely offline on the same machine. No API costs. No cloud dependency. Use `/provider local` for private work, switch to OpenRouter for hard reasoning, and let subagents run on Groq's free tier for bulk scanning. You control the cost-per-task by choosing which model does which job.
 
@@ -242,11 +242,10 @@ Robot vacuums, IoT devices, and automation hardware:
 - Zigbee and Z-Wave hardware (lights, switches, sensors, locks, thermostats, blinds) managed through Zigbee2MQTT, Z-Wave JS, or deCONZ.
 - IP cameras (RTSP/ONVIF), smart speakers, smart displays, garage door controllers, irrigation systems, and energy monitors.
 - Shelly, Sonoff, and Tasmota-flashed devices accessible over HTTP/MQTT.
-- Prism32 does not run on the vacuum, lightbulb, or sensor itself. It runs on the Linux host, Home Assistant box, or Raspberry Pi that coordinates them. The AI can then help write automations, debug MQTT flows, query device APIs, generate dashboards, or script multi-device routines.
 - Many IoT devices and robot vacuums use lightweight MCU firmware without Python or a shell. If a device runs embedded Linux with Python 3.7+, a shell, and network access, Prism32 can run directly on it. Check your device specs.
 - Use /extend to create plugins for specific device APIs. Use startup memory and /remember to store device names, IPs, MQTT topics, and common automation patterns.
 
-Real-world devices and hardware people have targeted with Prism32:
+Real-world devices and hardware people can target with Prism32:
 
 Game consoles and handhelds: Steam Deck, PS3/PS4 (Linux), Nintendo Switch (L4T), Anbernic RG series, Retroid Pocket, AYN Odin, GPD Win, Aya Neo, Miyoo Mini (OnionOS).
 
@@ -314,7 +313,7 @@ Prism32's local overhead is intentionally small:
 - Default live streaming is off in the Python runtime (`Config.STREAM = False`), which avoids token-by-token redraw work on slow terminals.
 - Runtime memory files are small JSON/Markdown files and are consolidated automatically, for example top 30 command stats and top 15 error patterns in `memory.json`.
 
-The slow parts are usually outside Prism32: the model provider latency, local model inference speed, shell commands, package installs, compilers, network scans, or disk IO. On old hardware, Prism32 still stays usable because it mostly waits on those operations instead of doing heavy local compute.
+The slow parts are outside Prism32: the model provider latency, local model inference speed, shell commands, package installs, compilers, network scans, or disk IO. On old hardware, Prism32 still stays usable because it is just a task coordinator.
 
 For very very slow CPUs (sub pentium 1) or fragile terminals:
 
@@ -574,18 +573,18 @@ Automation, skills, promptshards, and evolution:
 
 ## Goal Mode Examples
 
-Goal mode is for tasks where you want Prism32 to keep working step by step.
+Goal mode is for tasks where you want Prism32 to keep working step by step in a loop
 
 ```text
-/goal audit this Linux server for disk pressure, top CPU users, open ports, and failed services; report only, do not change anything
+/goal find what llama.cpp command runs qwen 3.6 at the fastest tokens per second on this system
 ```
 
 ```text
-/goal inspect this git repository, run the tests, fix the smallest safe bug you find, and show the final diff
+/goal inspect this git repository, run the tests, comb through the code for bugs
 ```
 
 ```text
-/goal on this NetBSD machine, identify the package manager, check Python and bash paths, and write setup notes to startup memory
+/goal on this NetBSD machine
 ```
 
 Goal mode stops when the AI says `GOAL COMPLETE`, reaches `/maxsteps`, fails, or you press Escape.
@@ -742,8 +741,11 @@ What it does not mean:
 Safe self-edit workflow:
 
 ```text
+create a plugin that shows me a visually stunning view of what the subagents running my website are doing and how many visisters are using the site
+create a C compiler plugin so we can check cyntax of C code
+/goal create a temporary plugin to connect to my outdoor webcam and send me a telegram message when my important package arrives today from USPS
 /evolve on
-/extend temp add a command that parses this project's test output and highlights failures
+/extend temp add a command that parses this project's test output and highlights failures 
 /extend prompt
 inspect prism32.py and propose a minimal fix for the bug I describe; do not edit core code yet
 /evolve diff
@@ -955,6 +957,8 @@ Detected tools may include OpenCode, Codex CLI, Claude Code, KimiCode, Aider, Ge
 Many terminal chat tools stop at sending prompts and printing responses. Prism32 combines multiple harness layers:
 
 - A command-execution feedback loop with structured `ask` and `execute` blocks.
+- Can turn any computer into a personal robot assistant with natural language
+- Can run on IOT devices and robots with low end compute on bare metal and can expand their capabilities by writing custom plugins for it's niche hardware and OS'
 - Persistent startup memory, long-term memory, and custom soul rules.
 - Runtime plugin loading without pip packages.
 - Subagents that can run synchronously or asynchronously.
@@ -1027,6 +1031,7 @@ This is useful for removable media, virtual floppy images, and legacy bootstrapp
 Prism32 can execute shell commands. Treat it like a powerful operator sitting at your terminal.
 
 - Read commands before allowing high-risk work.
+- Create specific or custom rules for your codebase with prisms self editability easily
 - Use read-only audit prompts when inspecting servers.
 - Do not paste secrets into prompts unless necessary.
 - Keep API keys in config or environment variables with normal local filesystem protections.
