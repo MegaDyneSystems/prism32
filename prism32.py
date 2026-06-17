@@ -4745,7 +4745,7 @@ class SubAgent:
                         msg = f"Executed: {c}\nResult:\n{result[:1500]}"
                         self._history.append({"role": "user", "content": f"{msg}\n\nCommand output above. Continue with task or give final answer."})
                     # Inject latest quantum context so subagent sees cross-agent data
-                    self._history[0] = self._build_history()
+                    self._history[0] = self._build_history()[0]
                 else:
                     clean = clean_response(resp)
                     self.result = clean
