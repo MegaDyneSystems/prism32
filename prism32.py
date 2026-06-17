@@ -492,6 +492,13 @@ HARNESS_CANDIDATES = [
         "hint": "Use for autonomous local automation after checking available extensions.",
     },
     {
+        "id": "hermes",
+        "display": "Hermes Agent",
+        "executables": ["hermes"],
+        "abilities": ["tool calling", "MCP", "skills/plugins", "chat", "computer use", "memory", "TUI/GUI"],
+        "hint": "Use for autonomous agent tasks, MCP servers, skills, and desktop automation when configured.",
+    },
+    {
         "id": "cursor-agent",
         "display": "Cursor Agent",
         "executables": ["cursor-agent"],
@@ -678,6 +685,31 @@ def _probe_version(exe_path):
             continue
     return ""
 
+def _extra_bin_paths():
+    home = os.path.expanduser("~")
+    extra = []
+    for d in [
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, "bin"),
+        os.path.join(home, ".opencode", "bin"),
+        os.path.join(home, ".hermes", "hermes-agent", "venv", "bin"),
+    ]:
+        if os.path.isdir(d) and d not in extra:
+            extra.append(d)
+    return extra
+
+
+def _find_exe(exe):
+    path = shutil.which(exe)
+    if path:
+        return path
+    for base in _extra_bin_paths():
+        candidate = os.path.join(base, exe)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def detect_harnesses(probe_versions=True):
     installed = []
     missing = []
@@ -685,10 +717,7 @@ def detect_harnesses(probe_versions=True):
     for cand in HARNESS_CANDIDATES:
         found = None
         for exe in cand.get("executables", []):
-            try:
-                path = shutil.which(exe)
-            except Exception:
-                path = None
+            path = _find_exe(exe)
             if path:
                 found = (exe, path)
                 break
