@@ -194,7 +194,14 @@ if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
   ok "Wrapper: $LOCAL_BIN/$NAME"
   export PATH="$LOCAL_BIN:$PATH"
 elif [ "$NEED_ROOT" = "1" ]; then
-  root _install_wrapper "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; exit 1; }
+  TMP_WRAP="$(mktemp)"
+  cat > "$TMP_WRAP" << WRAP
+#!/bin/bash
+exec "$PY3" "$SRC_FILE" "\$@"
+WRAP
+  chmod +x "$TMP_WRAP"
+  root cp "$TMP_WRAP" "$BIN" && root chmod +x "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; rm -f "$TMP_WRAP"; exit 1; }
+  rm -f "$TMP_WRAP"
 else
   _install_wrapper "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; exit 1; }
 fi
