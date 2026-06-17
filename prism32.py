@@ -154,9 +154,10 @@ class PluginAPI:
 
     def schedule(self, interval_sec, callback):
         """Schedule a callback to run every interval_sec seconds."""
+        self._scheduled_interval = interval_sec
         t = threading.Timer(interval_sec, self._run_scheduled, [callback])
         t.daemon = True
-        self._timers.append(t)
+        self._timers = [t]
         t.start()
         return t
 
@@ -169,10 +170,10 @@ class PluginAPI:
             with stdout_lock:
                 print(f"  [plugin:{self.name}] timer error: {e}")
         if self._running:
-            t = threading.Timer(self._timers[-1].interval if hasattr(self._timers[-1], 'interval') else 60, 
-                               self._run_scheduled, [callback])
+            interval = getattr(self, '_scheduled_interval', 60)
+            t = threading.Timer(interval, self._run_scheduled, [callback])
             t.daemon = True
-            self._timers.append(t)
+            self._timers = [t]
             t.start()
 
     def http_get(self, url, headers=None, timeout=10):
@@ -2795,9 +2796,11 @@ class Platform:
         """Get a best-effort primary IPv4 address without platform tools."""
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            s.connect(("8.8.8.8", 80))
-            ip = s.getsockname()[0]
-            s.close()
+            try:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+            finally:
+                s.close()
             return ip
         except Exception:
             try:
@@ -3184,7 +3187,6 @@ def _clear_theme_cache():
     _T_CACHE.clear()
 
 _RE_ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
-_RE_STRIP_ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
 _RE_EXEC_BLOCK = re.compile(r'```execute\n(.*?)```', re.DOTALL)
 _RE_ASK_BLOCK = re.compile(r'```ask\n(.*?)```', re.DOTALL)
 
@@ -3557,9 +3559,6 @@ def _draw_interjection_footer():
         sys.stdout.flush()
 
 # ── ANSI Helpers ─────────────────────────────────────────────
-
-def strip_ansi(text):
-    return _RE_STRIP_ANSI.sub('', text)
 
 def rl_prompt(text):
     """Wrap ANSI escapes in readline \x01/\x02 markers so cursor tracking works."""
@@ -4278,9 +4277,11 @@ def get_system_info(force=False):
     # IP
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        info['ip'] = s.getsockname()[0]
-        s.close()
+        try:
+            s.connect(("8.8.8.8", 80))
+            info['ip'] = s.getsockname()[0]
+        finally:
+            s.close()
     except Exception:
         info['ip'] = "N/A"
     
@@ -4926,7 +4927,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
                 if e.code in (400, 413):
                     clean_messages = trim_history(clean_messages, Config.resolve_context_window() // 2)
                     payload["messages"] = clean_messages
-            continue
+                continue
             break
         except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
             if agent_cancel_requested(cancel_event):

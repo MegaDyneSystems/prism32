@@ -15,14 +15,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="$SCRIPT_DIR"
 SRC_FILE="$SRC_DIR/prism32.py"
 BIN="${PREFIX:-/usr/local}/bin/$NAME"
-BIN_BACKUP="${PREFIX:-/usr/local}/bin/$NAME.bak.$(date +%s)"
+BIN_BACKUP="${PREFIX:-/usr/local}/bin/$NAME.bak.$(date +%s).$$"
 RUNTIME_DIR="$HOME/.prism32"
 SESSIONS_DIR="$RUNTIME_DIR/sessions"
 SKILLS_DIR="$RUNTIME_DIR/skills"
 PLUGINS_DIR="$RUNTIME_DIR/plugins"
 EVOLVE_DIR="$RUNTIME_DIR/evolve"
 CONFIG_FILE="$RUNTIME_DIR/config.json"
-CONFIG_BACKUP="$RUNTIME_DIR/config.json.bak.$(date +%s)"
+CONFIG_BACKUP="$RUNTIME_DIR/config.json.bak.$(date +%s).$$"
 LOG_FILE="$RUNTIME_DIR/install.log"
 NEED_ROOT=0
 AUTO=0
@@ -324,17 +324,17 @@ except Exception:
   # Build JSON snippet for this provider
   local json_entry
   json_entry=$("$PY3" -c "
-import json
-d = {'api_base': '${api_base}', 'model': '${model_name}'}
-if '${api_key_val}': d['api_key'] = '${api_key_val}'
+import json, sys
+d = {'api_base': sys.argv[1], 'model': sys.argv[2]}
+if sys.argv[3]: d['api_key'] = sys.argv[3]
 print(json.dumps(d))
-")
+" "$api_base" "$model_name" "$api_key_val")
   ALL_PROVIDERS=$("$PY3" -c "
-import json
-all_p = json.loads('''$ALL_PROVIDERS''')
-all_p['${prov}'] = ${json_entry}
+import json, sys
+all_p = json.loads(sys.argv[1])
+all_p[sys.argv[2]] = json.loads(sys.argv[3])
 print(json.dumps(all_p))
-")
+" "$ALL_PROVIDERS" "$prov" "$json_entry")
 
   # Set as active if first provider
   if [ -z "${PROV:-}" ]; then
