@@ -3175,6 +3175,11 @@ register_theme("hpterm",
     accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
     glow="\x1b[5;92m", bar="\x1b[46m")
 
+register_theme("ember",
+    primary="\x1b[38;5;208m", bright="\x1b[1;38;5;214m", dim="\x1b[38;5;240m",
+    accent="\x1b[38;5;226m", warn="\x1b[38;5;220m", err="\x1b[38;5;196m",
+    glow="\x1b[5;38;5;208m", bar="\x1b[48;5;236m")
+
 # ── Model Providers ────────────────────────────────────────────
 
 # ── Provider Registry (built-ins) ──────────────────────
@@ -6014,7 +6019,7 @@ def main():
     parser.add_argument("--model", "-m", help="Override model name")
     parser.add_argument("--api", "-a", help="Override API base URL")
     parser.add_argument("--api-key", "-k", help="Set API key (e.g. OpenRouter)")
-    parser.add_argument("--theme", "-t", choices=["phosphor","amber","cyan","vapor","nord","solarized","neon","retro","ice","ocean","sunset","forest","plasma","clear","glass","ghost","smoke","paper","ink","daylight","slate"], help="Color theme")
+    parser.add_argument("--theme", "-t", choices=["phosphor","amber","cyan","vapor","nord","solarized","neon","retro","ice","ocean","sunset","forest","plasma","clear","glass","ghost","smoke","paper","ink","daylight","slate","ember"], help="Color theme")
     parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable live streaming output")
     parser.add_argument("--slow-cpu", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
