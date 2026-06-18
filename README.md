@@ -8,7 +8,7 @@ This README is the full operator guide. A shorter GitHub front-page summary is i
 
 ## Cheat Sheet: Fastest Path
 
-Install and start on Unix/Linux/macOS/BSD:
+Install and start on Unix/Linux/macOS/BSD/Android Termux
 
 ```sh
 git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh && prism32
