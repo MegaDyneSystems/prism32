@@ -24,7 +24,7 @@ import atexit
 import math
 import base64
 import threading
-stdout_lock = threading.Lock()
+stdout_lock = threading.RLock()
 import queue
 import hashlib
 import importlib.util
@@ -380,6 +380,14 @@ _INTERJECTION_CANCEL = object()
 AGENT_CANCELLED_RESPONSE = "[CANCELLED] Agent stopped by Escape"
 _AGENT_CANCEL_REQUESTED = False
 _AGENT_CANCEL_REASON = ""
+
+# ── Footer animator state ─────────────────────────────────────
+_AGENT_BUSY = False
+_AGENT_STATE = "idle"
+_FOOTER_ANIMATOR = None
+_FOOTER_FRAME = 0
+_FOOTER_HISTORY_REF = None
+_FOOTER_TOOL_NAME = ""
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -3377,6 +3385,91 @@ def draw_footer(status_bar, spin_char=None):
     sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
     sys.stdout.flush()
 
+# ── Footer Animator (beautiful moving indicator) ──────────────
+
+_BRAILLE_SPIN = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
+_WAVE_PATTERN = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588\u2587\u2586\u2585\u2584\u2583\u2582"
+
+def _build_busy_indicator(frame=0, state="thinking", history=None, tool_name=""):
+    """Build a beautiful animated indicator: rotating Braille + flowing equalizer wave + state label."""
+    t = T()
+    ctx = context_pct(history) if history else 0
+    spin_char = _BRAILLE_SPIN[frame % len(_BRAILLE_SPIN)]
+    wave_w = 3 + min(5, ctx // 15)
+    wave = "".join(_WAVE_PATTERN[(frame + i) % len(_WAVE_PATTERN)] for i in range(wave_w))
+    wave_color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['accent'])
+    label = f"{state} {tool_name}" if tool_name else state
+    if len(label) > 30:
+        label = label[:29] + "\u2026"
+    return f"{t['bright']}{spin_char}{RST} {wave_color}{wave}{RST} {t['dim']}{label}{RST}"
+
+def _render_footer(state="busy", history=None, tool_name="", frame=0, busy=None):
+    """Render footer content directly (caller must hold stdout_lock). Flash-free: write-then-clear."""
+    if not _footer_reserved or not ansi_enabled():
+        return
+    t = T()
+    if busy is None:
+        busy = _AGENT_BUSY
+    sys.stdout.write("\x1b[s")
+    move_to_footer()
+    if _INTERJECTION_HAS_TYPED:
+        buf = _INTERJECTION_BUF
+        cur = _INTERJECTION_CURSOR
+        visual = f" {t['bright']}interject>{RST} {buf}\x1b[K"
+        sys.stdout.write(visual)
+        move_back = len(buf) - cur
+        if move_back > 0:
+            sys.stdout.write(f"\x1b[{move_back}D")
+    else:
+        if busy:
+            f = frame if frame else _FOOTER_FRAME
+            indicator = _build_busy_indicator(frame=f, state=state if state != "busy" else _AGENT_STATE, history=history or _FOOTER_HISTORY_REF, tool_name=tool_name or _FOOTER_TOOL_NAME)
+            bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
+            sys.stdout.write(f"{bar} {indicator} {t['dim']}>{RST} \x1b[K")
+        else:
+            bar = build_status_bar(history=history, include_indicator=False)
+            indicator = activity_vector(history=history)
+            sys.stdout.write(f"{bar} {indicator} {t['primary']}>{RST} \x1b[K")
+    sys.stdout.write("\x1b[u")
+    sys.stdout.flush()
+
+def _footer_animator_loop():
+    """Background thread: animates the footer while agent is busy."""
+    global _FOOTER_FRAME
+    while True:
+        if not _AGENT_BUSY:
+            with stdout_lock:
+                if _footer_reserved and not _INTERJECTION_HAS_TYPED:
+                    _render_footer()
+            break
+        _FOOTER_FRAME += 1
+        with stdout_lock:
+            if _footer_reserved and not _INTERJECTION_HAS_TYPED:
+                _render_footer()
+        time.sleep(0.08)
+
+def _footer_animate_start(state="thinking", history=None, tool_name=""):
+    """Start the background footer animator."""
+    global _AGENT_BUSY, _AGENT_STATE, _FOOTER_ANIMATOR, _FOOTER_FRAME, _FOOTER_HISTORY_REF, _FOOTER_TOOL_NAME
+    _AGENT_BUSY = True
+    _AGENT_STATE = state
+    _FOOTER_FRAME = 0
+    if history is not None:
+        _FOOTER_HISTORY_REF = history
+    _FOOTER_TOOL_NAME = tool_name
+    if _FOOTER_ANIMATOR is None or not _FOOTER_ANIMATOR.is_alive():
+        _FOOTER_ANIMATOR = threading.Thread(target=_footer_animator_loop, daemon=True)
+        _FOOTER_ANIMATOR.start()
+
+def _footer_animate_stop():
+    """Stop the background footer animator and restore static footer."""
+    global _AGENT_BUSY, _AGENT_STATE, _FOOTER_TOOL_NAME
+    _AGENT_BUSY = False
+    _AGENT_STATE = "idle"
+    _FOOTER_TOOL_NAME = ""
+    if _FOOTER_ANIMATOR is not None and _FOOTER_ANIMATOR.is_alive():
+        _FOOTER_ANIMATOR.join(timeout=1.0)
+
 def read_footer_input(status_bar):
     """Read one line from the reserved footer without confusing readline."""
     if not _footer_reserved:
@@ -3560,25 +3653,9 @@ def _interjection_poll():
     return None
 
 def _draw_interjection_footer():
-    global _INTERJECTION_BUF, _INTERJECTION_CURSOR
-    buf = _INTERJECTION_BUF
-    cur = _INTERJECTION_CURSOR
+    """Draw the interjection input footer (flash-free: write-then-clear-to-end)."""
     with stdout_lock:
-        if not _footer_reserved:
-            return
-        sys.stdout.write("\x1b[s")
-        if buf or _INTERJECTION_HAS_TYPED:
-            t = T()
-            clear_footer()
-            visual = f" {t['bright']}interject>{RST} {buf}"
-            sys.stdout.write(visual)
-            move_back = len(buf) - cur
-            if move_back > 0:
-                sys.stdout.write(f"\x1b[{move_back}D")
-        else:
-            draw_footer(build_status_bar())
-        sys.stdout.write("\x1b[u")
-        sys.stdout.flush()
+        _render_footer()
 
 # ── ANSI Helpers ─────────────────────────────────────────────
 
@@ -3625,10 +3702,10 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
             result_q.put((False, e))
 
     _interjection_start()
+    _footer_animate_start(state=message, history=history)
     worker = threading.Thread(target=_target, daemon=True)
     worker.start()
     frame = 0
-    last_draw = 0
     try:
         while worker.is_alive():
             inj = _interjection_poll()
@@ -3638,25 +3715,21 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
             if inj is not None:
                 request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
                 return None
-            now = time.monotonic()
-            if now - last_draw >= 0.12:
-                with stdout_lock:
-                    if _footer_reserved:
-                        spin = activity_vector(history=history, frame=frame, busy=True)
-                        draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=spin)
-                    else:
-                        t = T()
-                        char = activity_vector(frame=frame, busy=True)
-                        sys.stdout.write(f"\r\033[K {t['dim']}{char} {message}...{RST}")
+            if not _footer_reserved:
+                now = time.monotonic()
+                if now - frame * 0.08 >= 0:
+                    with stdout_lock:
+                        char = _build_busy_indicator(frame=frame, state=message)
+                        sys.stdout.write(f"\r{char}\x1b[K")
                         sys.stdout.flush()
-                frame += 1
-                last_draw = now
+                    frame += 1
             time.sleep(0.03)
         ok, value = result_q.get_nowait()
         if ok:
             return value
         raise value
     finally:
+        _footer_animate_stop()
         _interjection_stop()
 
 def ask_ai_cancelable(messages, history=None):
@@ -3889,7 +3962,7 @@ class ToolVisualizer:
     def thinking(self, message="thinking"):
         char = self.thinking_chars[self.thinking_idx % len(self.thinking_chars)]
         self.thinking_idx += 1
-        sys.stdout.write(f"\r {self.t['dim']}{char} {message}...{RST}")
+        sys.stdout.write(f"\r {self.t['dim']}{char} {message}...{RST}\x1b[K")
         sys.stdout.flush()
     
     def tool_call(self, tool_name, args=""):
@@ -3956,9 +4029,9 @@ class SpinnerThread(threading.Thread):
         super().__init__(daemon=True)
         self.message = message
         self._done = threading.Event()
-        self.frames = list(range(8))
 
     def run(self):
+        global _FOOTER_FRAME
         i = 0
         inline = _BOTTOM_BAR_SPINNER_STATE["enabled"]
 
@@ -3966,24 +4039,23 @@ class SpinnerThread(threading.Thread):
             with stdout_lock:
                 if inline:
                     history = _BOTTOM_BAR_SPINNER_STATE["history"]
-                    char = activity_vector(history=history, frame=self.frames[i % len(self.frames)], busy=True)
-                    draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=char)
+                    _FOOTER_FRAME = i
+                    _render_footer(state=self.message, history=history, busy=True)
                     i += 1
                 else:
-                    t = T()
-                    char = activity_vector(frame=self.frames[i % len(self.frames)], busy=True)
-                    sys.stdout.write(f"\r\033[K {t['dim']}{char} {self.message}...{RST}")
+                    char = _build_busy_indicator(frame=i, state=self.message)
+                    sys.stdout.write(f"\r{char}\x1b[K")
                     sys.stdout.flush()
                     i += 1
 
-            self._done.wait(0.12)
+            self._done.wait(0.08)
     def stop(self):
         self._done.set()
         self.join(timeout=2)
         with stdout_lock:
             if _BOTTOM_BAR_SPINNER_STATE["enabled"]:
                 history = _BOTTOM_BAR_SPINNER_STATE["history"]
-                draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=activity_vector(history=history))
+                _render_footer(history=history)
             else:
                 sys.stdout.write("\r" + " " * 75 + "\r")
                 sys.stdout.flush()
@@ -4576,6 +4648,7 @@ def run_cmd(cmd, timeout=None):
             proc = subprocess.Popen(cmd, **popen_kwargs)
             deadline = time.time() + timeout
             _interjection_start()
+            _footer_animate_start(state="executing", tool_name=cmd[:40])
             try:
                 while True:
                     inj = _interjection_poll()
@@ -4615,6 +4688,7 @@ def run_cmd(cmd, timeout=None):
                         suffix = ("\n" + output) if output else ""
                         return f"[TIMEOUT] Command exceeded {timeout}s{suffix}"
             finally:
+                _footer_animate_stop()
                 _interjection_stop()
                 if proc.stdout is not None:
                     try:
@@ -5299,6 +5373,9 @@ def cmd_goal(goal_text, history, cmd_log):
         spin = None
         try:
             if Config.STREAM:
+                if not _footer_reserved:
+                    set_scroll_region()
+                _footer_animate_start(state="streaming", history=history)
                 move_to_scroll_bottom()
                 _interjection_start()
                 resp = ask_ai(history)
@@ -5310,6 +5387,7 @@ def cmd_goal(goal_text, history, cmd_log):
         finally:
             if spin is not None:
                 spin.stop()
+            _footer_animate_stop()
             _interjection_stop()
         if _INTERJECTION_RESULT is not None:
             _INTERJECTION_RESULT = None
@@ -7405,7 +7483,7 @@ def main():
                 if Config.STREAM:
                     if not _footer_reserved:
                         set_scroll_region()
-                    draw_footer(build_status_bar(history=history))
+                    _footer_animate_start(state="streaming", history=history)
                     move_to_scroll_bottom()
                     _interjection_start()
                     resp = ask_ai(history)
@@ -7413,7 +7491,6 @@ def main():
                 else:
                     if not _footer_reserved:
                         set_scroll_region()
-                    draw_footer(build_status_bar(history=history, include_indicator=False), spin_char=activity_vector(history=history, busy=True))
                     resp = ask_ai_cancelable(history, history=history)
                     release_footer_for_output()
             except KeyboardInterrupt:
@@ -7422,6 +7499,7 @@ def main():
                 if spin is not None:
                     spin.stop()
                     release_footer_for_output()
+                _footer_animate_stop()
                 _interjection_stop()
 
             # Handle interjection (user typed while AI was streaming)
