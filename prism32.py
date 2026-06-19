@@ -5390,11 +5390,16 @@ def cmd_goal(goal_text, history, cmd_log):
             _footer_animate_stop()
             _interjection_stop()
         if _INTERJECTION_RESULT is not None:
+            inj = _INTERJECTION_RESULT
             _INTERJECTION_RESULT = None
             clear_agent_cancel()
-            box("STOPPED", "Goal interrupted by user input", "warn")
-            cancelled = True
-            break
+            if resp:
+                history.append({"role": "assistant", "content": resp + "\n\n[Step interrupted by user interjection]"})
+            history.append({"role": "user", "content": inj})
+            move_to_scroll_bottom()
+            print(f" {t['primary']}You:{RST} {inj}")
+            save_session(goal_session_id, history, cmd_log, {"type": "goal", "goal": goal_text, "step": step})
+            continue
         if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
             msg = agent_cancel_message()
             clear_agent_cancel()
