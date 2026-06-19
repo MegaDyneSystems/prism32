@@ -3446,7 +3446,7 @@ def _footer_animator_loop():
         with stdout_lock:
             if _footer_reserved and not _INTERJECTION_HAS_TYPED:
                 _render_footer()
-        time.sleep(0.08)
+        time.sleep(0.15)
 
 def _footer_animate_start(state="thinking", history=None, tool_name=""):
     """Start the background footer animator."""
@@ -3717,7 +3717,7 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
                 return None
             if not _footer_reserved:
                 now = time.monotonic()
-                if now - frame * 0.08 >= 0:
+                if now - frame * 0.15 >= 0:
                     with stdout_lock:
                         char = _build_busy_indicator(frame=frame, state=message)
                         sys.stdout.write(f"\r{char}\x1b[K")
@@ -4048,7 +4048,7 @@ class SpinnerThread(threading.Thread):
                     sys.stdout.flush()
                     i += 1
 
-            self._done.wait(0.08)
+            self._done.wait(0.15)
     def stop(self):
         self._done.set()
         self.join(timeout=2)
