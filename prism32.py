@@ -2860,7 +2860,7 @@ class Config:
     MAX_RESPONSE_TOKENS = 8192
     TEMPERATURE = 0.7
     THEME = "phosphor"
-    GOAL_MAX_STEPS = 50
+    GOAL_MAX_STEPS = 1000
     GOAL_STEP_DELAY = 1
     SESSION_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "sessions")
     AUTO_SAVE_INTERVAL = 0    # 0 = save-on-interaction instead of timed
@@ -4799,7 +4799,7 @@ Detected external AI harnesses are listed in context. If useful, inspect their h
 """
 
 class SubAgent:
-    def __init__(self, task, model=None, max_steps=50, provider=None):
+    def __init__(self, task, model=None, max_steps=1000, provider=None):
         global _next_sa_id
         self.id = f"sa_{_next_sa_id}"
         _next_sa_id += 1
