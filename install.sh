@@ -75,20 +75,21 @@ for arg in "$@"; do
 done
 
 # ── Provider presets ──
-EP_KEYS=(local ollama openai anthropic groq together openrouter custom)
-EP_NAME=("Local LLaMA" "Ollama" "OpenAI" "Anthropic" "Groq" "Together AI" "OpenRouter" "Custom")
+EP_KEYS=(local ollama openai anthropic groq together openrouter neuralwatt custom)
+EP_NAME=("Local LLaMA" "Ollama" "OpenAI" "Anthropic" "Groq" "Together AI" "OpenRouter" "Neuralwatt Cloud" "Custom")
 EP_BASE=(
   "http://127.0.0.1:8080"         "http://localhost:11434/v1"
   "https://api.openai.com/v1"     "https://api.anthropic.com/v1"
   "https://api.groq.com/openai/v1" "https://api.together.xyz/v1"
-  "https://openrouter.ai/api/v1"  "http://localhost:8080"
+  "https://openrouter.ai/api/v1"  "https://api.neuralwatt.com/v1"
+  "http://localhost:8080"
 )
-EP_ENV=("" "" "OPENAI_API_KEY" "ANTHROPIC_API_KEY" "GROQ_API_KEY" "TOGETHER_API_KEY" "OPENROUTER_API_KEY" "")
+EP_ENV=("" "" "OPENAI_API_KEY" "ANTHROPIC_API_KEY" "GROQ_API_KEY" "TOGETHER_API_KEY" "OPENROUTER_API_KEY" "NEURALWATT_API_KEY" "")
 # Fallback models when live fetch fails
 EP_MODELS_FALLBACK=(
   "model.gguf" "qwen3:14b" "gpt-4o" "claude-sonnet-4-20250514"
   "llama-3.3-70b-versatile" "meta-llama/Llama-3.3-70b"
-  "openai/gpt-4o" "model-name"
+  "openai/gpt-4o" "glm-5.2" "model-name"
 )
 
 # ═══════════════════════════════════════════════════════════════
