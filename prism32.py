@@ -3190,6 +3190,7 @@ register_provider("anthropic", display_name="Anthropic", api_base="https://api.a
 register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", description="Groq fast inference")
 register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", description="Together AI inference")
 register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)")
+register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)")
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)")
 
 
