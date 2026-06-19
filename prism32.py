@@ -420,7 +420,7 @@ def load_memory():
         mem.setdefault("system_profile", {})
         mem.setdefault("startup_memory_file", STARTUP_MEMORY_FILE)
         return mem
-    except (FileNotFoundError, json.JSONDecodeError):
+    except Exception:
         return _default_memory()
 
 _mem_cache = load_memory()
@@ -431,10 +431,10 @@ def save_memory(memory):
         memory["last_updated"] = datetime.now().isoformat()
         # Auto-consolidate: keep only top 30 commands, 15 error patterns
         if len(memory.get("command_stats", {})) > 30:
-            sorted_cmds = sorted(memory["command_stats"].items(), key=lambda x: -x[1]["uses"])
+            sorted_cmds = sorted(memory["command_stats"].items(), key=lambda x: -x[1].get("uses", 0))
             memory["command_stats"] = dict(sorted_cmds[:30])
         if len(memory.get("error_patterns", {})) > 15:
-            sorted_errs = sorted(memory["error_patterns"].items(), key=lambda x: -x[1]["count"])
+            sorted_errs = sorted(memory["error_patterns"].items(), key=lambda x: -x[1].get("count", 0))
             memory["error_patterns"] = dict(sorted_errs[:15])
         with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
             json.dump(memory, f, indent=2)
@@ -2919,31 +2919,34 @@ class Config:
     @classmethod
     def save_config(cls):
         """Save current config to file."""
-        config_dir = os.path.dirname(cls.CONFIG_FILE)
-        os.makedirs(config_dir, exist_ok=True)
-        
-        data = {
-            "api_base": cls.API_BASE,
-            "model": cls.MODEL,
-            "subagent_model": cls.SUBAGENT_MODEL,
-            "root_pass": cls.ROOT_PASS,
-            "api_key": cls.API_KEY,
-            "temperature": cls.TEMPERATURE,
-            "theme": cls.THEME,
-            "provider": cls.PROVIDER,
-            "max_history": cls.MAX_HISTORY,
-            "max_response_tokens": cls.MAX_RESPONSE_TOKENS,
-            "cmd_timeout": cls.CMD_TIMEOUT,
-            "goal_max_steps": cls.GOAL_MAX_STEPS,
-            "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
-            "thinking_effort": cls.THINKING_EFFORT,
-            "max_memory_ctx": cls.MAX_MEMORY_CTX,
-            "agent_name": cls.AGENT_NAME,
-            "custom_arch_map": cls.CUSTOM_ARCH_MAP,
-        }
-        
-        with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=2)
+        try:
+            config_dir = os.path.dirname(cls.CONFIG_FILE)
+            os.makedirs(config_dir, exist_ok=True)
+            
+            data = {
+                "api_base": cls.API_BASE,
+                "model": cls.MODEL,
+                "subagent_model": cls.SUBAGENT_MODEL,
+                "root_pass": cls.ROOT_PASS,
+                "api_key": cls.API_KEY,
+                "temperature": cls.TEMPERATURE,
+                "theme": cls.THEME,
+                "provider": cls.PROVIDER,
+                "max_history": cls.MAX_HISTORY,
+                "max_response_tokens": cls.MAX_RESPONSE_TOKENS,
+                "cmd_timeout": cls.CMD_TIMEOUT,
+                "goal_max_steps": cls.GOAL_MAX_STEPS,
+                "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
+                "thinking_effort": cls.THINKING_EFFORT,
+                "max_memory_ctx": cls.MAX_MEMORY_CTX,
+                "agent_name": cls.AGENT_NAME,
+                "custom_arch_map": cls.CUSTOM_ARCH_MAP,
+            }
+            
+            with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except OSError as e:
+            print(f"  Config save failed: {e}")
     
     @classmethod
     def load_config(cls):
@@ -2967,13 +2970,13 @@ class Config:
                         cls.MODEL = PROVIDER_REGISTRY[data["provider"]]["model"]
                     if "api_key" not in data and PROVIDER_REGISTRY[data["provider"]].get("default_key"):
                         cls.API_KEY = PROVIDER_REGISTRY[data["provider"]]["default_key"]
-            if "max_history" in data: cls.MAX_HISTORY = data["max_history"]
-            if "max_response_tokens" in data: cls.MAX_RESPONSE_TOKENS = data["max_response_tokens"]
-            if "cmd_timeout" in data: cls.CMD_TIMEOUT = data["cmd_timeout"]
-            if "goal_max_steps" in data: cls.GOAL_MAX_STEPS = data["goal_max_steps"]
-            if "auto_save_interval" in data: cls.AUTO_SAVE_INTERVAL = data["auto_save_interval"]
+            if "max_history" in data: cls.MAX_HISTORY = int(data["max_history"])
+            if "max_response_tokens" in data: cls.MAX_RESPONSE_TOKENS = int(data["max_response_tokens"])
+            if "cmd_timeout" in data: cls.CMD_TIMEOUT = int(data["cmd_timeout"])
+            if "goal_max_steps" in data: cls.GOAL_MAX_STEPS = int(data["goal_max_steps"])
+            if "auto_save_interval" in data: cls.AUTO_SAVE_INTERVAL = int(data["auto_save_interval"])
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
-            if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = data["max_memory_ctx"]
+            if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = int(data["max_memory_ctx"])
             # Live stream rendering is intentionally session-only. Older saved
             # configs may contain stream=true, which can re-enable fragile
             # token-level terminal output on legacy systems.
@@ -3000,11 +3003,21 @@ class Config:
 
 # ── Resilient helpers ──
 def estimate_tokens(text):
-    '''Rough token count (4 chars per token average).'''
-    return len(text) // 4
+    '''Rough token count (4 chars per token average). Handles str / list / other.'''
+    if isinstance(text, str):
+        return len(text) // 4
+    if isinstance(text, list):
+        total = 0
+        for part in text:
+            if isinstance(part, dict):
+                total += len(str(part.get("text", "")))
+            elif isinstance(part, str):
+                total += len(part)
+        return total // 4
+    return len(str(text or "")) // 4
 
 def context_pct(history):
-    total = sum(estimate_tokens(m.get("content", "")) for m in history)
+    total = sum(estimate_tokens(m.get("content", "")) if isinstance(m, dict) else 0 for m in history)
     budget = Config.resolve_context_window()
     return int(total / budget * 100) if budget > 0 else 0
 
@@ -3217,8 +3230,8 @@ def _clear_theme_cache():
     _T_CACHE.clear()
 
 _RE_ANSI = re.compile(r'\x1b\[[0-9;?]*[a-zA-Z]')
-_RE_EXEC_BLOCK = re.compile(r'```execute\n(.*?)```', re.DOTALL)
-_RE_ASK_BLOCK = re.compile(r'```ask\n(.*?)```', re.DOTALL)
+_RE_EXEC_BLOCK = re.compile(r'```execute\r?\n(.*?)```', re.DOTALL)
+_RE_ASK_BLOCK = re.compile(r'```ask\r?\n(.*?)```', re.DOTALL)
 
 RST = "\x1b[0m"
 BOLD = "\x1b[1m"
@@ -3381,9 +3394,10 @@ def draw_footer(status_bar, spin_char=None):
         return
     t = T()
     indicator = spin_char if spin_char is not None else activity_vector()
-    clear_footer()
-    sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
-    sys.stdout.flush()
+    with stdout_lock:
+        clear_footer()
+        sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
+        sys.stdout.flush()
 
 # ── Footer Animator (beautiful moving indicator) ──────────────
 
@@ -3411,42 +3425,49 @@ def _render_footer(state="busy", history=None, tool_name="", frame=0, busy=None)
     if busy is None:
         busy = _AGENT_BUSY
     sys.stdout.write("\x1b[s")
-    move_to_footer()
-    if _INTERJECTION_HAS_TYPED:
-        buf = _INTERJECTION_BUF
-        cur = _INTERJECTION_CURSOR
-        visual = f" {t['bright']}interject>{RST} {buf}\x1b[K"
-        sys.stdout.write(visual)
-        move_back = len(buf) - cur
-        if move_back > 0:
-            sys.stdout.write(f"\x1b[{move_back}D")
-    else:
-        if busy:
-            f = frame if frame else _FOOTER_FRAME
-            indicator = _build_busy_indicator(frame=f, state=state if state != "busy" else _AGENT_STATE, history=history or _FOOTER_HISTORY_REF, tool_name=tool_name or _FOOTER_TOOL_NAME)
-            bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
-            sys.stdout.write(f"{bar} {indicator} {t['dim']}>{RST} \x1b[K")
+    try:
+        move_to_footer()
+        if _INTERJECTION_HAS_TYPED:
+            buf = _INTERJECTION_BUF
+            cur = _INTERJECTION_CURSOR
+            visual = f" {t['bright']}interject>{RST} {buf}\x1b[K"
+            sys.stdout.write(visual)
+            move_back = max(0, len(buf) - cur)
+            if move_back > 0:
+                sys.stdout.write(f"\x1b[{move_back}D")
         else:
-            bar = build_status_bar(history=history, include_indicator=False)
-            indicator = activity_vector(history=history)
-            sys.stdout.write(f"{bar} {indicator} {t['primary']}>{RST} \x1b[K")
-    sys.stdout.write("\x1b[u")
-    sys.stdout.flush()
+            if busy:
+                f = frame if frame is not None else _FOOTER_FRAME
+                indicator = _build_busy_indicator(frame=f, state=state if state != "busy" else _AGENT_STATE, history=history or _FOOTER_HISTORY_REF, tool_name=tool_name or _FOOTER_TOOL_NAME)
+                bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
+                sys.stdout.write(f"{bar} {indicator} {t['dim']}>{RST} \x1b[K")
+            else:
+                bar = build_status_bar(history=history, include_indicator=False)
+                indicator = activity_vector(history=history)
+                sys.stdout.write(f"{bar} {indicator} {t['primary']}>{RST} \x1b[K")
+    finally:
+        sys.stdout.write("\x1b[u")
+        sys.stdout.flush()
 
 def _footer_animator_loop():
     """Background thread: animates the footer while agent is busy."""
-    global _FOOTER_FRAME
-    while True:
-        if not _AGENT_BUSY:
+    global _FOOTER_FRAME, _AGENT_BUSY
+    try:
+        while True:
+            if not _AGENT_BUSY:
+                break
+            _FOOTER_FRAME += 1
             with stdout_lock:
                 if _footer_reserved and not _INTERJECTION_HAS_TYPED:
-                    _render_footer()
-            break
-        _FOOTER_FRAME += 1
-        with stdout_lock:
-            if _footer_reserved and not _INTERJECTION_HAS_TYPED:
-                _render_footer()
-        time.sleep(0.15)
+                    try:
+                        _render_footer()
+                    except Exception:
+                        pass
+            time.sleep(0.15)
+    except Exception:
+        pass
+    finally:
+        _AGENT_BUSY = False
 
 def _footer_animate_start(state="thinking", history=None, tool_name=""):
     """Start the background footer animator."""
@@ -3505,6 +3526,8 @@ def agent_cancel_message():
 
 def _interjection_start():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
+    if _INTERJECTION_ACTIVE:
+        return
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
     _INTERJECTION_CURSOR = 0
@@ -3634,7 +3657,7 @@ def _interjection_poll():
                     _INTERJECTION_RESULT = result
                     return result
                 elif ord(ch) == 3:
-                    raise KeyboardInterrupt
+                    return request_agent_cancel("Agent stopped by Ctrl-C")
                 elif ch in ('\x7f', '\b'):
                     if _INTERJECTION_CURSOR > 0:
                         _INTERJECTION_BUF = _INTERJECTION_BUF[:_INTERJECTION_CURSOR - 1] + _INTERJECTION_BUF[_INTERJECTION_CURSOR:]
@@ -3702,10 +3725,12 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
             result_q.put((False, e))
 
     _interjection_start()
-    _footer_animate_start(state=message, history=history)
+    if _footer_reserved:
+        _footer_animate_start(state=message, history=history)
     worker = threading.Thread(target=_target, daemon=True)
     worker.start()
     frame = 0
+    last_draw = 0.0
     try:
         while worker.is_alive():
             inj = _interjection_poll()
@@ -3715,16 +3740,19 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
             if inj is not None:
                 request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
                 return None
-            if not _footer_reserved:
-                now = time.monotonic()
-                if now - frame * 0.15 >= 0:
-                    with stdout_lock:
-                        char = _build_busy_indicator(frame=frame, state=message)
-                        sys.stdout.write(f"\r{char}\x1b[K")
-                        sys.stdout.flush()
-                    frame += 1
+            now = time.monotonic()
+            if not _footer_reserved and now - last_draw >= 0.15:
+                with stdout_lock:
+                    char = _build_busy_indicator(frame=frame, state=message)
+                    sys.stdout.write(f"\r{char}\x1b[K")
+                    sys.stdout.flush()
+                frame += 1
+                last_draw = now
             time.sleep(0.03)
-        ok, value = result_q.get_nowait()
+        try:
+            ok, value = result_q.get_nowait()
+        except queue.Empty:
+            return AGENT_CANCELLED_RESPONSE
         if ok:
             return value
         raise value
@@ -4141,7 +4169,10 @@ def save_current_session(history, cmd_log):
     global _CURRENT_SESSION_ID
     if not _CURRENT_SESSION_ID:
         _CURRENT_SESSION_ID = generate_session_id("auto")
-    save_session(_CURRENT_SESSION_ID, history, cmd_log)
+    try:
+        save_session(_CURRENT_SESSION_ID, history, cmd_log)
+    except Exception:
+        pass
 
 def cmd_session_load(session_id):
     t = T()
@@ -4308,13 +4339,15 @@ def banner():
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
+    model_str = str(Config.MODEL or "")
+    subagent_str = str(Config.SUBAGENT_MODEL or "")
     steps = [
         ("BIOS check", "OK"),
         ("RAM", f"{get_mem()} MB"),
         ("Loading kernel modules", "OK"),
         ("Initializing CRT display", "MDS CRT phosphor glow"),
-        ("MDS AI link", f"MDS/{Config.MODEL[:25]}..."),
-        ("Subagent model", Config.SUBAGENT_MODEL[:25] + "..." if len(Config.SUBAGENT_MODEL) > 25 else (Config.SUBAGENT_MODEL or "(same as main)")),
+        ("MDS AI link", f"MDS/{model_str[:25]}..."),
+        ("Subagent model", subagent_str[:25] + "..." if len(subagent_str) > 25 else (subagent_str or "(same as main)")),
         ("MDS system ready", ""),
     ]
     print(f"\n {t['dim']}POST Power-On Self Test{RST}")
@@ -4414,20 +4447,19 @@ def _pty_su_root(cmd, timeout=None):
         return "[ERROR] su not found on this system"
     pid, fd = pty.fork()
     if pid == 0:
-        if Platform.HPUX:
+        try:
             os.execv(su_path, ["su", "root", "-c", cmd])
-        elif Platform.AIX:
-            os.execv(su_path, ["su", "root", "-c", cmd])
-        elif Platform.SOLARIS:
-            os.execv(su_path, ["su", "root", "-c", cmd])
-        elif Platform.IRIX:
-            os.execv(su_path, ["su", "root", "-c", cmd])
-        elif Platform.TRU64:
-            os.execv(su_path, ["su", "root", "-c", cmd])
-        else:
-            os.execv(su_path, ["su", "root", "-c", cmd])
+        except Exception:
+            os._exit(127)
     else:
         time.sleep(0.3)
+        try:
+            import termios as _termios
+            attrs = _termios.tcgetattr(fd)
+            attrs[3] &= ~_termios.ECHO
+            _termios.tcsetattr(fd, _termios.TCSANOW, attrs)
+        except Exception:
+            pass
         os.write(fd, (password + "\n").encode())
         time.sleep(0.5)
         out = b""
@@ -4436,6 +4468,8 @@ def _pty_su_root(cmd, timeout=None):
         try:
             while True:
                 remaining = max(0.1, deadline - time.time())
+                if remaining <= 0:
+                    break
                 r, _, _ = select.select([fd], [], [], remaining)
                 if r:
                     data = os.read(fd, 4096)
@@ -4444,11 +4478,19 @@ def _pty_su_root(cmd, timeout=None):
                     out += data
                 else:
                     break
-        except:
+        except OSError:
             pass
         try:
             os.close(fd)
-        except:
+        except OSError:
+            pass
+        try:
+            os.kill(pid, 9)
+        except Exception:
+            pass
+        try:
+            os.waitpid(pid, 0)
+        except Exception:
             pass
         output = out.decode(errors="replace")
         return output[-4000:] if len(output) > 4000 else output
@@ -4461,8 +4503,11 @@ def _cmd_succeeded(result):
 def _try_plugin_cmd(c, history=None):
     """Check if c is a plugin command and dispatch it, returning result or None."""
     c_stripped = c.strip()
-    cmd_name = c_stripped.split(None, 1)[0].lower()
-    cmd_args = c_stripped.split(None, 1)[1] if ' ' in c_stripped else ""
+    if not c_stripped:
+        return None
+    parts_split = c_stripped.split(None, 1)
+    cmd_name = parts_split[0].lower()
+    cmd_args = parts_split[1] if len(parts_split) > 1 else ""
     # Handle /quantum from execute blocks (subagents use this)
     if cmd_name == '/quantum' or cmd_name == 'quantum':
         parts = cmd_args.split(None, 1)
@@ -4690,6 +4735,11 @@ def run_cmd(cmd, timeout=None):
             finally:
                 _footer_animate_stop()
                 _interjection_stop()
+                try:
+                    if proc.poll() is None:
+                        _terminate_process(proc)
+                except Exception:
+                    pass
                 if proc.stdout is not None:
                     try:
                         proc.stdout.close()
@@ -4911,15 +4961,16 @@ class SubAgent:
 
     def run_async(self):
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
-        self._thread.start()
         with _subagent_lock:
             _SUBAGENTS[self.id] = self
+        self._thread.start()
         t = T()
-        print(f"\n  {T()['warn']}╭─ SPAWNED SUBAGENT [{self.id}] ASYNC ────────{RST}")
-        print(f"  {T()['warn']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
-        prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
-        print(f"  {T()['warn']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
-        print(f"  {T()['warn']}╰{'─' * 50}{RST}")
+        with stdout_lock:
+            print(f"\n  {T()['warn']}╭─ SPAWNED SUBAGENT [{self.id}] ASYNC ────────{RST}")
+            print(f"  {T()['warn']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
+            prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
+            print(f"  {T()['warn']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
+            print(f"  {T()['warn']}╰{'─' * 50}{RST}")
         return self.id
 
     def status_str(self):
@@ -5169,85 +5220,92 @@ def stream_response(resp, cancel_event=None):
     with stdout_lock:
         move_to_scroll_bottom()
     
-    for line in resp:
-        if agent_cancel_requested(cancel_event):
-            break
-        line = line.decode('utf-8', errors='ignore').strip()
-        if not line or not line.startswith('data: '):
-            continue
-        data = line[6:]
-        if data == '[DONE]':
-            break
-        try:
-            chunk = json.loads(data)
-            delta = chunk.get('choices', [{}])[0].get('delta', {})
-            content = delta.get('content', '')
-            reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
-            
-            if reasoning:
-                _queue_display(reasoning, "reasoning")
-                reasoning_mode = True
-            
-            if content:
-                if reasoning_mode:
-                    _queue_display("\n", "content")
-                    reasoning_mode = False
-                _queue_display(_filter_visible_content(content), "content")
-                full += content
-        except json.JSONDecodeError:
-            continue
+    try:
+        for line in resp:
+            if agent_cancel_requested(cancel_event):
+                break
+            line = line.decode('utf-8', errors='ignore').strip()
+            if not line or not line.startswith('data: '):
+                continue
+            data = line[6:]
+            if data == '[DONE]':
+                break
+            try:
+                chunk = json.loads(data)
+                delta = chunk.get('choices', [{}])[0].get('delta', {})
+                content = delta.get('content', '')
+                reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
+                
+                if reasoning:
+                    _queue_display(reasoning, "reasoning")
+                    reasoning_mode = True
+                
+                if content:
+                    if reasoning_mode:
+                        _queue_display("\n", "content")
+                        reasoning_mode = False
+                    _queue_display(_filter_visible_content(content), "content")
+                    full += content
+            except json.JSONDecodeError:
+                continue
 
-        inj = _interjection_poll()
-        if inj is _INTERJECTION_CANCEL or agent_cancel_requested(cancel_event):
-            request_agent_cancel(cancel_event=cancel_event)
+            inj = _interjection_poll()
+            if inj is _INTERJECTION_CANCEL or agent_cancel_requested(cancel_event):
+                request_agent_cancel(cancel_event=cancel_event)
+                _queue_display(_filter_visible_content("", final=True), "content")
+                _flush_display(force=True)
+                with stdout_lock:
+                    sys.stdout.write(RST + SHOW)
+                return AGENT_CANCELLED_RESPONSE
+            if inj is not None:
+                request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
+                clear_agent_cancel()
+                _queue_display(_filter_visible_content("", final=True), "content")
+                _flush_display(force=True)
+                with stdout_lock:
+                    sys.stdout.write(RST + SHOW)
+                return full
+        
+        if agent_cancel_requested(cancel_event):
             _queue_display(_filter_visible_content("", final=True), "content")
             _flush_display(force=True)
-            _interjection_stop()
             with stdout_lock:
                 sys.stdout.write(RST + SHOW)
             return AGENT_CANCELLED_RESPONSE
-        if inj is not None:
-            request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
-            clear_agent_cancel()
-            _queue_display(_filter_visible_content("", final=True), "content")
-            _flush_display(force=True)
-            _interjection_stop()
-            with stdout_lock:
-                sys.stdout.write(RST + SHOW)
-            return full
-    
-    if agent_cancel_requested(cancel_event):
+
         _queue_display(_filter_visible_content("", final=True), "content")
         _flush_display(force=True)
-        _interjection_stop()
         with stdout_lock:
             sys.stdout.write(RST + SHOW)
-        return AGENT_CANCELLED_RESPONSE
-
-    _queue_display(_filter_visible_content("", final=True), "content")
-    _flush_display(force=True)
-    _interjection_stop()
-    with stdout_lock:
-        sys.stdout.write(RST + SHOW)
-    return full
+        return full
+    except Exception:
+        try:
+            _queue_display(_filter_visible_content("", final=True), "content")
+            _flush_display(force=True)
+            with stdout_lock:
+                sys.stdout.write(RST + SHOW)
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            _interjection_stop()
+        except Exception:
+            pass
 def extract_blocks(text, tag):
     _re = _RE_EXEC_BLOCK if tag == 'execute' else _RE_ASK_BLOCK
     return [b.strip() for b in _re.findall(text)]
 
 def clean_response(text):
     clean = text
-    if '</think>' in clean:
-        clean = clean.split('</think>')[-1].strip()
     for tag in ('execute', 'ask'):
-        clean = re.sub(rf'```{tag}\n.*?```', '', clean, flags=re.DOTALL)
+        clean = re.sub(rf'```{tag}\r?\n.*?```', '', clean, flags=re.DOTALL)
     return clean.strip()
 
 def clean_ask_blocks(text):
     """Remove ask blocks while preserving execute blocks for the agent loop."""
     clean = text
-    if '</think>' in clean:
-        clean = clean.split('</think>')[-1].strip()
-    clean = re.sub(r'```ask\n.*?```', '', clean, flags=re.DOTALL)
+    clean = re.sub(r'```ask\r?\n.*?```', '', clean, flags=re.DOTALL)
     return clean.strip()
 
 # ── Context Builder ──────────────────────────────────────────
@@ -5284,7 +5342,8 @@ def build_context():
 
 def ask_user(question):
     t = T()
-    if _footer_reserved:
+    had_footer = _footer_reserved
+    if had_footer:
         release_footer_for_output()
     print(f"\n{t['warn']}+ QUESTION FROM AI:{RST}")
     box("AI NEEDS INPUT", question, "warn")
@@ -5292,6 +5351,8 @@ def ask_user(question):
         answer = input(rl_prompt(f" {t['bright']}answer{RST} {t['primary']}>{RST} ")).strip()
     except (EOFError, KeyboardInterrupt):
         answer = ""
+    if had_footer:
+        set_scroll_region()
     return answer
 
 def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_asked=False):
@@ -5362,7 +5423,9 @@ def cmd_goal(goal_text, history, cmd_log):
     cancelled = False
     goal_session_id = datetime.now().strftime("goal_%Y%m%d_%H%M%S")
 
-    for step in range(1, max_steps + 1):
+    step = 0
+    while step < max_steps:
+        step += 1
         # Auto-save every 3 steps for crash recovery
         if step > 1 and step % 3 == 1:
             try:
@@ -5398,7 +5461,11 @@ def cmd_goal(goal_text, history, cmd_log):
             history.append({"role": "user", "content": inj})
             move_to_scroll_bottom()
             print(f" {t['primary']}You:{RST} {inj}")
-            save_session(goal_session_id, history, cmd_log, {"type": "goal", "goal": goal_text, "step": step})
+            try:
+                save_session(goal_session_id, history, cmd_log, {"type": "goal", "goal": goal_text, "step": step})
+            except Exception:
+                pass
+            step -= 1
             continue
         if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
             msg = agent_cancel_message()
@@ -5408,7 +5475,7 @@ def cmd_goal(goal_text, history, cmd_log):
             break
         if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
             if len(history) > 5:
-                history[:] = [history[0]] + history[:-4]
+                history[:] = history[:-4]
             viz.status("API error, trimming history and retrying...", "warning")
             resp = ask_ai_cancelable(history, history=history)
         if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
@@ -5499,7 +5566,7 @@ def cmd_goal(goal_text, history, cmd_log):
     print(f"{t['bright']}{'='*62}{RST}\n")
 
     if len(history) > Config.MAX_HISTORY:
-        history = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
+        history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
 
 # ── Built-in Commands ────────────────────────────────────────
 
@@ -7564,6 +7631,15 @@ def main():
                     else:
                         history.append({"role": "user", "content": continuation})
                     if command_cancelled:
+                        if _INTERJECTION_RESULT is not None:
+                            inj = _INTERJECTION_RESULT
+                            _INTERJECTION_RESULT = None
+                            clear_agent_cancel()
+                            history.append({"role": "user", "content": inj})
+                            move_to_scroll_bottom()
+                            print(f" {T()['primary']}You:{RST} {inj}")
+                            save_current_session(history, cmd_log)
+                            break
                         msg = agent_cancel_message()
                         clear_agent_cancel()
                         box("STOPPED", msg, "warn")
