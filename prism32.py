@@ -389,6 +389,67 @@ _FOOTER_FRAME = 0
 _FOOTER_HISTORY_REF = None
 _FOOTER_TOOL_NAME = ""
 
+# ── Session cost tracking ────────────────────────────────────
+_SESSION_INPUT_TOKENS = 0
+_SESSION_OUTPUT_TOKENS = 0
+_SESSION_COST = 0.0
+
+# Pricing: per 1K tokens (input, output). 0 = free/unknown.
+_MODEL_PRICING = {
+    # OpenAI
+    "gpt-4o": (0.0025, 0.01), "gpt-4o-mini": (0.00015, 0.0006),
+    "gpt-4-turbo": (0.01, 0.03), "gpt-4": (0.03, 0.06),
+    "gpt-3.5-turbo": (0.0005, 0.0015),
+    "o1": (0.015, 0.06), "o1-mini": (0.003, 0.012), "o3-mini": (0.0011, 0.0044),
+    # Anthropic
+    "claude-sonnet-4-20250514": (0.003, 0.015),
+    "claude-3-5-sonnet-20241022": (0.003, 0.015),
+    "claude-3-opus-20240229": (0.015, 0.075),
+    "claude-3-haiku-20240307": (0.00025, 0.00125),
+    # Groq
+    "llama-3.3-70b-versatile": (0.00059, 0.00079),
+    "llama-3.1-70b-versatile": (0.00059, 0.00079),
+    "mixtral-8x7b-32768": (0.00024, 0.00024),
+    # Together AI
+    "meta-llama/Llama-3.3-70b": (0.00088, 0.00088),
+    "meta-llama/Llama-3-70b-chat-hf": (0.00088, 0.00088),
+    "meta-llama/Llama-3-70b": (0.00088, 0.00088),
+    # Neuralwatt
+    "glm-5.2": (0.0014, 0.0045), "glm-5.2-fast": (0.0014, 0.0045),
+    "moonshotai/Kimi-K2.5": (0.0005, 0.0026), "kimi-k2.5-fast": (0.0005, 0.0026),
+    # OpenRouter fallback
+    "deepseek/deepseek-v4-flash": (0.00014, 0.00028),
+    "openai/gpt-4o": (0.0025, 0.01),
+}
+
+def _get_model_pricing():
+    """Return (input_per_1k, output_per_1k) for current model, or (0,0) if unknown."""
+    model_lower = (Config.MODEL or "").lower()
+    if model_lower in _MODEL_PRICING:
+        return _MODEL_PRICING[model_lower]
+    for key, val in _MODEL_PRICING.items():
+        if key.lower() in model_lower or model_lower in key.lower():
+            return val
+    return (0.0, 0.0)
+
+def _track_usage(usage_dict):
+    """Track token usage and compute cost for the session."""
+    global _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, _SESSION_COST
+    if not usage_dict or not isinstance(usage_dict, dict):
+        return
+    inp = usage_dict.get("prompt_tokens", 0)
+    out = usage_dict.get("completion_tokens", 0)
+    _SESSION_INPUT_TOKENS += inp
+    _SESSION_OUTPUT_TOKENS += out
+    in_rate, out_rate = _get_model_pricing()
+    _SESSION_COST += (inp / 1000.0 * in_rate) + (out / 1000.0 * out_rate)
+
+def _reset_session_cost():
+    global _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, _SESSION_COST
+    _SESSION_INPUT_TOKENS = 0
+    _SESSION_OUTPUT_TOKENS = 0
+    _SESSION_COST = 0.0
+
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
     if _MEMORY_DIRTY:
@@ -3679,7 +3740,7 @@ def rl_prompt(text):
     return re.sub(r'(\x1b\[[0-9;?]*[a-zA-Z])', '\x01\\1\x02', text)
 
 def build_status_bar(spin_char=None, history=None, include_indicator=False):
-    """Build the bottom status bar: Prism32 MDS:<think> <ctx%> <sa> <spin> > """
+    """Build the bottom status bar: Prism32 MDS: <ctx%> <cost> <thinking> <sa> <spin> > """
     t = T()
     parts = [f" {t['bright']}Prism32{RST} {t['dim']}MDS{RST}:"]
     if Config.THINKING_EFFORT:
@@ -3688,6 +3749,9 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     if ctx > 0:
         ctx_color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['dim'])
         parts.append(f" {ctx_color}Ctx {ctx}%{RST}")
+    if _SESSION_COST > 0:
+        cost_color = t['warn'] if _SESSION_COST >= 1.0 else t['dim']
+        parts.append(f" {cost_color}${_SESSION_COST:.4f}{RST}")
     sa_count = sum(1 for s in _SUBAGENTS.values() if not s.done)
     if sa_count > 0:
         parts.append(f" {t['warn']}SA:{sa_count}{RST}")
@@ -5082,6 +5146,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
                 data = json.loads(resp.read().decode())
                 if agent_cancel_requested(cancel_event):
                     return AGENT_CANCELLED_RESPONSE
+                _track_usage(data.get('usage'))
                 return data.get('choices', [{}])[0].get('message', {}).get('content', '')
         except urllib.error.HTTPError as e:
             if agent_cancel_requested(cancel_event):
@@ -5226,6 +5291,9 @@ def stream_response(resp, cancel_event=None):
                 break
             try:
                 chunk = json.loads(data)
+                usage = chunk.get('usage')
+                if usage:
+                    _track_usage(usage)
                 delta = chunk.get('choices', [{}])[0].get('delta', {})
                 content = delta.get('content', '')
                 reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
@@ -5566,7 +5634,7 @@ def cmd_goal(goal_text, history, cmd_log):
 
 # ── Dynamic command names ──────────────────────────────────
 _ALL_CMDS = registry.names() | {
-    'agentname', 'api', 'apikey', 'arch', 'autosave', 'bash', 'cat', 'clear', 'collect', 'config', 'debug', 'delegate', 'delete', 'edit', 'evolve', 'extend', 'exit', 'export', 'find', 'forget', 'git', 'goal', 'grep', 'harness', 'help', 'history', 'key', 'load', 'loadcfg', 'log', 'ls', 'maxhistory', 'maxsteps', 'maxtokens', 'memories', 'memory', 'model', 'net', 'ports', 'procs', 'provider', 'providers', 'q', 'quantum', 'quit', 'recall', 'remember', 'resume', 'rootpass', 'sam', 'save', 'savecfg', 'session', 'sessions', 'skill-create', 'skill-delete', 'skill-list', 'skill-load', 'spawn', 'stream', 'subagent-model', 'subagents', 'sysinfo', 'temperature', 'theme', 'thinking', 'timeout', 'update', 'usage', 'plugins'
+    'agentname', 'api', 'apikey', 'arch', 'autosave', 'bash', 'cat', 'clear', 'collect', 'config', 'cost', 'debug', 'delegate', 'delete', 'edit', 'evolve', 'extend', 'exit', 'export', 'find', 'forget', 'git', 'goal', 'grep', 'harness', 'help', 'history', 'key', 'load', 'loadcfg', 'log', 'ls', 'maxhistory', 'maxsteps', 'maxtokens', 'memories', 'memory', 'model', 'net', 'ports', 'procs', 'provider', 'providers', 'q', 'quantum', 'quit', 'recall', 'remember', 'resume', 'rootpass', 'sam', 'save', 'savecfg', 'session', 'sessions', 'skill-create', 'skill-delete', 'skill-list', 'skill-load', 'spawn', 'stream', 'subagent-model', 'subagents', 'sysinfo', 'temperature', 'theme', 'thinking', 'timeout', 'update', 'usage', 'plugins'
 , 'memctx', 'memory'
 }
 
@@ -5630,6 +5698,7 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
    /config              Show current config
    /savecfg             Save config to disk
    /loadcfg             Load config from disk
+   /cost               Show session token usage and cost
    /usage               Show API usage (OpenRouter)
    /theme               Cycle theme (31 built-in themes)
     /plugins             List loaded plugins
@@ -6327,6 +6396,7 @@ def main():
             history[:] = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}]
             _PluginHooks._history = history
             cmd_log.clear()
+            _reset_session_cost()
             print(f"  {t['bright']}+ History cleared{RST}\n")
             continue
 
@@ -6447,6 +6517,7 @@ def main():
                 history[:] = data.get("history", [])
                 _PluginHooks._history = history
                 cmd_log = data.get("cmd_log", [])
+                _reset_session_cost()
             print()
             continue
 
@@ -7099,6 +7170,27 @@ def main():
                     print(f"  {t['dim']}{body}{RST}")
                 except Exception as e:
                     print(f"  {t['err']}Failed to fetch usage: {e}{RST}")
+            print()
+            continue
+
+        if cmd == 'cost':
+            in_t = _SESSION_INPUT_TOKENS
+            out_t = _SESSION_OUTPUT_TOKENS
+            total_t = in_t + out_t
+            in_rate, out_rate = _get_model_pricing()
+            in_cost = in_t / 1000.0 * in_rate
+            out_cost = out_t / 1000.0 * out_rate
+            lines = [
+                f"  Model:        {t['bright']}{Config.MODEL}{RST}",
+                f"  API:          {t['dim']}{Config.API_BASE}{RST}",
+                f"  Input tokens:  {t['primary']}{in_t:,}{RST}  ({in_rate:.4f}/1K = ${in_cost:.4f})",
+                f"  Output tokens: {t['primary']}{out_t:,}{RST}  ({out_rate:.4f}/1K = ${out_cost:.4f})",
+                f"  Total tokens:  {t['bright']}{total_t:,}{RST}",
+                f"  Session cost:  {t['warn']}${_SESSION_COST:.4f}{RST}",
+            ]
+            if in_rate == 0 and out_rate == 0:
+                lines.append(f"  {t['dim']}(local/free model — no cost){RST}")
+            box("SESSION COST", "\n".join(lines), "accent")
             print()
             continue
 
