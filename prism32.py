@@ -2973,7 +2973,9 @@ class Config:
             if "max_history" in data: cls.MAX_HISTORY = int(data["max_history"])
             if "max_response_tokens" in data: cls.MAX_RESPONSE_TOKENS = int(data["max_response_tokens"])
             if "cmd_timeout" in data: cls.CMD_TIMEOUT = int(data["cmd_timeout"])
-            if "goal_max_steps" in data: cls.GOAL_MAX_STEPS = int(data["goal_max_steps"])
+            if "goal_max_steps" in data:
+                loaded_steps = int(data["goal_max_steps"])
+                cls.GOAL_MAX_STEPS = max(1000, loaded_steps) if loaded_steps == 50 else loaded_steps
             if "auto_save_interval" in data: cls.AUTO_SAVE_INTERVAL = int(data["auto_save_interval"])
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
             if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = int(data["max_memory_ctx"])
@@ -3399,52 +3401,42 @@ def draw_footer(status_bar, spin_char=None):
         sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
         sys.stdout.flush()
 
-# ── Footer Animator (beautiful moving indicator) ──────────────
-
-_BRAILLE_SPIN = ["\u280b", "\u2819", "\u2839", "\u2838", "\u283c", "\u2834", "\u2826", "\u2827", "\u2807", "\u280f"]
-_WAVE_PATTERN = "\u2581\u2582\u2583\u2584\u2585\u2586\u2587\u2588\u2587\u2586\u2585\u2584\u2583\u2582"
-
-def _build_busy_indicator(frame=0, state="thinking", history=None, tool_name=""):
-    """Build a beautiful animated indicator: rotating Braille + flowing equalizer wave + state label."""
-    t = T()
-    ctx = context_pct(history) if history else 0
-    spin_char = _BRAILLE_SPIN[frame % len(_BRAILLE_SPIN)]
-    wave_w = 3 + min(5, ctx // 15)
-    wave = "".join(_WAVE_PATTERN[(frame + i) % len(_WAVE_PATTERN)] for i in range(wave_w))
-    wave_color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['accent'])
-    label = f"{state} {tool_name}" if tool_name else state
-    if len(label) > 30:
-        label = label[:29] + "\u2026"
-    return f"{t['bright']}{spin_char}{RST} {wave_color}{wave}{RST} {t['dim']}{label}{RST}"
+# ── Footer Animator (background animated indicator) ──────────
 
 def _render_footer(state="busy", history=None, tool_name="", frame=0, busy=None):
-    """Render footer content directly (caller must hold stdout_lock). Flash-free: write-then-clear."""
+    """Render footer content directly (caller must hold stdout_lock)."""
     if not _footer_reserved or not ansi_enabled():
         return
     t = T()
     if busy is None:
         busy = _AGENT_BUSY
+    cols = _term_size.columns if _term_size else 80
     sys.stdout.write("\x1b[s")
     try:
         move_to_footer()
         if _INTERJECTION_HAS_TYPED:
             buf = _INTERJECTION_BUF
             cur = _INTERJECTION_CURSOR
-            visual = f" {t['bright']}interject>{RST} {buf}\x1b[K"
-            sys.stdout.write(visual)
-            move_back = max(0, len(buf) - cur)
+            prefix = f" {t['bright']}interject>{RST} "
+            prefix_len = 12
+            max_text = max(0, cols - prefix_len - 1)
+            display_buf = buf if len(buf) <= max_text else buf[:max_text-1] + "\u2026"
+            if len(buf) <= max_text:
+                display_cur = cur
+            else:
+                display_cur = min(cur, max_text - 1)
+            sys.stdout.write(prefix + display_buf + "\x1b[K")
+            move_back = max(0, len(display_buf) - display_cur)
             if move_back > 0:
                 sys.stdout.write(f"\x1b[{move_back}D")
         else:
             if busy:
                 f = frame if frame is not None else _FOOTER_FRAME
-                indicator = _build_busy_indicator(frame=f, state=state if state != "busy" else _AGENT_STATE, history=history or _FOOTER_HISTORY_REF, tool_name=tool_name or _FOOTER_TOOL_NAME)
-                bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
-                sys.stdout.write(f"{bar} {indicator} {t['dim']}>{RST} \x1b[K")
+                indicator = activity_vector(history=history or _FOOTER_HISTORY_REF, frame=f, busy=True)
             else:
-                bar = build_status_bar(history=history, include_indicator=False)
                 indicator = activity_vector(history=history)
-                sys.stdout.write(f"{bar} {indicator} {t['primary']}>{RST} \x1b[K")
+            bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
+            sys.stdout.write(f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} \x1b[K")
     finally:
         sys.stdout.write("\x1b[u")
         sys.stdout.flush()
@@ -3743,8 +3735,9 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
             now = time.monotonic()
             if not _footer_reserved and now - last_draw >= 0.15:
                 with stdout_lock:
-                    char = _build_busy_indicator(frame=frame, state=message)
-                    sys.stdout.write(f"\r{char}\x1b[K")
+                    t = T()
+                    char = activity_vector(frame=frame, busy=True, history=history)
+                    sys.stdout.write(f"\r\033[K {t['dim']}{char} {message}...{RST}")
                     sys.stdout.flush()
                 frame += 1
                 last_draw = now
@@ -4071,8 +4064,9 @@ class SpinnerThread(threading.Thread):
                     _render_footer(state=self.message, history=history, busy=True)
                     i += 1
                 else:
-                    char = _build_busy_indicator(frame=i, state=self.message)
-                    sys.stdout.write(f"\r{char}\x1b[K")
+                    t = T()
+                    char = activity_vector(frame=i, busy=True)
+                    sys.stdout.write(f"\r\033[K {t['dim']}{char} {self.message}...{RST}")
                     sys.stdout.flush()
                     i += 1
 
