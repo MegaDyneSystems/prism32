@@ -292,16 +292,19 @@ Best-effort targets and environment classes:
 - OpenWrt, BusyBox, Entware, Yocto, and Buildroot style embedded Linux.
 - SteamOS, Fedora CoreOS, Silverblue, Kinoite, rpm-ostree systems, Clear Linux, Photon OS, NixOS, Guix System, and Wolfi/Chainguard images.
 - Solaris, SunOS, illumos, OpenIndiana, OmniOS, and SmartOS.
-- AIX, HP-UX, IRIX, Tru64/Digital UNIX.
+- AIX, HP-UX, IRIX, Tru64/Digital UNIX (requires a compatible Python 3.7+ build; on IRIX/Tru64, use Linux or NetBSD ports for MIPS/Alpha hardware).
 - Haiku, QNX Neutrino, MINIX.
 - Cygwin, MSYS2, and MinGW.
-- IBM z/OS, IBM i PASE, and OpenVMS where a compatible Python runtime exists.
+- DragonFly BSD.
+- IBM z/OS (USS), IBM i PASE, and OpenVMS where a compatible Python runtime exists.
 
 Important platform limits:
 
-- Windows does not support the same stdin polling path used for Unix streaming interjection.
+- Windows 11 22H2+: uses PowerShell `Get-CimInstance` for system info (replaces deprecated `wmic`).
+- Windows does not support Escape-cancel of foreground commands or streaming interjection. Use Ctrl-C to interrupt.
 - Old terminals without ANSI/VT support may use simpler prompts and fewer visual effects.
-- Appliance and embedded systems may have read-only filesystems, missing compilers, missing SSL certificates, restricted package managers, or non-GNU shell tools.
+- Appliance and embedded systems may have read-only filesystems, missing compilers, missing SSL certificates, restricted package managers, or non-GNU shell tools. Use `install.sh -y` for user-local installs on read-only systems.
+- On AIX, HP-UX, QNX, and MINIX: `install.sh` requires bash. Install it first, or run `python3 prism32.py --setup-runtime && python3 prism32.py` directly.
 - Prompt the AI to prefer POSIX `sh` commands on unknown Unix systems and avoid GNU-only flags unless verified.
 
 ## Supported Architectures
