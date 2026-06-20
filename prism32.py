@@ -5152,6 +5152,11 @@ class SubAgent:
                     break
                 resp, _asked = handle_ask_blocks(resp, self._history, allow_input=False, return_asked=True)
                 commands = extract_blocks(resp, 'execute')
+                # Heal non-standard tool-call formats
+                if not commands:
+                    resp, was_healed = heal_response(resp)
+                    if was_healed:
+                        commands = extract_blocks(resp, 'execute')
                 if commands:
                     clean = clean_response(resp)
                     if resp.strip():
@@ -5231,11 +5236,13 @@ class SubAgent:
 # ── AI Communication ────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are Prism32, an AI terminal agent running on a retro system.
-You have FULL bash access. Execute commands directly using:
+You have FULL bash access. Execute commands directly using EXACTLY this format:
 
 ```execute
 command here
 ```
+
+CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_calls_section_begin|>, function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks. This is not optional.
 
 When you need to ask the user a question or request clarification, use:
 
@@ -5391,6 +5398,12 @@ def stream_response(resp, cancel_event=None):
     def _filter_visible_content(text, final=False):
         data = fence_state["pending"] + text
         fence_state["pending"] = ""
+        # Hide non-standard tool-call modal tags during streaming
+        for tag in ['<|tool_calls_section_begin|>', '<|tool_calls_section_end|>',
+                     '<|tool_call_begin|>', '<|tool_call_end|>',
+                     '<|tool_call_argument_begin|>']:
+            data = data.replace(tag, '')
+        data = re.sub(r'functions\.\w+:\d+\s*', '', data)
         out = []
         i = 0
         while i < len(data):
@@ -5544,14 +5557,70 @@ def stream_response(resp, cancel_event=None):
             _interjection_stop()
         except Exception:
             pass
+_RE_TOOL_CALL_NATIVE = re.compile(r'<\|tool_call_begin\|>.*?<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>', re.DOTALL)
+
+def heal_response(text):
+    """Convert non-standard tool-calling formats to proper execute blocks.
+    Returns (healed_text, was_healed)."""
+    healed = False
+
+    def _replace_native(m):
+        nonlocal healed
+        healed = True
+        try:
+            obj = json.loads(m.group(1))
+            if 'command' in obj:
+                return f"```execute\n{obj['command']}\n```"
+        except Exception:
+            pass
+        return ''
+
+    text = _RE_TOOL_CALL_NATIVE.sub(_replace_native, text)
+    text = re.sub(r'<\|tool_calls_section_begin\|>', '', text)
+    text = re.sub(r'<\|tool_calls_section_end\|>', '', text)
+    text = re.sub(r'<\|tool_call_begin\|>', '', text)
+    text = re.sub(r'<\|tool_call_end\|>', '', text)
+    text = re.sub(r'<\|tool_call_argument_begin\|>', '', text)
+    text = re.sub(r'functions\.\w+:\d+', '', text)
+
+    if not healed and '```execute' not in text:
+        bare_re = re.compile(r'\{\s*"command"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}', re.DOTALL)
+        if bare_re.search(text):
+            def _replace_bare(m):
+                nonlocal healed
+                cmd = m.group(1).replace('\\"', '"').replace('\\n', '\n')
+                return f"\n```execute\n{cmd}\n```\n"
+            text = bare_re.sub(_replace_bare, text)
+
+    return text, healed
+
 def extract_blocks(text, tag):
     _re = _RE_EXEC_BLOCK if tag == 'execute' else _RE_ASK_BLOCK
-    return [b.strip() for b in _re.findall(text)]
+    blocks = [b.strip() for b in _re.findall(text)]
+    
+    if tag == 'execute' and not blocks:
+        for m in _RE_TOOL_CALL_NATIVE.finditer(text):
+            try:
+                obj = json.loads(m.group(1))
+                if 'command' in obj:
+                    blocks.append(obj['command'])
+            except Exception:
+                pass
+    
+    return blocks
 
 def clean_response(text):
     clean = text
+    # Strip Prism32 execute/ask blocks
     for tag in ('execute', 'ask'):
         clean = re.sub(rf'```{tag}\r?\n.*?```', '', clean, flags=re.DOTALL)
+    # Strip non-standard tool-calling formats (GLM, Qwen, etc)
+    clean = re.sub(r'<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>', '', clean, flags=re.DOTALL)
+    clean = re.sub(r'<\|tool_call_begin\|>.*?<\|tool_call_end\|>', '', clean, flags=re.DOTALL)
+    clean = re.sub(r'<\|tool_call_argument_begin\|>', '', clean)
+    clean = re.sub(r'<\|tool_calls_section_end\|>', '', clean)
+    clean = re.sub(r'<\|tool_call_end\|>', '', clean)
+    clean = re.sub(r'functions\.\w+:\d+', '', clean)
     return clean.strip()
 
 def clean_ask_blocks(text):
@@ -5755,6 +5824,13 @@ def cmd_goal(goal_text, history, cmd_log):
         resp = handle_ask_blocks(resp, history, goal_mode=True)
 
         commands = extract_blocks(resp, 'execute')
+        
+        # Heal non-standard tool-call formats
+        if not commands:
+            resp, was_healed = heal_response(resp)
+            if was_healed:
+                commands = extract_blocks(resp, 'execute')
+                viz.status("Tool call format healed", "info")
         
         if 'GOAL COMPLETE' in resp.upper() and step > 1 and len(commands) == 0:
             # Only accept GOAL COMPLETE if we've actually done some work
@@ -7906,6 +7982,14 @@ def main():
             commands = extract_blocks(resp, 'execute')
             clean = clean_response(resp)
 
+            # Heal non-standard tool-call formats if no execute blocks found
+            if not commands and not asked:
+                resp, was_healed = heal_response(resp)
+                if was_healed:
+                    commands = extract_blocks(resp, 'execute')
+                    clean = clean_response(resp)
+                    viz.status("Tool call format healed to execute blocks", "info")
+
             if asked:
                 if clean and not Config.STREAM:
                     t3 = T()
@@ -7938,6 +8022,8 @@ def main():
 
                     exec_msg = f"Executed: {c}\nResult:\n{result[:1500]}"
                     continuation = "Command output above. Continue with your task or give final answer."
+                    if was_healed:
+                        continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
                     if exec_msg.strip():
                         history.append({"role": "user", "content": f"{exec_msg}\n\n{continuation}"})
                     else:
