@@ -3666,9 +3666,10 @@ def read_footer_input(status_bar):
     if not _footer_reserved:
         t = T()
         return input(rl_prompt(f" {t['primary']}prism32>{RST} ")).strip()
-    # Temporarily release scroll region so input() can use the full terminal
-    # (including wrapping to new lines for long prompts)
+    # Position cursor at the bottom line, then release scroll region
+    # so input() can wrap long prompts to new lines
     t = T()
+    move_to_footer()
     reset_scroll_region()
     try:
         line = input(rl_prompt(f" {status_bar} {t['primary']}>{RST} "))
