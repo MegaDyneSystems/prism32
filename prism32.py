@@ -3189,7 +3189,9 @@ class Config:
 
 # ── Resilient helpers ──
 def estimate_tokens(text):
-    '''Rough token count (4 chars per token average). Handles str / list / other.'''
+    '''Rough token count (4 chars per token average). Handles str / list / None / other.'''
+    if text is None:
+        return 0
     if isinstance(text, str):
         return len(text) // 4
     if isinstance(text, list):
@@ -3202,111 +3204,230 @@ def estimate_tokens(text):
                     total += len(str(part.get("text", "")))
             elif isinstance(part, str):
                 total += len(part)
+            else:
+                total += len(str(part))
         return total // 4
-    return len(str(text or "")) // 4
+    return len(str(text)) // 4
+
+def _msg_tokens(m):
+    """Estimate tokens for a full message dict (content + tool_calls)."""
+    if not isinstance(m, dict):
+        return 0
+    total = estimate_tokens(m.get("content", ""))
+    tc = m.get("tool_calls")
+    if tc:
+        for call in tc:
+            total += estimate_tokens(str(call))
+    return total
 
 def context_pct(history):
-    total = sum(estimate_tokens(m.get("content", "")) if isinstance(m, dict) else 0 for m in history)
+    total = sum(_msg_tokens(m) for m in history)
     budget = Config.resolve_context_window()
     return min(999, int(total / budget * 100)) if budget > 0 else 0
 
-# ── Context management with summarization ───────────────────
+# ── Context management with intelligent summarization ──────
 
 _CONTEXT_SUMMARY = ""
 _ACTIVE_GOAL = ""
+_SESSION_STATE = {"discoveries": [], "errors": [], "trim_count": 0}
 
 def set_active_goal(goal_text):
-    """Track the active goal so it survives context trimming."""
-    global _ACTIVE_GOAL
+    global _ACTIVE_GOAL, _SESSION_STATE
     _ACTIVE_GOAL = goal_text
+    _SESSION_STATE = {"discoveries": [], "errors": [], "trim_count": 0}
 
 def clear_active_goal():
-    global _ACTIVE_GOAL
+    global _ACTIVE_GOAL, _SESSION_STATE, _CONTEXT_SUMMARY
     _ACTIVE_GOAL = ""
+    _SESSION_STATE = {"discoveries": [], "errors": [], "trim_count": 0}
+    _CONTEXT_SUMMARY = ""
 
-def _build_context_refresher(history):
-    """Build a compact refresher summary of what the agent has been doing.
-    Extracts key facts from conversation history before trimming."""
+def _extract_key_facts(content, max_facts=8):
+    """Extract the most information-dense lines from text.
+    Prioritizes IPs, paths, errors, package names, versions."""
+    if not isinstance(content, str) or not content.strip():
+        return []
+    lines = content.replace('\r', '\n').split('\n')
+    facts = []
+    priorities = [
+        (re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'), 3),
+        (re.compile(r'(/[\w./-]+)+'), 3),
+        (re.compile(r'(?:error|ERROR|Error|fail|FAIL|Fail|denied|DENIED|not found|NOT FOUND)', re.IGNORECASE), 3),
+        (re.compile(r'\b(?:apt|pip|npm|yarn|brew|pkg|opkg|dnf|yum|pacman)\s+\w+'), 2),
+        (re.compile(r'\b(?:version|v\d+\.\d+)', re.IGNORECASE), 2),
+    ]
+    scored = []
+    for line in lines:
+        line = line.strip()
+        if len(line) < 5 or len(line) > 200:
+            continue
+        score = 0
+        for pattern, weight in priorities:
+            if pattern.search(line):
+                score += weight
+        if score > 0:
+            scored.append((score, line))
+    scored.sort(key=lambda x: -x[0])
+    return [line for _, line in scored[:max_facts]]
+
+def _build_context_refresher(history, keep_count=0):
+    """Build an intelligent summary of DROPPED messages only (not the kept ones).
+    
+    Extracts:
+    - OBJECTIVE: the active goal
+    - DISCOVERIES: key facts from command results (IPs, paths, errors)
+    - ERRORS: recurring problems
+    - LAST ANALYSIS: compressed key points from last assistant response
+    - RECENT DROPPED: last few messages that were dropped (for continuity)
+    """
     global _CONTEXT_SUMMARY
     parts = []
     
-    # Preserve the active goal
-    if _ACTIVE_GOAL:
-        parts.append(f"OBJECTIVE: {_ACTIVE_GOAL}")
+    obj = _ACTIVE_GOAL
+    if obj:
+        parts.append(f"OBJECTIVE: {obj}")
     
-    # Extract user messages (the agent's instructions)
-    user_msgs = [m for m in history if isinstance(m, dict) and m.get("role") == "user"]
-    if user_msgs:
-        parts.append("KEY USER INSTRUCTIONS:")
-        for m in user_msgs[-5:]:  # Last 5 user messages
-            content = m.get("content", "")
-            if isinstance(content, str):
-                parts.append(f"  - {content[:200]}")
+    dropped = history[1:-keep_count] if keep_count > 0 else history[1:]
     
-    # Extract command results (what the agent has learned)
-    cmd_msgs = [m for m in history if isinstance(m, dict) and m.get("role") == "user" 
-                and isinstance(m.get("content", ""), str)
-                and ("Executed:" in m.get("content", "") or "Result:" in m.get("content", ""))]
-    if cmd_msgs:
-        parts.append("RECENT COMMAND RESULTS:")
-        for m in cmd_msgs[-3:]:  # Last 3 command results
-            content = m.get("content", "")
-            parts.append(f"  - {content[:300]}")
+    # Scan dropped messages for discoveries and errors
+    discoveries = list(_SESSION_STATE.get("discoveries", []))
+    errors = list(_SESSION_STATE.get("errors", []))
     
-    # Extract assistant conclusions
-    asst_msgs = [m for m in history if isinstance(m, dict) and m.get("role") == "assistant"]
-    if asst_msgs:
-        last_asst = asst_msgs[-1].get("content", "")
+    for m in dropped:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content", "")
+        role = m.get("role", "")
+        if role == "user" and isinstance(content, str) and "Executed:" in content:
+            facts = _extract_key_facts(content, max_facts=3)
+            for f in facts:
+                if f not in discoveries and len(discoveries) < 12:
+                    discoveries.append(f)
+                if any(w in f.lower() for w in ["error", "fail", "denied", "not found"]):
+                    if f not in errors and len(errors) < 5:
+                        errors.append(f)
+        elif role == "user" and isinstance(content, str) and "[User answered]" in content:
+            answer = content.replace("[User answered]:", "").strip()[:150]
+            if answer:
+                discoveries.append(f"User said: {answer}")
+    
+    _SESSION_STATE["discoveries"] = discoveries
+    _SESSION_STATE["errors"] = errors
+    
+    if discoveries:
+        parts.append("DISCOVERIES:")
+        for d in discoveries[-10:]:
+            parts.append(f"  - {d}")
+    
+    if errors:
+        parts.append("ERRORS:")
+        for e in errors:
+            parts.append(f"  - {e}")
+    
+    # Last assistant analysis from dropped messages (compressed)
+    dropped_asst = [m for m in dropped if isinstance(m, dict) and m.get("role") == "assistant"]
+    if dropped_asst:
+        last_asst = dropped_asst[-1].get("content", "")
         if isinstance(last_asst, str) and last_asst.strip():
-            parts.append(f"LAST ANALYSIS: {last_asst[:400]}")
+            key_facts = _extract_key_facts(last_asst, max_facts=4)
+            if key_facts:
+                parts.append("LAST ANALYSIS (key points):")
+                for f in key_facts:
+                    parts.append(f"  - {f}")
+            else:
+                parts.append(f"LAST ANALYSIS: {last_asst[:300]}")
     
     summary = "\n".join(parts)
-    if summary:
+    if summary.strip():
         _CONTEXT_SUMMARY = summary
-    return summary
+    return summary if summary.strip() else ""
 
 def trim_history(history, max_tokens=None):
-    '''Trim history to stay within context window, preserving system prompt
-    and the MOST RECENT messages. Generates a context refresher for dropped messages.'''
+    """Aggressive intelligent trimming with multi-level summarization.
+    
+    Strategy:
+    1. Reserve 8K tokens for the most recent messages (fixed floor)
+    2. Build an intelligent summary of messages that will be dropped
+    3. Inject summary as a system message after the system prompt
+    4. Keep the newest messages up to the 8K reserve
+    5. Compress old command results in kept messages
+    """
+    global _SESSION_STATE
     if max_tokens is None:
         max_tokens = Config.resolve_context_window()
     if not history:
         return history
-    total = sum(estimate_tokens(m.get("content", "") if isinstance(m, dict) else "") for m in history)
+    
+    total = sum(_msg_tokens(m) for m in history)
     if total <= max_tokens:
         return history
     
-    # Build refresher BEFORE trimming
-    refresher = _build_context_refresher(history)
+    _SESSION_STATE["trim_count"] = _SESSION_STATE.get("trim_count", 0) + 1
     
-    system = [history[0]] if history else []
+    system_prompt = history[0]
+    system_tokens = _msg_tokens(system_prompt)
     
-    # If there's a refresher, inject it as a system continuation
-    if refresher:
-        refresher_msg = {"role": "system", "content": f"[CONTEXT REFRESHER - previous context was trimmed]\n{refresher}\n[END REFRESHER - continue working toward the objective]"}
-        system = [history[0], refresher_msg]
+    # Fixed recent floor: 8K tokens or 30% of window, whichever is larger
+    # This ensures the agent always has enough recent context to continue
+    recent_floor = max(8000, int(max_tokens * 0.30))
+    summary_budget = max_tokens - system_tokens - recent_floor
     
+    if summary_budget < 2000:
+        # Very tight context — reduce recent floor
+        recent_floor = max(4000, int(max_tokens * 0.50))
+        summary_budget = max(1000, max_tokens - system_tokens - recent_floor)
+    
+    # Keep the newest messages up to recent_floor tokens
     rest = history[1:]
-    # Reserve space for the refresher
-    refresher_tokens = estimate_tokens(refresher) if refresher else 0
-    budget = max_tokens - refresher_tokens
-    if budget < max_tokens // 4:
-        budget = max_tokens // 4  # Ensure at least 25% for recent messages
-    
-    # Keep newest messages that fit
     kept = []
-    running = estimate_tokens(system[0].get("content", "") if isinstance(system[0], dict) else "")
-    for msg in system[1:]:
-        running += estimate_tokens(msg.get("content", "") if isinstance(msg, dict) else "")
-    
+    kept_tokens = 0
     for m in reversed(rest):
-        tok = estimate_tokens(m.get("content", "") if isinstance(m, dict) else "")
-        if running + tok <= budget:
+        if not isinstance(m, dict):
+            continue
+        tok = _msg_tokens(m)
+        if kept_tokens + tok <= recent_floor:
             kept.insert(0, m)
-            running += tok
+            kept_tokens += tok
         else:
             break
-    return system + kept
+    
+    # Build summary of dropped messages (NOT the kept ones)
+    refresher = _build_context_refresher(history, keep_count=len(kept))
+    
+    # If summary is too long, compress it
+    refresher_tokens = estimate_tokens(refresher)
+    if summary_budget > 0 and refresher_tokens > summary_budget:
+        lines = refresher.split('\n')
+        compressed = []
+        char_budget = summary_budget * 4
+        current = 0
+        for line in lines:
+            if current + len(line) > char_budget:
+                break
+            compressed.append(line)
+            current += len(line)
+        refresher = "\n".join(compressed)
+    
+    result = [system_prompt]
+    if refresher.strip():
+        result.append({"role": "system", "content": f"[SESSION CONTEXT — prior conversation summarized to save space]\n{refresher}\n[END SUMMARY — continue working.]"})
+    
+    # Compress old command results in kept messages (keep newest few raw)
+    raw_keep = 3
+    for i, m in enumerate(kept):
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role", "")
+        content = m.get("content", "")
+        if role == "user" and isinstance(content, str) and "Executed:" in content and "Result:" in content:
+            if i < len(kept) - raw_keep:
+                facts = _extract_key_facts(content, max_facts=3)
+                if facts:
+                    cmd_line = content.split("Result:")[0].strip()[:100]
+                    kept[i] = dict(m, content=f"{cmd_line}\nResults: {'; '.join(facts)}")
+    
+    result.extend(kept)
+    return result
 
 # ── Theme Registry (built-ins) ────────────────────────────
 register_theme("phosphor", primary="\x1b[92m", bright="\x1b[1;92m", dim="\x1b[2;32m", accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m", glow="\x1b[5;92m", bar="\x1b[42m")
@@ -5446,7 +5567,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
                 time.sleep(delay)
                 # Trim history more aggressively on retry
                 if e.code in (400, 413):
-                    clean_messages = trim_history(clean_messages, Config.resolve_context_window() // 2)
+                    clean_messages = trim_history(clean_messages, int(Config.resolve_context_window() * 0.6))
                     payload["messages"] = clean_messages
                 continue
             break
@@ -5834,11 +5955,10 @@ def cmd_goal(goal_text, history, cmd_log):
     step = 0
     while step < max_steps:
         step += 1
-        # Proactive context management
+        # Proactive context management: trim at 75% to stay ahead
         _ctx = context_pct(history)
-        if _ctx >= 80:
-            if _ctx >= 100:
-                viz.status(f"Context at {_ctx}% — trimming with refresher", "warning")
+        if _ctx >= 75:
+            viz.status(f"Context at {_ctx}% — compressing with intelligent summary", "warning")
             history[:] = trim_history(history, Config.resolve_context_window())
         # Auto-save every 3 steps for crash recovery
         if step > 1 and step % 3 == 1:
@@ -6773,6 +6893,7 @@ def main():
             cmd_log.clear()
             _reset_session_cost()
             _CURRENT_SESSION_ID = None
+            clear_active_goal()
             print(f"  {t['bright']}+ History cleared{RST}\n")
             continue
 
@@ -8019,10 +8140,8 @@ def main():
 
         for iteration in range(max_iter):
             _ctx = context_pct(history)
-            if _ctx >= 80:
-                t_warn = T()
-                if _ctx >= 100:
-                    viz.status(f"Context at {_ctx}% — trimming with refresher", "warning")
+            if _ctx >= 75:
+                viz.status(f"Context at {_ctx}% — compressing with intelligent summary", "warning")
                 history[:] = trim_history(history, Config.resolve_context_window())
             spin = None
             try:

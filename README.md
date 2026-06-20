@@ -734,6 +734,60 @@ This means Prism32 works with any model — even ones that try to use their nati
 
 **Lower cognitive load for the model.** The model writes commands the same way it writes prose — fenced code blocks. No structured JSON, no tool IDs, no role management. Just write what you want to run.
 
+## Context Management
+
+Prism32 uses an intelligent multi-level context compression system inspired by promptshard architecture. When context fills up, the agent doesn't lose track — it keeps working like nothing happened.
+
+### How It Works
+
+When context reaches 75% of the model's window, Prism32 automatically:
+
+1. **Reserves 8K+ tokens for recent messages** (or 30% of the window, whichever is larger) — the agent always has enough recent context to continue seamlessly
+2. **Builds an intelligent summary** of the dropped messages:
+   - **OBJECTIVE**: the active goal (never lost across trims)
+   - **DISCOVERIES**: key facts extracted from command results — IP addresses, file paths, error messages, package versions
+   - **ERRORS**: recurring problems encountered
+   - **LAST ANALYSIS**: compressed key points from the last assistant response
+3. **Injects the summary** as a system message between the system prompt and recent messages
+4. **Compresses old command results** in kept messages — verbose output replaced with key facts only (e.g. `Executed: ip addr\nResults: inet 192.168.1.100; ERROR: wlan0 down`)
+
+### Key Fact Extraction
+
+The summarization engine scores every line by information density:
+
+| Pattern | Score |
+|---------|-------|
+| IP addresses (192.168.x.x) | 3 points |
+| File paths (/etc/nginx/conf) | 3 points |
+| Errors/failures/denied | 3 points |
+| Package commands (apt/pip/brew) | 2 points |
+| Version numbers (v1.2.3) | 2 points |
+| Headers (===/---/***) | -1 point |
+
+Only the top N most information-dense lines are kept. Lines <5 or >200 chars are skipped.
+
+### Session Intelligence
+
+Prism32 tracks session state across trims:
+
+- **Objective**: set via `/goal`, survives all context trims
+- **Discoveries**: accumulated key facts from command results
+- **Errors**: recurring problems tracked across the session
+- **Trim count**: how many times context was compressed
+
+This state is cleared on `/clear`, `/goal` end, and new goal start.
+
+### Recent Message Floor
+
+The system guarantees at least **8K tokens** (or 50% on very small models) for the most recent messages. This means:
+
+- The agent always sees its last few commands and results in full
+- The agent always sees the last user instruction
+- The agent always sees its last analysis
+- The summary fills in what happened before
+
+The result: the agent keeps going when its context fills up and doesn't lose track of what it was doing.
+
 ## Goal Mode Examples
 
 Goal mode is for tasks where you want Prism32 to keep working step by step in a loop
