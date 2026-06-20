@@ -278,10 +278,15 @@ class _PluginHooks:
         for cb, api in cls._shutdown_callbacks:
             try:
                 cb(api)
-            except Exception as e:
+            except Exception:
                 pass
         for api_name in list(_PLUGINS.keys()):
-            _plugin_apis.get(api_name, _PluginAPI_placeholder).stop()
+            api = _plugin_apis.get(api_name)
+            if api and hasattr(api, 'stop'):
+                try:
+                    api.stop()
+                except Exception:
+                    pass
 
     @classmethod
     def start_tick(cls, interval=5):
@@ -1472,6 +1477,7 @@ def shard_spawn_agent(shard):
     # Mark status
     shard['status'] = 'active'
     write_promptshard(shard)
+    sa.run_async()
     return sa
 
 def shard_mark_complete(shard_id, result=""):
@@ -2041,6 +2047,8 @@ def automation_execute(auto_id):
         "snippet": (sa.result or "")[:200],
     }
     auto.setdefault("history", []).append(history_entry)
+    if len(auto["history"]) > 100:
+        auto["history"] = auto["history"][-100:]
     if auto["type"] == "oneshot":
         auto["status"] = "completed"
     _automation_next_run(auto)
@@ -2053,7 +2061,7 @@ def automation_execute(auto_id):
             print(f" {t['err']}[AUTO] Failed: {auto['description']}{RST}")
 
 def _automation_scheduler_loop():
-    """Daemon thread: check for due automations every 30s."""
+    """Daemon thread: check for due automations every 30s + cleanup."""
     global _AUTOMATION_SCHEDULER_RUNNING
     _AUTOMATION_SCHEDULER_RUNNING = True
     while not _shutdown_flag:
@@ -2071,7 +2079,24 @@ def _automation_scheduler_loop():
                     automation_execute(auto["id"])
         except Exception:
             pass
+        try:
+            _cleanup_subagents()
+        except Exception:
+            pass
     _AUTOMATION_SCHEDULER_RUNNING = False
+
+def _cleanup_subagents():
+    """Remove old completed subagents from _SUBAGENTS to prevent memory leak."""
+    now = time.time()
+    stale_ids = []
+    with _subagent_lock:
+        for sid, sa in _SUBAGENTS.items():
+            if sa.done and getattr(sa, '_cleanup_time', 0) and now - sa._cleanup_time > 300:
+                if sa._thread is None or not sa._thread.is_alive():
+                    stale_ids.append(sid)
+    with _subagent_lock:
+        for sid in stale_ids:
+            _SUBAGENTS.pop(sid, None)
 
 def learn_command(cmd_name, success=True, duration=0):
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -2151,13 +2176,14 @@ def memory_context():
     # Learned patterns
     stats = mem.get("command_stats", {})
     if stats:
-        top = sorted(stats.items(), key=lambda x: -x[1]["uses"])[:3]
-        parts.append("top:" + ",".join(f"{n}({d['uses']})" for n, d in top))
+        top_list = [(n, d) for n, d in stats.items() if isinstance(d, dict)]
+        top = sorted(top_list, key=lambda x: -x[1].get("uses", 0))[:3]
+        parts.append("top:" + ",".join(f"{n}({d.get('uses', 0)})" for n, d in top))
     errors = mem.get("error_patterns", {})
-    bad = {k: v for k, v in errors.items() if v["count"] > 1}
+    bad = {k: v for k, v in errors.items() if isinstance(v, dict) and v.get("count", 0) > 1}
     if bad:
-        worst = max(bad.items(), key=lambda x: x[1]["count"])
-        parts.append(f"err_rep:{worst[1]['count']}x")
+        worst = max(bad.items(), key=lambda x: x[1].get("count", 0))
+        parts.append(f"err_rep:{worst[1].get('count', 0)}x")
     sess = mem.get("session_count", 0)
     if sess:
         parts.append(f"sessions:{sess}")
@@ -2175,8 +2201,13 @@ def memory_context():
 
 # Resilient shutdown
 def _cleanup():
+    global _shutdown_flag
+    _shutdown_flag = True
+    try:
+        _PluginHooks.fire_shutdown()
+    except Exception:
+        pass
     _flush_memory()
-
     if ansi_enabled():
         print("\r" + SHOW + RST, end="", flush=True)
 atexit.register(_cleanup)
@@ -3705,6 +3736,8 @@ def _interjection_poll():
                         _draw_interjection_footer()
                         return None
                     _INTERJECTION_HISTORY.append(result)
+                    if len(_INTERJECTION_HISTORY) > 100:
+                        _INTERJECTION_HISTORY[:] = _INTERJECTION_HISTORY[-100:]
                     _INTERJECTION_BUF = ""
                     _INTERJECTION_CURSOR = 0
                     _INTERJECTION_RESULT = result
@@ -3921,13 +3954,18 @@ def generate_session_id(name=None):
 
 def _extract_title(history, metadata=None):
     """Derive a human-readable title from session history."""
-    # Goal sessions: use the goal text from metadata or the GOAL: message
     if metadata and metadata.get("type") == "goal":
         goal = metadata.get("goal", "")
         if goal:
             return goal[:60]
     for msg in history:
+        if not isinstance(msg, dict):
+            continue
         content = msg.get("content", "")
+        if isinstance(content, list):
+            content = ' '.join(str(p.get('text', '')) if isinstance(p, dict) else str(p) for p in content)
+        elif not isinstance(content, str):
+            content = str(content)
         role = msg.get("role", "")
         if role == "user" and content.startswith("GOAL:"):
             return content[5:65].strip().replace('\n', ' ')
@@ -3964,8 +4002,11 @@ def load_session(session_id):
     path = get_session_path(session_id)
     if not os.path.exists(path):
         return None
-    with open(path, 'r', encoding='utf-8') as f:
-        return json.load(f)
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return None
 
 def _quick_scan_session(path, sid):
     '''Read metadata from a session file without full JSON parse.
@@ -4019,8 +4060,8 @@ def get_session_stats(session_data):
         return {}
     history = session_data.get("history", [])
     cmd_log = session_data.get("cmd_log", [])
-    user_msgs = sum(1 for m in history if m.get("role") == "user")
-    assistant_msgs = sum(1 for m in history if m.get("role") == "assistant")
+    user_msgs = sum(1 for m in history if isinstance(m, dict) and m.get("role") == "user")
+    assistant_msgs = sum(1 for m in history if isinstance(m, dict) and m.get("role") == "assistant")
     cmd_types = {}
     for entry in cmd_log:
         if isinstance(entry, (list, tuple)) and len(entry) >= 2:
@@ -4215,7 +4256,9 @@ def kv_table(data, indent=1):
 
 def cmd_session_save(session_id, history, cmd_log, name=None):
     t = T()
-    if not session_id:
+    if session_id:
+        session_id = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in session_id)
+    else:
         session_id = generate_session_id(name)
     path = save_session(session_id, history, cmd_log)
     viz.status(f"Session saved: {session_id}", "save")
@@ -4665,8 +4708,8 @@ def _try_plugin_cmd(c, history=None):
             return json.dumps(shard, indent=2)
         if sub == "deploy":
             shard = read_promptshard()
-            sid = shard_spawn_agent(shard)
-            return f"Shard deployed as subagent {sid}." if sid else "Shard deploy failed."
+            sa = shard_spawn_agent(shard)
+            return f"Shard deployed as subagent {sa.id}." if sa else "Shard deploy failed."
         if sub == "set" and ':' in rest:
             k, v = rest.split(':', 1)
             shard = read_promptshard()
@@ -4993,6 +5036,7 @@ class SubAgent:
             Config.PROVIDER = old_provider
             Config.API_BASE = old_api_base
             Config.API_KEY = old_api_key
+            self._cleanup_time = time.time()
 
     def run(self):
         with stdout_lock:
@@ -5957,8 +6001,15 @@ def cmd_history(session_history):
     t = T()
     lines = []
     for msg in session_history[-25:]:
-        role = msg['role']
-        content = msg['content'][:80].replace('\n', ' ')
+        if not isinstance(msg, dict):
+            continue
+        role = msg.get('role', '?')
+        content = msg.get('content', '')
+        if isinstance(content, list):
+            content = ' '.join(str(p.get('text', '')) if isinstance(p, dict) else str(p) for p in content)
+        elif not isinstance(content, str):
+            content = str(content)
+        content = content[:80].replace('\n', ' ')
         if role == 'user':
             lines.append(f" {t['bright']}U>{RST} {content}")
         elif role == 'assistant':
@@ -6058,18 +6109,20 @@ def cmd_memory(args_str=""):
             lines.append("   (run /memory refresh)")
         lines.append("")
         lines.append(" Top Commands:")
-        for name, data in sorted(stats.items(), key=lambda x: -x[1]['uses'])[:8]:
-            u = data['uses']
-            fc = data['failures']
-            tt = data['total_time']
+        valid_stats = {n: d for n, d in stats.items() if isinstance(d, dict)}
+        for name, data in sorted(valid_stats.items(), key=lambda x: -x[1].get('uses', 0))[:8]:
+            u = data.get('uses', 0)
+            fc = data.get('failures', 0)
+            tt = data.get('total_time', 0)
             avg = tt / u if u > 0 else 0
             pct = fc / u * 100 if u > 0 else 0
             lines.append(f"   {name:<14} {u:>4}x  fail:{pct:>6.2f}%  avg:{avg:.1f}s")
         if errors:
             lines.append("")
             lines.append(" Recurring Errors:")
-            for err, edata in sorted(errors.items(), key=lambda x: -x[1]['count'])[:5]:
-                lines.append(f"   {edata['count']}x  {err[:50]}")
+            valid_errors = {k: v for k, v in errors.items() if isinstance(v, dict)}
+            for err, edata in sorted(valid_errors.items(), key=lambda x: -x[1].get('count', 0))[:5]:
+                lines.append(f"   {edata.get('count', 0)}x  {err[:50]}")
         sug = get_memory_suggestions()
         if sug:
             lines.append("")
@@ -6233,7 +6286,7 @@ def main():
     parser.add_argument("--model", "-m", help="Override model name")
     parser.add_argument("--api", "-a", help="Override API base URL")
     parser.add_argument("--api-key", "-k", help="Set API key (e.g. OpenRouter)")
-    parser.add_argument("--theme", "-t", choices=["phosphor","amber","cyan","vapor","nord","solarized","neon","retro","ice","ocean","sunset","forest","plasma","clear","glass","ghost","smoke","paper","ink","daylight","slate","ember"], help="Color theme")
+    parser.add_argument("--theme", "-t", choices=list(THEME_REGISTRY.keys()), help="Color theme")
     parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable live streaming output")
     parser.add_argument("--slow-cpu", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
@@ -7983,8 +8036,8 @@ def cmd_provider_set(provider_name):
     
     prov = PROVIDER_REGISTRY[provider_name]
     Config.PROVIDER = provider_name
-    Config.API_BASE = prov["api_base"]
-    Config.MODEL = prov["model"]
+    Config.API_BASE = prov.get("api_base", Config.API_BASE)
+    Config.MODEL = prov.get("model", Config.MODEL)
     Config.save_config()
     
     viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
