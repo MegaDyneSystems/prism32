@@ -28,6 +28,7 @@ detect_platform() {
 find_floppy() {
     PLATFORM=$(detect_platform)
     echo "${DIM}  Scanning for removable media...${RST}" >&2
+    CANDIDATES=""
     
     case "$PLATFORM" in
         linux)
@@ -42,39 +43,60 @@ find_floppy() {
                 [ "$REMOVABLE" = "1" ] || continue
                 [ "$SIZE" -ge 2880 ] && [ "$SIZE" -le 8388608 ] || continue
                 
-                # Skip known system disks
                 DEV_PATH="/dev/$DEVNAME"
                 MODEL=$(cat "$dev/device/model" 2>/dev/null || echo "")
                 echo "${DIM}  Found: $DEV_PATH ($MODEL, ${SIZE}sectors)${RST}" >&2
-                echo "$DEV_PATH"
-                return 0
-            done
-            # Fallback: list candidates
-            for dev in /dev/sd?; do
-                [ -e "$dev" ] || continue
-                SIZE=$(blockdev --getsize64 "$dev" 2>/dev/null || echo 0)
-                if [ "$SIZE" -ge 1474560 ] && [ "$SIZE" -le 4294967296 ]; then
-                    echo "$dev" 2>/dev/null
-                    return 0
-                fi
+                CANDIDATES="$CANDIDATES $DEV_PATH"
             done
             ;;
         macos)
-            for dev in /dev/disk{1,2,3,4}; do
+            for dev in /dev/disk{1,2,3,4,5,6,7,8,9}; do
                 [ -e "$dev" ] || continue
                 INFO=$(diskutil info "$dev" 2>/dev/null || true)
-                echo "$INFO" | grep -qi "removable" || continue
-                echo "$dev"
-                return 0
+                if echo "$INFO" | grep -qi "Ejectable: Yes"; then
+                    echo "${DIM}  Found: $dev${RST}" >&2
+                    CANDIDATES="$CANDIDATES $dev"
+                fi
             done
             ;;
         netbsd|openbsd|freebsd)
-            for dev in /dev/rsd?c /dev/rsd?a /dev/fd?; do
-                [ -e "$dev" ] && echo "$dev" && return 0
+            # Safe: only check /dev/fd? (actual floppy drives)
+            for dev in /dev/fd?; do
+                [ -e "$dev" ] || continue
+                echo "${DIM}  Found: $dev${RST}" >&2
+                CANDIDATES="$CANDIDATES $dev"
+            done
+            # Also check da? (USB mass storage on BSD)
+            for dev in /dev/da?; do
+                [ -e "$dev" ] || continue
+                echo "${DIM}  Found: $dev${RST}" >&2
+                CANDIDATES="$CANDIDATES $dev"
             done
             ;;
     esac
-    echo ""
+    
+    # Handle candidates
+    CANDIDATES=$(echo $CANDIDATES | tr ' ' '\n' | grep -v '^$' | sort -u)
+    COUNT=$(echo "$CANDIDATES" | wc -l)
+    if [ "$COUNT" -eq 0 ]; then
+        echo ""
+        return 0
+    fi
+    if [ "$COUNT" -eq 1 ]; then
+        echo "$CANDIDATES"
+        return 0
+    fi
+    # Multiple candidates: ask user
+    echo "  ${YEL}Multiple removable devices found:${RST}" >&2
+    IFS=$'\n'
+    i=1
+    for c in $CANDIDATES; do
+        echo "  $i. $c" >&2
+        i=$((i+1))
+    done
+    printf "  Select device [1-%d]: " "$((i-1))" >&2
+    read -r CHOICE
+    echo "$CANDIDATES" | sed -n "${CHOICE}p"
 }
 
 write_image() {
