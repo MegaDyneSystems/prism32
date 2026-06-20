@@ -2226,42 +2226,71 @@ def _do_git_update(project_dir=None):
         else:
             project_dir = os.path.dirname(os.path.realpath(__file__))
     
-    install_sh = os.path.join(project_dir, "install.sh")
-    git_dir = os.path.join(project_dir, ".git")
+    # Check if this is actually a git repo
+    git_check = subprocess.run("git rev-parse --git-dir", shell=True, capture_output=True, text=True, cwd=project_dir)
     
-    if not os.path.exists(git_dir):
-        # Clone fresh from GitHub
+    if git_check.returncode != 0:
+        # No git repo — clone fresh
         print(f"  {t['warn']}No git repo found at {project_dir}{RST}")
         print(f"  {t['dim']}Cloning from GitHub...{RST}")
         clone_dir = os.path.join(os.path.expanduser("~"), "prism32")
-        if not os.path.exists(clone_dir):
-            clone = subprocess.run(
-                ["git", "clone", "https://github.com/MegaDyneSystems/prism32.git", clone_dir],
-                capture_output=True, text=True
-            )
-            if clone.returncode != 0:
-                print(f"  {t['err']}Clone failed:{RST}\n  {clone.stderr[:300]}")
-                return
-            project_dir = clone_dir
-            install_sh = os.path.join(project_dir, "install.sh")
-        else:
-            project_dir = clone_dir
-            install_sh = os.path.join(project_dir, "install.sh")
+        clone = subprocess.run(
+            ["git", "clone", "https://github.com/MegaDyneSystems/prism32.git", clone_dir],
+            capture_output=True, text=True
+        )
+        if clone.returncode != 0:
+            print(f"  {t['err']}Clone failed:{RST}\n  {clone.stderr[:300]}")
+            return
+        project_dir = clone_dir
     
+    install_sh = os.path.join(project_dir, "install.sh")
     if not os.path.exists(install_sh):
         print(f"  {t['err']}install.sh not found in {project_dir}{RST}")
         return
     
+    # Fetch latest from remote
     print(f"  {t['bright']}Updating Prism32 from {project_dir}...{RST}")
-    pull = subprocess.run("git pull", shell=True, capture_output=True, text=True, cwd=project_dir)
-    if pull.returncode != 0:
-        print(f"  {t['err']}git pull failed:{RST}\n  {pull.stderr[:300]}")
-        return
-    print(f"  {pull.stdout.strip()}")
+    subprocess.run("git fetch origin", shell=True, capture_output=True, text=True, cwd=project_dir)
     
+    # Check for local changes
+    status = subprocess.run("git status --porcelain", shell=True, capture_output=True, text=True, cwd=project_dir)
+    has_local_changes = bool(status.stdout.strip())
+    
+    if has_local_changes:
+        print(f"  {t['warn']}Local changes detected, stashing...{RST}")
+        subprocess.run("git stash", shell=True, capture_output=True, text=True, cwd=project_dir)
+    
+    # Hard reset to origin/main to ensure clean state
+    reset = subprocess.run("git reset --hard origin/main", shell=True, capture_output=True, text=True, cwd=project_dir)
+    if reset.returncode != 0:
+        print(f"  {t['warn']}Reset failed, trying git pull...{RST}")
+        pull = subprocess.run("git pull origin main", shell=True, capture_output=True, text=True, cwd=project_dir)
+        if pull.returncode != 0:
+            print(f"  {t['err']}Both reset and pull failed:{RST}\n  {pull.stderr[:300]}")
+            return
+        print(f"  {pull.stdout.strip()}")
+    else:
+        # Get what changed
+        log = subprocess.run("git log --oneline -3", shell=True, capture_output=True, text=True, cwd=project_dir)
+        print(f"  {t['dim']}Reset to latest. Recent commits:{RST}")
+        for line in log.stdout.strip().split('\n')[:3]:
+            print(f"  {t['dim']}  {line}{RST}")
+    
+    # Run installer with -y
+    c = f'bash "{install_sh}" -y'
     result = subprocess.run(["bash", install_sh, "-y"], capture_output=True, text=True, cwd=project_dir)
     if result.returncode == 0:
-        print(f"  {t['ok']}Update complete. Restart prism32 to use the new version.{RST}")
+        # Check versions
+        try:
+            ver_check = subprocess.run(
+                [sys.executable, os.path.join(os.path.expanduser("~"), ".prism32", "prism32.py"), "--version"],
+                capture_output=True, text=True, timeout=5
+            )
+            ver = ver_check.stdout.strip() if ver_check.returncode == 0 else "unknown"
+        except Exception:
+            ver = "updated"
+        print(f"\n  {t['ok']}Update complete! Version: {ver}{RST}")
+        print(f"  {t['dim']}Restart prism32 to use the new version.{RST}")
     else:
         print(f"  {t['err']}Install failed:{RST}\n  {result.stderr[:500]}")
 
@@ -6549,6 +6578,7 @@ def main():
     parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable live streaming output")
     parser.add_argument("--slow-cpu", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
+    parser.add_argument("--version", "-V", action="store_true", help="Show version and exit")
     parser.add_argument("--temperature", type=float, help="AI temperature (0.0-2.0)")
     parser.add_argument("--goal", "-g", help="Run in goal mode and exit")
     parser.add_argument("--set-timeout", type=int, help="Set command timeout in seconds and exit")
@@ -6557,6 +6587,10 @@ def main():
     parser.add_argument("--harness-scan", action="store_true", help="Scan for external AI harness CLIs, then exit")
     parser.add_argument("--evolve-setup", action="store_true", help="Create evolve docs/baseline/tool scan, then exit")
     args = parser.parse_args()
+
+    if args.version:
+        print("Prism32 v6.8 — MegaDyne Systems")
+        sys.exit(0)
 
     # Auto-load saved config, then CLI args override
     Config.load_config()
