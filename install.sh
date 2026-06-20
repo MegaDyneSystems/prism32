@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  Prism32 — MegaDyne Systems Installer v6.7
+#  Prism32 — MegaDyne Systems Installer v6.8
 #  Idempotent, validated, user-friendly
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -116,7 +116,7 @@ EP_MODELS_FALLBACK=(
 # ═══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${CY}${BLD}  +========================================+${RST}"
-echo -e "${CY}${BLD}  |       Prism32 Installer v6.7           |${RST}"
+echo -e "${CY}${BLD}  |       Prism32 Installer v6.8           |${RST}"
 echo -e "${CY}${BLD}  |   MegaDyne Systems (MDS) Edition       |${RST}"
 echo -e "${CY}${BLD}  +========================================+${RST}"
 echo ""
@@ -528,7 +528,7 @@ if [ -n "${api_key+x}" ]; then
   echo ""
 fi
 
-echo -e "${DIM}  MegaDyne Systems (MDS) — Prism32 v6.7${RST}"
+echo -e "${DIM}  MegaDyne Systems (MDS) — Prism32 v6.8${RST}"
 echo ""
 
 # vim: set ts=2 sw=2 et:
