@@ -7816,12 +7816,12 @@ _IS_OPENROUTER = None
 def build_headers(extra=None):
     global _IS_OPENROUTER
     _IS_OPENROUTER = "openrouter" in Config.API_BASE.lower()
-    h = {"Content-Type": "application/json"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.8"}
     if Config.API_KEY:
         h["Authorization"] = f"Bearer {Config.API_KEY}"
     # OpenRouter-specific headers for rankings
     if _IS_OPENROUTER:
-        h["HTTP-Referer"] = "https://github.com/prism32"
+        h["HTTP-Referer"] = "https://github.com/MegaDyneSystems/prism32"
         h["X-Title"] = "Prism32"
     if extra:
         h.update(extra)
