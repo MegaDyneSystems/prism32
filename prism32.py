@@ -8010,6 +8010,7 @@ def main():
             resp, asked = handle_ask_blocks(resp, history, return_asked=True)
             commands = extract_blocks(resp, 'execute')
             clean = clean_response(resp)
+            was_healed = False
 
             # Heal non-standard tool-call formats if no execute blocks found
             if not commands and not asked:
