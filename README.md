@@ -621,6 +621,119 @@ Automation, skills, promptshards, and evolution:
 /update [dir]         Git pull and reinstall from a local Prism32 repo
 ```
 
+## Block Architecture
+
+Prism32 uses **block architecture** instead of traditional tool-calling. The model writes commands in fenced markdown code blocks, and Prism32 parses, executes, and feeds results back — all through plain chat messages. No `tools` parameter, no JSON schemas, no `tool_calls` array.
+
+### How It Works
+
+The model communicates through three block types:
+
+```text
+```execute
+ls -la && grep "error" /var/log/syslog
+```
+
+This is a command block. Prism32 executes it via the shell and
+feeds the output back as the next user message. The model sees
+the result and continues working.
+
+```ask
+Which interface should I configure?
+```
+
+This is a question block. Prism32 pauses, shows the question to
+the operator, and feeds the answer back. In goal mode, ask blocks
+are stripped and the model is told to run commands instead.
+
+```execute
+df -h
+```
+```execute
+free -m
+```
+```execute
+uname -a
+```
+
+Multiple execute blocks in one response are executed sequentially.
+Each result is appended to history as a separate user message, so
+the model sees all prior results when deciding the next step.
+```
+
+### The Execution Loop
+
+```text
+1. Model response → Prism32 extracts execute blocks
+2. For each block:
+   a. Check if it's a plugin command (/quantum, /extend, /skill-load, etc.)
+   b. If not, execute as shell command via run_cmd()
+   c. Capture output (truncated to 4000 chars)
+   d. Feed result back: "Executed: <cmd>\nResult:\n<output>\nContinue..."
+3. Model sees all results and decides next action
+4. Repeat until model gives final answer with no execute blocks
+```
+
+### Commands Available Inside Execute Blocks
+
+The model can use any shell command plus these Prism32-native commands:
+
+| Command | Purpose |
+|---------|---------|
+| Any shell command | Full bash/POSIX access (the normal path) |
+| `/quantum key:value` | Write to shared agent context |
+| `/quantum` | Read all shared context |
+| `/auto list` | List scheduled automations |
+| `/auto run <id>` | Run an automation |
+| `/skill-list` | List available skills |
+| `/skill-load <name>` | Inject a skill into context |
+| `/shard show` | Show promptshard definition |
+| `/shard deploy` | Spawn a subagent from promptshard |
+| `/harness scan` | Detect external AI harnesses |
+| `/harness delegate <task>` | Launch a super subagent |
+| `/evolve on` | Enable self-repair context |
+| `/extend temp <goal>` | Generate and load a temporary plugin |
+| `/extend permanent <goal>` | Generate and load a persistent plugin |
+| `/update` | Pull latest from GitHub and reinstall |
+| `/memory path` | Show memory file paths |
+| Any plugin command | Auto-discovered and advertised in context |
+
+Operator-only commands (`/provider`, `/config`, `/model`, `/theme`, `/save`, `/load`, `/delegate`, `/spawn`, etc.) cannot be used from execute blocks.
+
+### Tool Call Healing
+
+Models that use native tool-calling formats (GLM-5's `<|tool_calls_section_begin|>`, Qwen's function-call JSON, bare `{"command": "..."}`) are automatically healed:
+
+1. `heal_response()` detects non-standard formats
+2. Converts them to proper `execute` blocks
+3. Strips all leftover markup tags from the displayed text
+4. Shows a "Tool call format healed" status
+5. Appends a reminder: "Use ```execute blocks for commands"
+
+This means Prism32 works with any model — even ones that try to use their native tool-calling format — without configuration.
+
+### Why Block Architecture Is Superior
+
+**Provider-agnostic.** No `tools` parameter in the API request. Works with any OpenAI-compatible endpoint: local llama.cpp, GLM, Qwen, Groq, OpenRouter, Neuralwatt, Anthropic. Zero provider-specific tool schema configuration.
+
+**Self-healing.** Traditional tool-calling breaks if the model emits malformed JSON or uses the wrong envelope. Prism32's healing layer converts any tool-call format to execute blocks automatically. The agent keeps working.
+
+**Multiple commands per turn.** Many APIs limit tool calls to one per message. Execute blocks have no limit — the model can chain `df -h`, `free -m`, and `uname -a` in one response, each executed sequentially with results fed back.
+
+**Mixed prose and commands.** The model writes analysis, commands, and questions in one message. Execute/ask blocks are hidden from the displayed output during streaming, so the user only sees the model's reasoning.
+
+**Cancellable mid-execution.** `run_cmd()` polls for user input every 50ms. Press Escape to kill the running process tree (`SIGTERM`/`SIGKILL` via process groups). Type text to interject a new instruction that becomes the next user message.
+
+**Extensible without schemas.** Adding a new capability is a plugin registration (`registry.register(...)`) or `/extend temp <goal>`. The new command is auto-advertised in the system prompt's context block. No JSON schema, no `tools` array, no provider configuration.
+
+**Full shell access.** One execute block surface gives the model the entire POSIX/Windows shell — pipes, redirects, variables, loops. Traditional tools require a separate function for each operation.
+
+**Cross-agent shared state.** The `/quantum` shared context lets the main agent and subagents exchange key-value data through execute blocks. No provider-managed tool state.
+
+**Token-efficient.** No JSON tool schemas sent on every request. The system prompt is the only recurring token cost. Available commands are dynamically listed in context.
+
+**Lower cognitive load for the model.** The model writes commands the same way it writes prose — fenced code blocks. No structured JSON, no tool IDs, no role management. Just write what you want to run.
+
 ## Goal Mode Examples
 
 Goal mode is for tasks where you want Prism32 to keep working step by step in a loop
