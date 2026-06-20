@@ -5,8 +5,12 @@
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
-# Portable _readlink_f that works on Linux, macOS, and BSD
-_readlink_f() { (python3 -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$1" 2>/dev/null) || (python -c "import os,sys; print(os.path.realpath(sys.argv[1]))" "$1" 2>/dev/null); }
+# Trap for cleanup on interrupt
+_INSTALL_TMPFILES=""
+trap 'rm -f $_INSTALL_TMPFILES 2>/dev/null || true' EXIT INT TERM HUP
+
+# Pre-create runtime dir so log() works before Step 1
+mkdir -p "$HOME/.prism32" 2>/dev/null || true
 
 NAME="prism32"
 # Resolve SRC_DIR from this script's location (works whether cloned to
@@ -31,6 +35,8 @@ AUTO=0
 PY3=""
 if ! command -v python3 &>/dev/null; then
   for py in \
+    /opt/homebrew/bin/python3 \
+    /opt/local/bin/python3 \
     /Library/Frameworks/Python.framework/Versions/*/bin/python3 \
     /usr/pkg/bin/python3.[0-9]* \
     /usr/local/bin/python3 \
@@ -38,7 +44,18 @@ if ! command -v python3 &>/dev/null; then
   ; do
     [ -x "$py" ] && PY3="$py" && break
   done
-  [ -z "${PY3:-}" ] && { echo "Python 3 not found. Install from https://python.org"; exit 1; }
+  if [ -z "${PY3:-}" ]; then
+    _os="$(uname -s)"
+    case "$_os" in
+      Darwin)  echo "Python 3 not found. Install via: brew install python3" ;;
+      FreeBSD) echo "Python 3 not found. Install via: sudo pkg install python3" ;;
+      NetBSD)  echo "Python 3 not found. Install via: pkgin install python311" ;;
+      OpenBSD) echo "Python 3 not found. Install via: pkg_add python3" ;;
+      Linux)   echo "Python 3 not found. Install via your package manager (apt/pacman/dnf/yum)" ;;
+      *)       echo "Python 3 not found. Install from https://python.org" ;;
+    esac
+    exit 1
+  fi
 else
   PY3="python3"
 fi
@@ -59,9 +76,11 @@ if [ "$(uname -s)" = "Darwin" ]; then
   "$PY3" -c "import urllib.request; urllib.request.urlopen('https://google.com', timeout=3)" 2>/dev/null ||
   {
     echo "  macOS SSL certificates need setup."
+    shopt -s nullglob 2>/dev/null || true
     for s in "/Applications/Python 3.*/Install Certificates.command"; do
-      [ -x "$s" ] && "$s" 2>/dev/null && ok "SSL certificates installed" && break
+      [ -x "$s" ] && { "$s" 2>/dev/null && ok "SSL certificates installed" && break; } || true
     done
+    shopt -u nullglob 2>/dev/null || true
     "$PY3" -m pip install --upgrade certifi 2>/dev/null || true
     # Verify
     "$PY3" -c "import urllib.request; urllib.request.urlopen('https://google.com', timeout=3)" 2>/dev/null \
@@ -71,7 +90,7 @@ fi
 
 # Parse --yes / -y flag
 for arg in "$@"; do
-  [ "$arg" = "--yes" ] || [ "$arg" = "-y" ] && AUTO=1
+  if [ "$arg" = "--yes" ] || [ "$arg" = "-y" ]; then AUTO=1; fi
 done
 
 # ── Provider presets ──
@@ -120,9 +139,9 @@ ok "Source file: $SRC_FILE"
 chmod +x "$SRC_FILE" && ok "Made executable"
 
 py_err="$("$PY3" -c "
-import py_compile
-py_compile.compile('$SRC_FILE', doraise=True)
-" 2>&1)" && ok "Python syntax valid" \
+import py_compile, sys
+py_compile.compile(sys.argv[1], doraise=True)
+" "$SRC_FILE" 2>&1)" && ok "Python syntax valid" \
   || { fail "Python syntax error"; echo -e "  ${R}$py_err${RST}"; exit 1; }
 
 # ═══════════════════════════════════════════════════════════════
@@ -136,10 +155,10 @@ echo -e "  ${DIM}User:${RST}    $(whoami)"
 
 if [ ! -w "${PREFIX:-/usr/local}/bin" ]; then
   NEED_ROOT=1
-  if [ "$AUTO" = "0" ] && [ -z "${SU_PASS+x}" ]; then
+  if [ "$AUTO" = "0" ] && [ -z "${SU_PASS+x}" ] && [ -t 0 ]; then
     echo ""
     echo -e "  ${Y}w${RST} Root access required for symlink in /usr/local/bin/"
-    echo -n "  Root password: "; read -rs SU_PASS; echo ""
+    echo -n "  Root password: "; read -rs SU_PASS || true; echo ""
   fi
 fi
 
@@ -187,7 +206,7 @@ _install_wrapper() {
   local target="$1"
   mkdir -p "$(dirname "$target")"
   cat > "$target" << WRAP
-#!/bin/bash
+#!/bin/sh
 exec "$PY3" "$SRC_FILE" "\$@"
 WRAP
   chmod +x "$target"
@@ -201,8 +220,9 @@ if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
   export PATH="$LOCAL_BIN:$PATH"
 elif [ "$NEED_ROOT" = "1" ]; then
   TMP_WRAP="$(mktemp)"
+  _INSTALL_TMPFILES="$_INSTALL_TMPFILES $TMP_WRAP"
   cat > "$TMP_WRAP" << WRAP
-#!/bin/bash
+#!/bin/sh
 exec "$PY3" "$SRC_FILE" "\$@"
 WRAP
   chmod +x "$TMP_WRAP"
@@ -420,18 +440,19 @@ else
   "subagent_model": ""
 }
 JSONEOF
-  "$PY3" -c "import json; json.load(open('$CONFIG_FILE'))" \
+  "$PY3" -c "import json, sys; json.load(open(sys.argv[1]))" "$CONFIG_FILE" \
     && ok "Config written" \
     || { fail "Config JSON invalid"; exit 1; }
+  chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 fi
 
 echo ""
 "$PY3" -c "
-import json
-c = json.load(open('$CONFIG_FILE'))
+import json, sys
+c = json.load(open(sys.argv[1]))
 for k, v in c.items():
     print(f'    ${DIM}{k}:${RST} {v}')
-" 2>/dev/null || true
+" "$CONFIG_FILE" 2>/dev/null || true
 
 # ═══════════════════════════════════════════════════════════════
 #  8. Dependencies
@@ -476,8 +497,6 @@ sub "Sessions:   $SESSIONS_DIR"
 sub "Soul:       $RUNTIME_DIR/soul.md"
 sub "Config:     $CONFIG_FILE"
 sub "Log:        $LOG_FILE"
-
-rm -f "$RUNTIME_DIR/pycheck.tmp" 2>/dev/null || true
 
 # ═══════════════════════════════════════════════════════════════
 #  SUMMARY
