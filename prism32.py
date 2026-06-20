@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.7 - MegaDyne Systems Terminal Agent
+Prism32 v6.8 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -3663,14 +3663,18 @@ def _footer_animate_stop():
 
 def read_footer_input(status_bar):
     """Read one line from the reserved footer with proper arrow key support."""
+    global _footer_reserved
     if not _footer_reserved:
         t = T()
         return input(rl_prompt(f" {t['primary']}prism32>{RST} ")).strip()
-    # Position cursor at the bottom line, then release scroll region
-    # so input() can wrap long prompts to new lines
+    # Release scroll region and position cursor at the bottom line
     t = T()
-    move_to_footer()
-    reset_scroll_region()
+    h = _term_size.lines if _term_size else 24
+    with stdout_lock:
+        _footer_reserved = False
+        if ansi_enabled():
+            sys.stdout.write(f"\x1b[r\x1b[{h};1H\x1b[K")
+            sys.stdout.flush()
     try:
         line = input(rl_prompt(f" {status_bar} {t['primary']}>{RST} "))
     except EOFError:
@@ -4582,7 +4586,7 @@ def banner():
     for line in art:
         print(f"  {line}")
     print(f"{RST}")
-    print(f"{d}  v6.7 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.8 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
