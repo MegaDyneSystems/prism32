@@ -424,6 +424,8 @@ _MODEL_PRICING = {
     "meta-llama/Llama-3-70b": (0.00088, 0.00088),
     # Neuralwatt
     "glm-5.2": (0.0014, 0.0045), "glm-5.2-fast": (0.0014, 0.0045),
+    "glm-5": (0.0014, 0.0045), "glm-5-fast": (0.0007, 0.0022),
+    "devstral": (0.0002, 0.0005), "devstral small": (0.0001, 0.0002),
     "moonshotai/Kimi-K2.5": (0.0005, 0.0026), "kimi-k2.5-fast": (0.0005, 0.0026),
     # OpenRouter fallback
     "deepseek/deepseek-v4-flash": (0.00014, 0.00028),
@@ -2345,7 +2347,7 @@ class Platform:
     LINUX = _legacy_plat.startswith("linux")
     MACOS = _legacy_plat == 'darwin'
     WINDOWS = _legacy_plat == 'win32'
-    BSD = 'bsd' in _legacy_plat or _legacy_plat.startswith('netbsd')
+    BSD = 'bsd' in _legacy_plat or _legacy_plat.startswith('netbsd') or _legacy_plat.startswith('dragonfly')
     IRIX = _legacy_plat.startswith('irix')
     HPUX = _legacy_plat.startswith('hp-ux') or _legacy_plat.startswith('hpux')
     AIX = _legacy_plat.startswith('aix')
@@ -2359,7 +2361,7 @@ class Platform:
     ZOS = _legacy_plat.startswith('zos')
     IBM_I = _legacy_plat.startswith('os400') or _legacy_plat.startswith('as400')
     OPENVMS = 'openvms' in _legacy_plat or _legacy_plat.startswith('vms')
-    TERMUX = LINUX and os.environ.get('TERMUX_VERSION', '') != ''
+    TERMUX = LINUX and (os.environ.get('TERMUX_VERSION', '') != '' or os.path.isdir('/data/data/com.termux'))
     ANDROID = TERMUX or os.environ.get('ANDROID_ROOT', '') != ''
 
     @staticmethod
@@ -2656,6 +2658,10 @@ class Platform:
             elif Platform.MACOS:
                 return Platform._run_cmd(['sysctl', '-n', 'machdep.cpu.brand_string'])
             elif Platform.WINDOWS:
+                result = Platform._run_cmd(['powershell', '-NoProfile', '-Command',
+                    '(Get-CimInstance Win32_Processor).Name'])
+                if result and result.strip():
+                    return result.strip()
                 result = Platform._run_cmd(['wmic', 'cpu', 'get', 'name'])
                 lines = result.strip().split('\n')
                 if len(lines) > 1:
@@ -2671,7 +2677,7 @@ class Platform:
             elif Platform.HPUX:
                 out = Platform._run_cmd(['machinfo'])
                 for line in out.split('\n'):
-                    if 'processor' in line.lower() and 'Intel' in line or 'model' in line.lower():
+                    if ('processor' in line.lower() and 'Intel' in line) or 'model' in line.lower():
                         return line.strip()
                 return Platform._run_cmd(['ioscan', '-kfC', 'processor']) or "Unknown CPU"
             elif Platform.SOLARIS:
@@ -2706,9 +2712,13 @@ class Platform:
             elif Platform.MACOS:
                 return int(Platform._run_cmd(['sysctl', '-n', 'hw.memsize']) or '0') // (1024 * 1024)
             elif Platform.WINDOWS:
+                result = Platform._run_cmd(['powershell', '-NoProfile', '-Command',
+                    '(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize'])
+                if result and result.strip().isdigit():
+                    return int(result.strip()) // 1024
                 result = Platform._run_cmd(['wmic', 'OS', 'get', 'TotalVisibleMemorySize'])
                 lines = result.strip().split('\n')
-                if len(lines) > 1:
+                if len(lines) > 1 and lines[1].strip().isdigit():
                     return int(lines[1].strip()) // 1024
             elif Platform.BSD:
                 return int(Platform._run_cmd(['sysctl', '-n', 'hw.physmem']) or '0') // (1024 * 1024)
@@ -2777,11 +2787,17 @@ class Platform:
                 import re, time
                 result = Platform._run_cmd(['sysctl', '-n', 'kern.boottime'])
                 m = re.search(r'sec\s*=\s*(\d+)', result)
-                boot_time = int(m.group(1)) if m else 0
-                secs = time.time() - boot_time
+                if m:
+                    boot_time = int(m.group(1))
+                    secs = time.time() - boot_time
+                else:
+                    return "N/A"
             elif Platform.AIX:
                 import re
                 out = Platform._run_cmd(['uptime'])
+                m = re.search(r'up\s+(\d+)\s+days?,\s+(\d+):(\d+)', out)
+                if m:
+                    return f"{m.group(1)}d {m.group(2)}h"
                 m = re.search(r'up\s+(\d+)\s+days?', out)
                 if m:
                     return f"{m.group(1)}d 0h"
@@ -2831,18 +2847,23 @@ class Platform:
                     return f"{m.group(1)}d 0h"
                 return "N/A"
             elif Platform.WINDOWS:
-                out = Platform._run_cmd(['wmic', 'os', 'get', 'lastbootuptime', '/value'])
-                for line in out.split('\n'):
-                    if line.lower().startswith('lastbootuptime='):
-                        stamp = line.split('=', 1)[1].strip()[:14]
-                        try:
-                            boot = datetime.strptime(stamp, '%Y%m%d%H%M%S')
-                            secs = (datetime.now() - boot).total_seconds()
-                            break
-                        except Exception:
-                            return "N/A"
+                out = Platform._run_cmd(['powershell', '-NoProfile', '-Command',
+                    '[math]::Round((Get-CimInstance Win32_OperatingSystem).LastBootUpTime - (Get-Date)).TotalSeconds * -1'])
+                if out and out.strip().replace('.', '').isdigit():
+                    secs = float(out.strip())
                 else:
-                    return "N/A"
+                    out = Platform._run_cmd(['wmic', 'os', 'get', 'lastbootuptime', '/value'])
+                    for line in out.split('\n'):
+                        if line.lower().startswith('lastbootuptime='):
+                            stamp = line.split('=', 1)[1].strip()[:14]
+                            try:
+                                boot = datetime.strptime(stamp, '%Y%m%d%H%M%S')
+                                secs = (datetime.now() - boot).total_seconds()
+                                break
+                            except Exception:
+                                return "N/A"
+                    else:
+                        return "N/A"
             else:
                 return "N/A"
 
@@ -5133,7 +5154,7 @@ def run_cmd(cmd, timeout=None):
     if timeout is None:
         timeout = Config.CMD_TIMEOUT
     try:
-        if Config.ROOT_PASS and re.search(r'\bsu\b|\bsudo\b', cmd):
+        if Config.ROOT_PASS and re.match(r'\s*(sudo|su)\b', cmd) and not Platform.WINDOWS:
             return _pty_su_root(cmd, timeout)
         if _can_cancel_foreground_input():
             clear_agent_cancel()
@@ -6290,7 +6311,7 @@ def cmd_procs():
         out = run_cmd("ps aux | head -12")
     box("TOP PROCESSES", out, "primary")
     if Platform.WINDOWS:
-        mem = run_cmd("wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /Value")
+        mem = run_cmd('powershell -NoProfile -Command "$os = Get-CimInstance Win32_OperatingSystem; Write-Output (\"Free: \" + [math]::Round($os.FreePhysicalMemory/1024,1) + \" MB / Total: \" + [math]::Round($os.TotalVisibleMemorySize/1024,1) + \" MB\")"')
         if not mem.strip():
             mem = "Use Task Manager or systeminfo for detailed memory usage."
     elif Platform.LINUX:
