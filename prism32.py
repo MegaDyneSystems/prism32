@@ -3662,16 +3662,24 @@ def _footer_animate_stop():
         _FOOTER_ANIMATOR.join(timeout=1.0)
 
 def read_footer_input(status_bar):
-    """Read one line from the reserved footer without confusing readline."""
+    """Read one line from the reserved footer with proper arrow key support."""
     if not _footer_reserved:
         t = T()
         return input(rl_prompt(f" {t['primary']}prism32>{RST} ")).strip()
-    draw_footer(status_bar)
-    line = sys.stdin.readline()
-    if line == "":
-        raise EOFError
-    clear_footer()
-    return line.rstrip('\r\n').strip()
+    # Temporarily release scroll region so input() can use the full terminal
+    # (including wrapping to new lines for long prompts)
+    t = T()
+    reset_scroll_region()
+    try:
+        line = input(rl_prompt(f" {status_bar} {t['primary']}>{RST} "))
+    except EOFError:
+        set_scroll_region()
+        raise
+    except KeyboardInterrupt:
+        set_scroll_region()
+        raise
+    set_scroll_region()
+    return line.strip()
 
 # ── Interjection (type while AI streams) ─────────────────────
 
