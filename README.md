@@ -1,4 +1,4 @@
-# Prism32 v6.7
+# Prism32 v6.8
 
 Prism32 is a self-extending, self-repairing, self-evolving program with a AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do. it can turn any PC or low end hardware SBC or laptop etc into a robotic assistant that can control external peripherals and can also run on robots and IOT devices with shell and python on bare metal. Prism32 is the first polymorphic AI assistant and coding harness
 
@@ -26,6 +26,22 @@ Run directly without install:
 git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
 ```
 
+Install on OpenWrt router:
+
+```sh
+wget -O /tmp/install.sh https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/openwrt-install.sh
+sh /tmp/install.sh                # interactive
+sh /tmp/install.sh -y            # auto mode
+sh /tmp/install.sh /mnt/usb      # install to USB drive
+```
+
+Portable install to floppy/USB/CD:
+
+```sh
+python3 make_floppy.py            # build 1.44MB image with your config
+sh floppy-install.sh              # write to removable device
+```
+
 Most-used first commands inside Prism32:
 
 ```text
@@ -34,6 +50,7 @@ Most-used first commands inside Prism32:
 /provider openrouter  Switch provider
 /provider key KEY     Set API key
 /model                Browse/select models
+/cost                 Show session token usage and cost
 /config               Show active config
 /goal <task>          Autonomous multi-step mode
 /bash <cmd>           Run a shell command manually
@@ -371,9 +388,17 @@ Useful controls:
 - Escape: stop current agent work. This covers streaming, non-streaming API waits, foreground commands, and goal mode.
 - Up/Down while interjecting: cycle previous interjections.
 - Left/Right, Home, End: edit the interjection buffer.
-- Ctrl-C: terminate or interrupt the current terminal operation.
+- Delete (forward): delete the character after the cursor.
+- Ctrl-A: move cursor to beginning (Home).
+- Ctrl-E: move cursor to end.
+- Ctrl-D: forward delete.
+- Ctrl-K: kill to end of line.
+- Ctrl-U: kill to beginning of line.
+- Ctrl-W: delete word backward.
+- Ctrl-C: cancel agent work or interrupt.
+- Ctrl-L: clear/redraw.
 
-Arrow keys are handled as escape sequences, so normal arrow-key editing does not trigger bare-Escape cancellation.
+Arrow keys are handled as escape sequences, so normal arrow-key editing does not trigger bare-Escape cancellation. Double-Escape also cancels.
 
 ## Installers
 
@@ -383,9 +408,22 @@ Arrow keys are handled as escape sequences, so normal arrow-key editing does not
 - Creates a wrapper command named `prism32` in `${PREFIX:-/usr/local}/bin` when writable.
 - Falls back to `~/.local/bin/prism32` during `-y` user-local installs without root.
 - Creates `~/.prism32/`, `sessions`, `plugins`, `skills`, and `evolve` directories.
+- Copies `prism32.py` to `~/.prism32/prism32.py` (works after removable media is ejected).
+- Copies bundled default plugins (e.g. `web_scraper.py`) to `~/.prism32/plugins/`.
 - Prompts for provider, endpoint, model, and API key when running interactively.
 - Tests model API reachability when possible.
 - Runs `prism32.py --setup-runtime` to create startup memory, harness scan, and evolve baseline files.
+
+`openwrt-install.sh` performs an OpenWrt router install:
+
+- Pure POSIX sh (busybox ash compatible).
+- Auto-detects `opkg` (OpenWrt <24) or `apk` (OpenWrt >=24).
+- Bootstraps HTTPS support (`libustream-mbedtls` + `ca-bundle`).
+- Installs `python3-light` + `python3-openssl`.
+- Low-flash detection: suggests USB install below 8 MB free.
+- USB/SD install support: `sh openwrt-install.sh /mnt/usb`.
+- Downloads `prism32.py` from GitHub if not present locally.
+- Router-tuned config: lower `max_history` (500), `stream: false`.
 
 `install.ps1` performs a Windows user-local install:
 
@@ -429,6 +467,14 @@ Set a custom endpoint:
 /savecfg
 ```
 
+Track session cost:
+
+```text
+/cost                 Show input/output tokens and dollar cost for this session
+```
+
+Prism32 captures token usage from both streaming and non-streaming API responses. Cost is calculated using per-model pricing for 20+ models (OpenAI, Anthropic, Groq, Together, Neuralwatt, OpenRouter). Local models show $0.0000. The running cost is shown live in the status bar as `$X.XXXX`.
+
 Browse/select models for the current provider:
 
 ```text
@@ -446,6 +492,7 @@ The built-in provider registry contains:
 - `groq`: `https://api.groq.com/openai/v1`.
 - `together`: `https://api.together.xyz/v1`.
 - `openrouter`: `https://openrouter.ai/api/v1`.
+- `neuralwatt`: `https://api.neuralwatt.com/v1`.
 - `custom`: operator-specified.
 
 Prism32 sends OpenAI-style `/chat/completions` requests. Providers work best when they expose an OpenAI-compatible API surface. For providers with native non-OpenAI APIs, use a compatible proxy or gateway.
@@ -476,8 +523,11 @@ AI and task execution:
 /stream on|off        Toggle streamed responses
 /temperature <0-2>    Set model temperature
 /thinking off|low|medium|high
+                      Set reasoning effort (saves to config)
 /timeout <seconds>    Set shell command timeout
-/maxsteps <n>         Set goal-mode step limit
+/maxsteps <n>         Set goal-mode step limit (default: 1000)
+/cost                 Show session token usage and dollar cost
+/usage                Show API usage/cost (OpenRouter)
 /extend <goal>        AI-generate/load a temporary plugin
 /extend permanent <g> AI-generate/load a persistent plugin
 /extend prompt        Print the pasteable plugin prompt
@@ -999,7 +1049,7 @@ Use `/config`, `/savecfg`, and `/loadcfg` rather than editing JSON while Prism32
 
 ## Themes
 
-Prism32 registers 31 themes, including phosphor, amber, cyan, vapor, nord, solarized, neon, retro, ice, ocean, sunset, forest, plasma, clear, glass, ghost, smoke, paper, ink, daylight, slate, synthcity, outrun, laserdisc, vapordark, chromecrt, sgi, dec, monoamber, iris, and hpterm.
+Prism32 registers 32 themes, including phosphor, amber, cyan, vapor, nord, solarized, neon, retro, ice, ocean, sunset, forest, plasma, clear, glass, ghost, smoke, paper, ink, daylight, slate, synthcity, outrun, laserdisc, vapordark, chromecrt, sgi, dec, monoamber, iris, hpterm, and ember.
 
 Cycle themes:
 
@@ -1017,14 +1067,56 @@ For old terminals, prefer the 16-color compatible themes such as `sgi`, `dec`, `
 
 ## Floppy And Removable Media
 
-The project includes tooling to build a FAT12 floppy image:
+The project includes tooling to build a FAT12 floppy disk image that bundles Prism32 with your configuration, API keys, plugins, and memory:
 
 ```sh
-python3 make_floppy.py
-sh floppy-install.sh /tmp/opencode/prism32_floppy.img
+python3 make_floppy.py                    # build image to /tmp/prism32_floppy.img
+python3 make_floppy.py --write            # build + write to detected removable device
+python3 make_floppy.py --write /dev/sdc   # write to specific device
+sh floppy-install.sh                      # auto-detect and write
 ```
 
-This is useful for removable media, virtual floppy images, and legacy bootstrapping. The core app is small enough to fit comfortably on a 1.44 MB image, but the target machine still needs Python 3.7+.
+The floppy image includes:
+- `prism32.py`, `install.sh`, `README.md`, `LICENSE`, `pyproject.toml`
+- Your `config.json` (with API keys, model, provider — copied automatically)
+- Your `memory.json`, `startup_memory.md`, `soul.md`, `harnesses.json`, `promptshard.md`
+- Your plugins (e.g. `web_scraper.py`)
+
+Insert the media on any machine with Python 3.7+, mount it, and run:
+
+```sh
+mount /dev/sdX /mnt/floppy
+cd /mnt/floppy && sh AUTORUN.SH
+```
+
+The installer copies `prism32.py` to `~/.prism32/` locally, so the media can be ejected after install. Your configuration, plugins, and memory are all preserved. Total image size: ~400 KB, fits easily on 1.44 MB floppy with 68% free.
+
+## OpenWrt Router Install
+
+One-click installer for OpenWrt routers (pure POSIX sh, busybox ash compatible):
+
+```sh
+# Interactive (prompts for provider, API key)
+wget -O /tmp/install.sh http://your-server/openwrt-install.sh
+sh /tmp/install.sh
+
+# Auto mode (no prompts)
+sh /tmp/install.sh -y
+
+# Install to USB (for routers with low flash)
+sh /tmp/install.sh /mnt/usb
+```
+
+The OpenWrt installer:
+- Auto-detects `opkg` (OpenWrt <24) or `apk` (OpenWrt >=24)
+- Bootstraps HTTPS support (`libustream-mbedtls` + `ca-bundle`)
+- Installs `python3-light` + `python3-openssl` (minimal footprint)
+- Low-flash detection: warns and suggests USB install below 8 MB free
+- USB/SD install support: installs Python + Prism32 to external storage
+- Downloads `prism32.py` from GitHub if not present locally
+- Router-tuned config: lower `max_history` (500), `max_tokens` (4096), `stream: false`
+- Creates `/etc/profile.d/prism32.sh` for USB PATH setup
+- Works on 4 MB+ flash (with USB), 32 MB+ RAM
 
 ## Safety Notes
 
