@@ -205,9 +205,12 @@ header "Step 4/9 - Installing"
 _install_wrapper() {
   local target="$1"
   mkdir -p "$(dirname "$target")"
+  mkdir -p "$RUNTIME_DIR"
+  local local_py="$RUNTIME_DIR/prism32.py"
+  cp "$SRC_FILE" "$local_py" && ok "Copied prism32.py to $RUNTIME_DIR"
   cat > "$target" << WRAP
 #!/bin/sh
-exec "$PY3" "$SRC_FILE" "\$@"
+exec "$PY3" "$local_py" "\$@"
 WRAP
   chmod +x "$target"
 }
@@ -219,11 +222,13 @@ if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
   ok "Wrapper: $LOCAL_BIN/$NAME"
   export PATH="$LOCAL_BIN:$PATH"
 elif [ "$NEED_ROOT" = "1" ]; then
+  mkdir -p "$RUNTIME_DIR"
+  cp "$SRC_FILE" "$RUNTIME_DIR/prism32.py" 2>/dev/null || true
   TMP_WRAP="$(mktemp)"
   _INSTALL_TMPFILES="$_INSTALL_TMPFILES $TMP_WRAP"
   cat > "$TMP_WRAP" << WRAP
 #!/bin/sh
-exec "$PY3" "$SRC_FILE" "\$@"
+exec "$PY3" "$RUNTIME_DIR/prism32.py" "\$@"
 WRAP
   chmod +x "$TMP_WRAP"
   root cp "$TMP_WRAP" "$BIN" && root chmod 755 "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; rm -f "$TMP_WRAP"; exit 1; }
@@ -433,7 +438,7 @@ else
   "max_tokens": 8192,
   "cmd_timeout": 600,
   "timeout": 120,
-  "stream": true,
+  "stream": false,
   "debug": false,
   "no_boot": false,
   "max_memory_ctx": 1024,

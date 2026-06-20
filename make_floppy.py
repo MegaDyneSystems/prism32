@@ -5,18 +5,17 @@ Can be written to USB floppy drives, SD cards, or USB flash drives.
 
 Usage:
   python3 make_floppy.py                    # build image to /tmp
-  python3 make_floppy.py --write            # build + write to detected device
-  python3 make_floppy.py --write /dev/sdc   # build + write to specific device
-   python3 make_floppy.py -o floppy.img              # build to custom path
-   python3 make_floppy.py --format 525-hd            # 5.25" high-density (1.2MB)
-   python3 make_floppy.py --format 525-double        # 5.25" double-density (360KB)
-   python3 make_floppy.py --format 35-hd             # 3.5" high-density (1.44MB, default)
+  python3 make_floppy.py --write             # build + write to detected device
+  python3 make_floppy.py --write /dev/sdc    # build + write to specific device
+  python3 make_floppy.py -o floppy.img       # build to custom path
+  python3 make_floppy.py --format 525-hd     # 5.25" high-density (1.2MB)
+  python3 make_floppy.py --format 35-hd      # 3.5" high-density (1.44MB, default)
 """
 import os, sys, struct, time, subprocess, platform
 
 # Auto-detect project directory
 PRISM32_DIR = os.path.dirname(os.path.abspath(__file__))
-OUTPUT_IMG = "/tmp/opencode/prism32_floppy.img"
+OUTPUT_IMG = os.path.join("/tmp", "prism32_floppy.img")
 
 # Floppy format presets
 FLOPPY_FORMATS = {
@@ -73,14 +72,33 @@ FILES = [
     ("prism32.py",  os.path.join(PRISM32_DIR, "prism32.py")),
     ("install.sh",  os.path.join(PRISM32_DIR, "install.sh")),
     ("README.md",   os.path.join(PRISM32_DIR, "README.md")),
+    ("LICENSE",     os.path.join(PRISM32_DIR, "LICENSE")),
+    ("pyproject.toml", os.path.join(PRISM32_DIR, "pyproject.toml")),
+]
+
+# Bundle user configuration from ~/.prism32/ if available
+_RUNTIME_DIR = os.path.join(os.path.expanduser("~"), ".prism32")
+_USER_BUNDLE_FILES = [
+    ("CONFIG.JSON",    os.path.join(_RUNTIME_DIR, "config.json")),
+    ("MEMORY.JSON",    os.path.join(_RUNTIME_DIR, "memory.json")),
+    ("STARTUP.MD",     os.path.join(_RUNTIME_DIR, "startup_memory.md")),
+    ("SOUL.MD",        os.path.join(_RUNTIME_DIR, "soul.md")),
+    ("HARNESSES.JSON", os.path.join(_RUNTIME_DIR, "harnesses.json")),
+    ("PROMPTSHARD.MD", os.path.join(_RUNTIME_DIR, "promptshard.md")),
+]
+
+# Bundle plugins from repo and user dir
+_PLUGIN_DIRS = [
+    os.path.join(PRISM32_DIR, "plugins"),
+    os.path.join(_RUNTIME_DIR, "plugins"),
 ]
 
 # Autorun script stored as a file on the floppy
 AUTORUN = b"""#!/bin/sh
 echo ""
 echo "  ==========================================="
-echo "   Prism32 v6.7 - MegaDyne Systems"
-echo "   Floppy Disk Installer"
+echo "   Prism32 v6.8 - MegaDyne Systems"
+echo "   Portable Floppy Installer"
 echo "  ==========================================="
 echo ""
 echo "  Installing Prism32 to this system..."
@@ -89,9 +107,23 @@ if [ -f install.sh ]; then
     sh install.sh
 else
     SRC="$(dirname "$0")"
-    cp "$SRC/prism32.py" ~/.local/bin/prism32 2>/dev/null
-    install -m 755 "$SRC/prism32.py" ~/.local/bin/prism32
-    echo "  Installed."
+    mkdir -p ~/.local/bin ~/.prism32/plugins ~/.prism32/sessions
+    cp "$SRC/prism32.py" ~/.prism32/prism32.py
+    cat > ~/.local/bin/prism32 << 'WRAPPER'
+#!/bin/sh
+exec python3 "$HOME/.prism32/prism32.py" "$@"
+WRAPPER
+    chmod +x ~/.local/bin/prism32
+    # Copy bundled user config if present
+    for f in CONFIG.JSON MEMORY.JSON STARTUP.MD SOUL.MD; do
+        [ -f "$SRC/$f" ] && cp "$SRC/$f" ~/.prism32/$(echo "$f" | tr 'A-Z' 'a-z') 2>/dev/null
+    done
+    # Copy plugins if present
+    for p in "$SRC/"*.PY; do
+        [ -f "$p" ] && cp "$p" ~/.prism32/plugins/ 2>/dev/null
+    done
+    echo "  Installed to ~/.prism32/prism32.py"
+    echo "  Run: ~/.local/bin/prism32"
 fi
 echo ""
 echo "  Run 'prism32' to start."
@@ -139,7 +171,7 @@ def build_boot_sector():
     struct.pack_into('<I', bs, 39, int(time.time()) & 0xFFFFFFFF)
     bs[43:54] = (VOLUME_LABEL + "       ")[:11].encode()
     bs[54:62] = b'FAT12   '
-    msg = b'Prism32 v6.7 - Boot from HD' + b'\x00' * 16
+    msg = b'Prism32 v6.8 by MegaDyne Systems' + b'\x00' * 4
     bs[62:62+len(msg)] = msg
     bs[510:512] = b'\x55\xAA'
     return bytes(bs)
@@ -204,6 +236,25 @@ def build(fmt_name="35-hd"):
         name_data.append((disp_name, data))
         print(f"  + {disp_name} ({len(data)} bytes)")
 
+    # Add user config files if they exist
+    for disp_name, src_path in _USER_BUNDLE_FILES:
+        if os.path.exists(src_path):
+            with open(src_path, 'rb') as f:
+                data = f.read()
+            name_data.append((disp_name, data))
+            print(f"  + {disp_name} ({len(data)} bytes) [user config]")
+
+    # Add plugins from repo and user dirs
+    for pdir in _PLUGIN_DIRS:
+        if os.path.isdir(pdir):
+            for fn in sorted(os.listdir(pdir)):
+                if fn.endswith('.py') and fn != '__init__.py':
+                    src = os.path.join(pdir, fn)
+                    with open(src, 'rb') as f:
+                        data = f.read()
+                    name_data.append((fn.upper(), data))
+                    print(f"  + {fn} ({len(data)} bytes) [plugin]")
+
     # Add autorun as a file
     name_data.append(("autorun.sh", AUTORUN))
     print(f"  + autorun.sh ({len(AUTORUN)} bytes)")
@@ -229,6 +280,12 @@ def build(fmt_name="35-hd"):
             ext = ''
 
         clusters_needed = (len(data) + BYTES_PER_SECTOR - 1) // BYTES_PER_SECTOR
+
+        if clusters_needed == 0:
+            # Empty file: no clusters allocated, first_cluster = 0
+            file_entries.append((data, base, ext, 0, 0))
+            print(f"  -> {disp_name}: empty file (0 sectors)")
+            continue
 
         # Find contiguous free clusters
         start = None
@@ -340,12 +397,13 @@ def detect_removable():
                     out = subprocess.check_output(
                         ["diskutil", "info", dev], stderr=subprocess.STDOUT
                     ).decode()
-                    if "Removable" in out or "External" in out:
+                    if "Ejectable: Yes" in out:
                         return dev
                 except (subprocess.CalledProcessError, OSError):
                     pass
     elif system in ("NetBSD", "OpenBSD", "FreeBSD"):
-        for dev in (f"/dev/rsd{i}c" for i in range(0, 4)):
+        # Safe: only check floppy drives and USB mass storage
+        for dev in ["/dev/fd0", "/dev/fd1", "/dev/da0", "/dev/da1"]:
             if os.path.exists(dev):
                 return dev
     return None
@@ -412,8 +470,19 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     globals()['OUTPUT_IMG'] = args.output
-    build(fmt_name=args.format)
+    try:
+        ok = build(fmt_name=args.format)
+        if not ok:
+            sys.exit(1)
+    except Exception as e:
+        print(f"Build failed: {e}")
+        sys.exit(1)
 
     if args.write:
         device = args.write if isinstance(args.write, str) else None
-        write_to_device(OUTPUT_IMG, device)
+        try:
+            if not write_to_device(OUTPUT_IMG, device):
+                sys.exit(1)
+        except Exception as e:
+            print(f"Write failed: {e}")
+            sys.exit(1)
