@@ -4961,9 +4961,6 @@ def _try_plugin_cmd(c, history=None):
             write_promptshard(shard)
             return "Shard marked complete."
         return f"Shard subcommand not available from execute blocks: {sub}"
-    if cmd_name in ('/update', 'update'):
-        _do_git_update(cmd_args.strip() if cmd_args else None)
-        return "Update command issued. Check output."
     if cmd_name in ('/memory', 'memory'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "startup"
         if sub in ("path", "paths"):
@@ -5362,10 +5359,9 @@ Commands you can use inside execute blocks:
 - /harness scan, /harness context, /harness path (detect external AI CLIs).
 - /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
 - /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
-- /update [dir] (git pull and reinstall from local project directory).
 - /memory path, /memory paths (locate memory files).
 - Any plugin-registered command listed in context (see Available plugin commands).
-Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /memory edit, /delegate, /spawn, /subagents, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, and other session/config/operator commands are operator-side only and do not work from execute blocks.
+Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /delegate, /spawn, /subagents, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, and other session/config/operator commands are operator-side only and do not work from execute blocks.
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
