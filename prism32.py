@@ -3912,23 +3912,24 @@ def read_footer_input(status_bar):
     if not _footer_reserved:
         t = T()
         return input(rl_prompt(f" {t['primary']}prism32>{RST} ")).strip()
-    # Release scroll region and position cursor at the bottom line
     t = T()
-    h = _term_size.lines if _term_size else 24
+    # Clear footer and position cursor there for input.
+    # Don't release/re-set scroll region — that causes visual glitches.
     with stdout_lock:
-        _footer_reserved = False
-        if ansi_enabled():
-            sys.stdout.write(f"\x1b[r\x1b[{h};1H\x1b[K")
+        if ansi_enabled() and _term_size:
+            sys.stdout.write(f"\x1b[{_term_size.lines};1H\x1b[K")
             sys.stdout.flush()
     try:
         line = input(rl_prompt(f" {status_bar} {t['primary']}>{RST} "))
-    except EOFError:
-        set_scroll_region()
+    except (EOFError, KeyboardInterrupt):
+        with stdout_lock:
+            draw_footer(build_status_bar())
         raise
-    except KeyboardInterrupt:
-        set_scroll_region()
-        raise
-    set_scroll_region()
+    # Clear the footer line after input
+    with stdout_lock:
+        if ansi_enabled() and _term_size:
+            sys.stdout.write(f"\x1b[{_term_size.lines};1H\x1b[K")
+            sys.stdout.flush()
     return line.strip()
 
 # ── Interjection (type while AI streams) ─────────────────────
