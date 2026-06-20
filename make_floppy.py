@@ -103,25 +103,26 @@ echo "  ==========================================="
 echo ""
 echo "  Installing Prism32 to this system..."
 echo ""
+SRC="$(dirname "$0")"
+# Pre-copy user config so install.sh can merge instead of prompting
+mkdir -p ~/.prism32/plugins ~/.prism32/sessions
+for f in CONFIG.JSON MEMORY.JSON STARTUP.MD SOUL.MD HARNESSES.JSON PROMPTSHARD.MD; do
+    [ -f "$SRC/$f" ] && cp "$SRC/$f" ~/.prism32/$(echo "$f" | tr 'A-Z' 'a-z') 2>/dev/null
+done
+# Copy bundled plugins
+for p in "$SRC/"*.PY; do
+    [ -f "$p" ] && [ "$(basename "$p")" != "PRISM32.PY" ] && cp "$p" ~/.prism32/plugins/ 2>/dev/null
+done
 if [ -f install.sh ]; then
     sh install.sh
 else
-    SRC="$(dirname "$0")"
-    mkdir -p ~/.local/bin ~/.prism32/plugins ~/.prism32/sessions
+    mkdir -p ~/.local/bin
     cp "$SRC/prism32.py" ~/.prism32/prism32.py
     cat > ~/.local/bin/prism32 << 'WRAPPER'
 #!/bin/sh
 exec python3 "$HOME/.prism32/prism32.py" "$@"
 WRAPPER
     chmod +x ~/.local/bin/prism32
-    # Copy bundled user config if present
-    for f in CONFIG.JSON MEMORY.JSON STARTUP.MD SOUL.MD; do
-        [ -f "$SRC/$f" ] && cp "$SRC/$f" ~/.prism32/$(echo "$f" | tr 'A-Z' 'a-z') 2>/dev/null
-    done
-    # Copy plugins if present
-    for p in "$SRC/"*.PY; do
-        [ -f "$p" ] && cp "$p" ~/.prism32/plugins/ 2>/dev/null
-    done
     echo "  Installed to ~/.prism32/prism32.py"
     echo "  Run: ~/.local/bin/prism32"
 fi
