@@ -6314,6 +6314,7 @@ def main():
         Config.AUTO_SAVE_INTERVAL = 0
     if args.api_key:
         Config.API_KEY = args.api_key
+        Config.save_config()
     if args.theme:
         Config.THEME = args.theme
         Config.save_config()
