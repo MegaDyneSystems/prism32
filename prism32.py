@@ -2971,39 +2971,40 @@ class Config:
         # Pattern -> context window in tokens (used for history trimming)
         "deepseek/deepseek-v4": 262144,
         "deepseek/deepseek-chat": 65536,
-        "qwen": 131072,
-        "qwen3": 131072,
+        "qwen": 131072, "qwen3": 131072, "qwen3.5": 131072,
         "claude": 200000,
-        "gpt-4": 128000,
-        "gpt-4o": 128000,
-        "gpt-4-turbo": 128000,
-        "gpt-3.5": 16385,
-        "llama": 131072,
-        "llama3": 131072,
-        "mistral": 32768,
-        "mixtral": 32768,
+        "gpt-4o": 128000, "gpt-4": 128000, "gpt-4-turbo": 128000,
+        "gpt-3.5": 16385, "o1": 200000, "o3": 200000,
+        "llama": 131072, "llama3": 131072,
+        "mistral": 32768, "mixtral": 32768, "devstral": 131072,
         "command-r": 131072,
-        "gemini": 1048576,
-        "gemma": 8192,
+        "gemini": 1048576, "gemma": 8192,
         "phi": 131072,
+        "kimi": 262144,
+        "glm-5": 1048576, "glm": 1048576,
+        "nemotron": 1000000,
     }
 
     # Computed: context budget = min(model_window, MAX_CONTEXT_TOKENS)
-    MAX_CONTEXT_TOKENS = 220000  # user override
+    MAX_CONTEXT_TOKENS = 0  # 0 = auto-detect from model (no hard cap)
 
     @staticmethod
     def resolve_context_window(model_name=None):
         """Return the safe context budget for the given model.
-        Uses MAX_CONTEXT_TOKENS override if set, otherwise auto-detects from model name."""
-        if Config.MAX_CONTEXT_TOKENS != 220000:
-            return min(Config.MAX_CONTEXT_TOKENS, 220000)
+        Uses MAX_CONTEXT_TOKENS override if set (>0), otherwise auto-detects from model name."""
         model = model_name or Config.MODEL or ""
         model_lower = model.lower()
+        # Auto-detect from model name
         for pattern, window in sorted(Config.MODEL_CONTEXT_MAP.items(), key=lambda x: -len(x[0])):
             if pattern in model_lower:
-                budget = int(window * 0.85)  # 15% headroom for response
+                budget = int(window * 0.80)  # 20% headroom for response + system prompt
+                if Config.MAX_CONTEXT_TOKENS > 0:
+                    return min(Config.MAX_CONTEXT_TOKENS, budget)
                 return budget
-        return 220000  # fallback
+        # User override with no model match
+        if Config.MAX_CONTEXT_TOKENS > 0:
+            return Config.MAX_CONTEXT_TOKENS
+        return 176000  # fallback (220K * 0.80)
 
     PROVIDER = "local"  # Current provider name
     DEBUG = False  # Debug logging enabled
@@ -3121,11 +3122,66 @@ def estimate_tokens(text):
 def context_pct(history):
     total = sum(estimate_tokens(m.get("content", "")) if isinstance(m, dict) else 0 for m in history)
     budget = Config.resolve_context_window()
-    return int(total / budget * 100) if budget > 0 else 0
+    return min(999, int(total / budget * 100)) if budget > 0 else 0
+
+# ── Context management with summarization ───────────────────
+
+_CONTEXT_SUMMARY = ""
+_ACTIVE_GOAL = ""
+
+def set_active_goal(goal_text):
+    """Track the active goal so it survives context trimming."""
+    global _ACTIVE_GOAL
+    _ACTIVE_GOAL = goal_text
+
+def clear_active_goal():
+    global _ACTIVE_GOAL
+    _ACTIVE_GOAL = ""
+
+def _build_context_refresher(history):
+    """Build a compact refresher summary of what the agent has been doing.
+    Extracts key facts from conversation history before trimming."""
+    global _CONTEXT_SUMMARY
+    parts = []
+    
+    # Preserve the active goal
+    if _ACTIVE_GOAL:
+        parts.append(f"OBJECTIVE: {_ACTIVE_GOAL}")
+    
+    # Extract user messages (the agent's instructions)
+    user_msgs = [m for m in history if isinstance(m, dict) and m.get("role") == "user"]
+    if user_msgs:
+        parts.append("KEY USER INSTRUCTIONS:")
+        for m in user_msgs[-5:]:  # Last 5 user messages
+            content = m.get("content", "")
+            if isinstance(content, str):
+                parts.append(f"  - {content[:200]}")
+    
+    # Extract command results (what the agent has learned)
+    cmd_msgs = [m for m in history if isinstance(m, dict) and m.get("role") == "user" 
+                and isinstance(m.get("content", ""), str)
+                and ("Executed:" in m.get("content", "") or "Result:" in m.get("content", ""))]
+    if cmd_msgs:
+        parts.append("RECENT COMMAND RESULTS:")
+        for m in cmd_msgs[-3:]:  # Last 3 command results
+            content = m.get("content", "")
+            parts.append(f"  - {content[:300]}")
+    
+    # Extract assistant conclusions
+    asst_msgs = [m for m in history if isinstance(m, dict) and m.get("role") == "assistant"]
+    if asst_msgs:
+        last_asst = asst_msgs[-1].get("content", "")
+        if isinstance(last_asst, str) and last_asst.strip():
+            parts.append(f"LAST ANALYSIS: {last_asst[:400]}")
+    
+    summary = "\n".join(parts)
+    if summary:
+        _CONTEXT_SUMMARY = summary
+    return summary
 
 def trim_history(history, max_tokens=None):
     '''Trim history to stay within context window, preserving system prompt
-    and the MOST RECENT messages (drops oldest non-system messages first).'''
+    and the MOST RECENT messages. Generates a context refresher for dropped messages.'''
     if max_tokens is None:
         max_tokens = Config.resolve_context_window()
     if not history:
@@ -3133,14 +3189,33 @@ def trim_history(history, max_tokens=None):
     total = sum(estimate_tokens(m.get("content", "") if isinstance(m, dict) else "") for m in history)
     if total <= max_tokens:
         return history
+    
+    # Build refresher BEFORE trimming
+    refresher = _build_context_refresher(history)
+    
     system = [history[0]] if history else []
+    
+    # If there's a refresher, inject it as a system continuation
+    if refresher:
+        refresher_msg = {"role": "system", "content": f"[CONTEXT REFRESHER - previous context was trimmed]\n{refresher}\n[END REFRESHER - continue working toward the objective]"}
+        system = [history[0], refresher_msg]
+    
     rest = history[1:]
+    # Reserve space for the refresher
+    refresher_tokens = estimate_tokens(refresher) if refresher else 0
+    budget = max_tokens - refresher_tokens
+    if budget < max_tokens // 4:
+        budget = max_tokens // 4  # Ensure at least 25% for recent messages
+    
     # Keep newest messages that fit
     kept = []
-    running = estimate_tokens(history[0].get("content", "") if isinstance(history[0], dict) else "")
+    running = estimate_tokens(system[0].get("content", "") if isinstance(system[0], dict) else "")
+    for msg in system[1:]:
+        running += estimate_tokens(msg.get("content", "") if isinstance(msg, dict) else "")
+    
     for m in reversed(rest):
         tok = estimate_tokens(m.get("content", "") if isinstance(m, dict) else "")
-        if running + tok <= max_tokens:
+        if running + tok <= budget:
             kept.insert(0, m)
             running += tok
         else:
@@ -5219,8 +5294,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
     if not clean_messages:
         clean_messages = messages[:1]
     
-    # Trim history if too large
-    clean_messages = trim_history(clean_messages, 240000)
+    # Trim history if too large (use model's actual context window)
+    clean_messages = trim_history(clean_messages, Config.resolve_context_window())
     
     _base = Config.API_BASE.rstrip('/')
     if _base.endswith('/v1'):
@@ -5578,6 +5653,7 @@ def cmd_goal(goal_text, history, cmd_log):
         return
 
     max_steps = Config.GOAL_MAX_STEPS
+    set_active_goal(goal_text)
     goal_msg = GOAL_PROMPT_TEMPLATE.format(goal=goal_text, max_steps=max_steps)
 
     print(f"\n{t['bright']}{'='*62}{RST}")
@@ -5594,6 +5670,12 @@ def cmd_goal(goal_text, history, cmd_log):
     step = 0
     while step < max_steps:
         step += 1
+        # Proactive context management
+        _ctx = context_pct(history)
+        if _ctx >= 80:
+            if _ctx >= 100:
+                viz.status(f"Context at {_ctx}% — trimming with refresher", "warning")
+            history[:] = trim_history(history, Config.resolve_context_window())
         # Auto-save every 3 steps for crash recovery
         if step > 1 and step % 3 == 1:
             try:
@@ -5727,6 +5809,7 @@ def cmd_goal(goal_text, history, cmd_log):
         print(f"\n{t['warn']} Reached max steps ({max_steps}). Goal may be incomplete.{RST}")
 
     learn_session(len(history), len(cmd_log), goal_mode=True)
+    clear_active_goal()
     print(f"\n{t['bright']}{'='*62}{RST}")
     print(f" {t['bright']}GOAL SESSION END{RST}")
     print(f" {t['dim']}Steps used: {step}/{max_steps}{RST}")
@@ -7759,6 +7842,12 @@ def main():
         max_iter = 9999
 
         for iteration in range(max_iter):
+            _ctx = context_pct(history)
+            if _ctx >= 80:
+                t_warn = T()
+                if _ctx >= 100:
+                    viz.status(f"Context at {_ctx}% — trimming with refresher", "warning")
+                history[:] = trim_history(history, Config.resolve_context_window())
             spin = None
             try:
                 if Config.STREAM:
@@ -7874,7 +7963,7 @@ def main():
         # Apply both constraints: trim to max_history count, then to token budget
         if len(history) > Config.MAX_HISTORY:
             history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
-        history[:] = trim_history(history, 220000)
+        history[:] = trim_history(history, Config.resolve_context_window())
 
         # Save session after each interaction
         save_current_session(history, cmd_log)
