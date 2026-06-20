@@ -7808,7 +7808,12 @@ def main():
             commands = extract_blocks(resp, 'execute')
             clean = clean_response(resp)
 
-            if asked and not commands and not clean:
+            if asked:
+                if clean and not Config.STREAM:
+                    t3 = T()
+                    print(f" {t3['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
+                if resp.strip():
+                    history.append({"role": "assistant", "content": resp})
                 save_current_session(history, cmd_log)
                 continue
 
