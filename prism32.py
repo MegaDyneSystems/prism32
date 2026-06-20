@@ -433,14 +433,31 @@ _MODEL_PRICING = {
 }
 
 def _get_model_pricing():
-    """Return (input_per_1k, output_per_1k) for current model, or (0,0) if unknown."""
+    """Return (input_per_1k, output_per_1k) for current model.
+    Uses pricing table for known models, then heuristic estimation for unknowns."""
     model_lower = (Config.MODEL or "").lower()
     if model_lower in _MODEL_PRICING:
         return _MODEL_PRICING[model_lower]
     for key, val in _MODEL_PRICING.items():
         if key.lower() in model_lower or model_lower in key.lower():
             return val
-    return (0.0, 0.0)
+    # Heuristic fallback for unknown models
+    # Free/local models (llama.cpp, ollama, local)
+    if not Config.API_KEY or "local" in Config.PROVIDER.lower() or "ollama" in Config.PROVIDER.lower():
+        return (0.0, 0.0)
+    # Estimate based on model name patterns
+    if any(k in model_lower for k in ["70b", "72b", "104b", "120b"]):
+        return (0.0008, 0.0008)  # Large open models
+    if any(k in model_lower for k in ["7b", "8b", "13b", "14b", "27b", "32b", "34b"]):
+        return (0.0002, 0.0002)  # Medium open models
+    if any(k in model_lower for k in ["mini", "flash", "fast", "haiku", "tiny"]):
+        return (0.0003, 0.001)  # Fast/cheap tier
+    if any(k in model_lower for k in ["opus", "gpt-4", "claude-3", "o1", "o3"]):
+        return (0.015, 0.06)  # Premium tier
+    if any(k in model_lower for k in ["sonnet", "gpt-4o", "kimi", "glm"]):
+        return (0.003, 0.015)  # Mid tier
+    # Generic fallback for unknown cloud models
+    return (0.001, 0.003)
 
 def _track_usage(usage_dict):
     """Track token usage and compute cost for the session."""
@@ -5108,6 +5125,55 @@ def _try_plugin_cmd(c, history=None):
         if sub in ("path", "paths"):
             return f"startup_memory={STARTUP_MEMORY_FILE}\nmemory_json={MEMORY_FILE}"
         return startup_memory_context(limit=3000)
+    if cmd_name in ('/delegate', 'delegate'):
+        task = cmd_args.strip()
+        if not task:
+            return "Usage: /delegate <task>"
+        provider = None
+        if ' --provider ' in task:
+            parts = task.split(' --provider ', 1)
+            task = parts[0]
+            provider = parts[1].strip().split()[0] if parts[1].strip() else None
+        sa = SubAgent(task, provider=provider)
+        sa.run()
+        _quantum.put(f"subagent_{sa.id}_result", sa.result)
+        if sa.result:
+            ltm_store(sa.result, source=f"subagent_{sa.id}", summary=f"Subagent result: {sa.task[:80]}", tags=["subagent", "auto"])
+        return f"[Subagent {sa.id} completed]\nTask: {cmd_args}\nResult: {(sa.result or '')[:2000]}"
+    if cmd_name in ('/spawn', 'spawn'):
+        task = cmd_args.strip()
+        if not task:
+            return "Usage: /spawn <task>"
+        provider = None
+        if ' --provider ' in task:
+            parts = task.split(' --provider ', 1)
+            task = parts[0]
+            provider = parts[1].strip().split()[0] if parts[1].strip() else None
+        sa = SubAgent(task, provider=provider)
+        sa.run_async()
+        _quantum.put(f"subagent_{sa.id}_spawned", True)
+        return f"[Subagent {sa.id} spawned async. Use /collect {sa.id} to get results.]"
+    if cmd_name in ('/collect', 'collect'):
+        sid = cmd_args.strip()
+        if not sid:
+            return "Usage: /collect <subagent_id>"
+        with _subagent_lock:
+            sa = _SUBAGENTS.get(sid)
+            if not sa:
+                return f"No subagent with id '{sid}'"
+            if not sa.done:
+                return f"Subagent {sid} still running. Check /subagents."
+            result = sa.result or ""
+            _SUBAGENTS.pop(sid, None)
+        return f"[Subagent {sid} result]\n{result[:2000]}"
+    if cmd_name in ('/subagents', 'subagents'):
+        with _subagent_lock:
+            if not _SUBAGENTS:
+                return "No subagents."
+            lines = []
+            for sid, sa in list(_SUBAGENTS.items()):
+                lines.append(f"  {sa.status_str()}")
+            return "\n".join(lines)
     reg_name = cmd_name[1:] if cmd_name.startswith('/') else cmd_name
     if registry.get(reg_name):
         return registry.dispatch_capture(reg_name, cmd_args)
@@ -5501,9 +5567,13 @@ Commands you can use inside execute blocks:
 - /harness scan, /harness context, /harness path (detect external AI CLIs).
 - /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
 - /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
+- /delegate <task> [--provider <name>] (run a synchronous subagent).
+- /spawn <task> [--provider <name>] (start an async subagent).
+- /collect <id> (retrieve async subagent results).
+- /subagents (list running/completed subagents).
 - /memory path, /memory paths (locate memory files).
 - Any plugin-registered command listed in context (see Available plugin commands).
-Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /delegate, /spawn, /subagents, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, and other session/config/operator commands are operator-side only and do not work from execute blocks.
+Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, and other session/config/operator commands are operator-side only and do not work from execute blocks.
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
