@@ -2219,21 +2219,46 @@ _shutdown_flag = False
 def _do_git_update(project_dir=None):
     t = T()
     if not project_dir:
-        project_dir = os.path.dirname(os.path.realpath(sys.argv[0]))
+        # Try to find the git repo: check the runtime dir, then the script dir
+        runtime_py = os.path.join(os.path.expanduser("~"), ".prism32", "prism32.py")
+        if os.path.exists(runtime_py):
+            project_dir = os.path.dirname(os.path.realpath(runtime_py))
+        else:
+            project_dir = os.path.dirname(os.path.realpath(__file__))
+    
     install_sh = os.path.join(project_dir, "install.sh")
-    if not os.path.exists(os.path.join(project_dir, ".git")):
-        print(f"  {t['err']}No .git directory found in {project_dir}{RST}")
-        print(f"  {t['dim']}Clone the repo first: git clone <url> prism32{RST}")
-        return
+    git_dir = os.path.join(project_dir, ".git")
+    
+    if not os.path.exists(git_dir):
+        # Clone fresh from GitHub
+        print(f"  {t['warn']}No git repo found at {project_dir}{RST}")
+        print(f"  {t['dim']}Cloning from GitHub...{RST}")
+        clone_dir = os.path.join(os.path.expanduser("~"), "prism32")
+        if not os.path.exists(clone_dir):
+            clone = subprocess.run(
+                ["git", "clone", "https://github.com/MegaDyneSystems/prism32.git", clone_dir],
+                capture_output=True, text=True
+            )
+            if clone.returncode != 0:
+                print(f"  {t['err']}Clone failed:{RST}\n  {clone.stderr[:300]}")
+                return
+            project_dir = clone_dir
+            install_sh = os.path.join(project_dir, "install.sh")
+        else:
+            project_dir = clone_dir
+            install_sh = os.path.join(project_dir, "install.sh")
+    
     if not os.path.exists(install_sh):
         print(f"  {t['err']}install.sh not found in {project_dir}{RST}")
         return
-    print(f"  {t['bright']}Updating prism32 from {project_dir}...{RST}")
+    
+    print(f"  {t['bright']}Updating Prism32 from {project_dir}...{RST}")
     pull = subprocess.run("git pull", shell=True, capture_output=True, text=True, cwd=project_dir)
     if pull.returncode != 0:
         print(f"  {t['err']}git pull failed:{RST}\n  {pull.stderr[:300]}")
         return
     print(f"  {pull.stdout.strip()}")
+    
     result = subprocess.run(["bash", install_sh, "-y"], capture_output=True, text=True, cwd=project_dir)
     if result.returncode == 0:
         print(f"  {t['ok']}Update complete. Restart prism32 to use the new version.{RST}")
