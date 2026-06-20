@@ -3596,7 +3596,7 @@ def read_footer_input(status_bar):
     if line == "":
         raise EOFError
     clear_footer()
-    return line.strip()
+    return line.rstrip('\r\n').strip()
 
 # ── Interjection (type while AI streams) ─────────────────────
 
@@ -3691,7 +3691,6 @@ def _interjection_poll():
                 r, _, _ = select.select([fd], [], [], 0.05)
                 if r:
                     data = data + os.read(fd, 4096)
-                    # Fall through so the escape-sequence state machine handles it
                 else:
                     return request_agent_cancel()
             text = data.decode('utf-8', errors='replace')
@@ -3700,9 +3699,23 @@ def _interjection_poll():
                     _INTERJECTION_ESCAPE_BUF += ch
                     seq = _INTERJECTION_ESCAPE_BUF
                     b = ord(ch)
-                    if seq in ('[', 'O'):
+                    # Control chars abort escape mode and get processed normally
+                    if b < 0x20 or b == 0x7f:
+                        _INTERJECTION_ESCAPE = False
+                        _INTERJECTION_ESCAPE_BUF = ""
+                        # Re-process this char through the main chain below
+                    # Second Escape = cancel (double-Esc)
+                    elif b == 0x1b:
+                        _INTERJECTION_ESCAPE = False
+                        _INTERJECTION_ESCAPE_BUF = ""
+                        return request_agent_cancel()
+                    elif seq in ('[', 'O'):
                         continue
-                    if 0x40 <= b <= 0x7E or ch == '~':
+                    elif len(_INTERJECTION_ESCAPE_BUF) > 8:
+                        _INTERJECTION_ESCAPE = False
+                        _INTERJECTION_ESCAPE_BUF = ""
+                        continue
+                    elif 0x40 <= b <= 0x7E or ch == '~':
                         _INTERJECTION_ESCAPE = False
                         _INTERJECTION_ESCAPE_BUF = ""
                         if seq in ('[A', 'OA'):  # Up
@@ -3731,13 +3744,21 @@ def _interjection_poll():
                         elif seq in ('[D', 'OD'):  # Left
                             _INTERJECTION_CURSOR = max(0, _INTERJECTION_CURSOR - 1)
                             _INTERJECTION_HAS_TYPED = True
-                        elif seq == '[H':  # Home
+                        elif seq in ('[H', '[1~', 'OH', 'OH'):  # Home
                             _INTERJECTION_CURSOR = 0
                             _INTERJECTION_HAS_TYPED = True
-                        elif seq == '[F':  # End
+                        elif seq in ('[F', '[4~', 'OF', 'OF'):  # End
                             _INTERJECTION_CURSOR = len(_INTERJECTION_BUF)
                             _INTERJECTION_HAS_TYPED = True
-                    continue
+                        elif seq == '[3~':  # Forward Delete
+                            if _INTERJECTION_CURSOR < len(_INTERJECTION_BUF):
+                                _INTERJECTION_BUF = _INTERJECTION_BUF[:_INTERJECTION_CURSOR] + _INTERJECTION_BUF[_INTERJECTION_CURSOR+1:]
+                                _INTERJECTION_HAS_TYPED = True
+                        elif seq in ('[2~', '[5~', '[6~'):  # Insert, PgUp, PgDn
+                            pass  # No-op
+                        continue
+                    else:
+                        continue
                 if ch in ('\n', '\r'):
                     result = _INTERJECTION_BUF.strip()
                     if not result:
@@ -3753,8 +3774,38 @@ def _interjection_poll():
                     _INTERJECTION_CURSOR = 0
                     _INTERJECTION_RESULT = result
                     return result
-                elif ord(ch) == 3:
+                elif ord(ch) == 3:  # Ctrl-C
                     return request_agent_cancel("Agent stopped by Ctrl-C")
+                elif ord(ch) == 1:  # Ctrl-A = Home
+                    _INTERJECTION_CURSOR = 0
+                    _INTERJECTION_HAS_TYPED = True
+                elif ord(ch) == 5:  # Ctrl-E = End
+                    _INTERJECTION_CURSOR = len(_INTERJECTION_BUF)
+                    _INTERJECTION_HAS_TYPED = True
+                elif ord(ch) == 4:  # Ctrl-D = Forward Delete
+                    if _INTERJECTION_CURSOR < len(_INTERJECTION_BUF):
+                        _INTERJECTION_BUF = _INTERJECTION_BUF[:_INTERJECTION_CURSOR] + _INTERJECTION_BUF[_INTERJECTION_CURSOR+1:]
+                        _INTERJECTION_HAS_TYPED = True
+                elif ord(ch) == 11:  # Ctrl-K = Kill to end of line
+                    _INTERJECTION_BUF = _INTERJECTION_BUF[:_INTERJECTION_CURSOR]
+                    _INTERJECTION_HAS_TYPED = True
+                elif ord(ch) == 21:  # Ctrl-U = Kill to beginning of line
+                    _INTERJECTION_BUF = _INTERJECTION_BUF[_INTERJECTION_CURSOR:]
+                    _INTERJECTION_CURSOR = 0
+                    _INTERJECTION_HAS_TYPED = True
+                elif ord(ch) == 23:  # Ctrl-W = Delete word backward
+                    pre = _INTERJECTION_BUF[:_INTERJECTION_CURSOR].rstrip()
+                    word_end = len(pre)
+                    word_start = word_end
+                    while word_start > 0 and pre[word_start-1] != ' ':
+                        word_start -= 1
+                    _INTERJECTION_BUF = pre[:word_start] + _INTERJECTION_BUF[_INTERJECTION_CURSOR:]
+                    _INTERJECTION_CURSOR = word_start
+                    _INTERJECTION_HAS_TYPED = True
+                elif ord(ch) == 12:  # Ctrl-L = Clear screen
+                    _INTERJECTION_HAS_TYPED = True
+                elif ord(ch) == 9:  # Tab - ignore
+                    pass
                 elif ch in ('\x7f', '\b'):
                     if _INTERJECTION_CURSOR > 0:
                         _INTERJECTION_BUF = _INTERJECTION_BUF[:_INTERJECTION_CURSOR - 1] + _INTERJECTION_BUF[_INTERJECTION_CURSOR:]
