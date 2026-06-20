@@ -192,7 +192,10 @@ class PluginAPI:
         import urllib.request
         import json as _j
         data_bytes = _j.dumps(data).encode() if isinstance(data, dict) else (data.encode() if isinstance(data, str) else data)
-        req = urllib.request.Request(url, data=data_bytes, headers=headers or {}, method='POST')
+        h = {"Content-Type": "application/json"}
+        if headers:
+            h.update(headers)
+        req = urllib.request.Request(url, data=data_bytes, headers=h, method='POST')
         try:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.read().decode('utf-8', errors='replace')
@@ -3031,6 +3034,7 @@ class Config:
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
                 "thinking_effort": cls.THINKING_EFFORT,
                 "max_memory_ctx": cls.MAX_MEMORY_CTX,
+                "max_context_tokens": cls.MAX_CONTEXT_TOKENS,
                 "agent_name": cls.AGENT_NAME,
                 "custom_arch_map": cls.CUSTOM_ARCH_MAP,
             }
@@ -3071,6 +3075,7 @@ class Config:
             if "auto_save_interval" in data: cls.AUTO_SAVE_INTERVAL = int(data["auto_save_interval"])
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
             if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = int(data["max_memory_ctx"])
+            if "max_context_tokens" in data: cls.MAX_CONTEXT_TOKENS = int(data["max_context_tokens"])
             # Live stream rendering is intentionally session-only. Older saved
             # configs may contain stream=true, which can re-enable fragile
             # token-level terminal output on legacy systems.
@@ -3104,7 +3109,10 @@ def estimate_tokens(text):
         total = 0
         for part in text:
             if isinstance(part, dict):
-                total += len(str(part.get("text", "")))
+                if part.get("type") == "image_url":
+                    total += len(str(part.get("image_url", "")))
+                else:
+                    total += len(str(part.get("text", "")))
             elif isinstance(part, str):
                 total += len(part)
         return total // 4
@@ -3116,25 +3124,28 @@ def context_pct(history):
     return int(total / budget * 100) if budget > 0 else 0
 
 def trim_history(history, max_tokens=None):
-    '''Trim history to stay within context window, preserving system prompt.
-    O(n) -- running sum instead of re-summing all kept messages per iteration.'''
+    '''Trim history to stay within context window, preserving system prompt
+    and the MOST RECENT messages (drops oldest non-system messages first).'''
     if max_tokens is None:
         max_tokens = Config.resolve_context_window()
     if not history:
         return history
-    total = sum(estimate_tokens(m.get("content", "")) for m in history)
+    total = sum(estimate_tokens(m.get("content", "") if isinstance(m, dict) else "") for m in history)
     if total <= max_tokens:
         return history
-    kept = [history[0]]
-    running = estimate_tokens(history[0].get("content", ""))
-    for m in history[1:]:
-        tok = estimate_tokens(m.get("content", ""))
+    system = [history[0]] if history else []
+    rest = history[1:]
+    # Keep newest messages that fit
+    kept = []
+    running = estimate_tokens(history[0].get("content", "") if isinstance(history[0], dict) else "")
+    for m in reversed(rest):
+        tok = estimate_tokens(m.get("content", "") if isinstance(m, dict) else "")
         if running + tok <= max_tokens:
-            kept.append(m)
+            kept.insert(0, m)
             running += tok
         else:
             break
-    return kept
+    return system + kept
 
 # ── Theme Registry (built-ins) ────────────────────────────
 register_theme("phosphor", primary="\x1b[92m", bright="\x1b[1;92m", dim="\x1b[2;32m", accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m", glow="\x1b[5;92m", bar="\x1b[42m")
@@ -3495,7 +3506,7 @@ def draw_footer(status_bar, spin_char=None):
 
 # ── Footer Animator (background animated indicator) ──────────
 
-def _render_footer(state="busy", history=None, tool_name="", frame=0, busy=None):
+def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=None):
     """Render footer content directly (caller must hold stdout_lock)."""
     if not _footer_reserved or not ansi_enabled():
         return
@@ -4598,8 +4609,8 @@ def _pty_su_root(cmd, timeout=None):
 
 def _cmd_succeeded(result):
     """Check if a command result indicates success."""
-    low = (result or "").lower()[:60]
-    return not any(w in low for w in ["error", "blocked", "timeout", "failed", "not found", "cancelled"])
+    low = (result or "").lower()[:4000]
+    return not any(w in low for w in ["error", "blocked", "timeout", "failed", "failure", "not found", "cancelled", "denied"])
 
 def _try_plugin_cmd(c, history=None):
     """Check if c is a plugin command and dispatch it, returning result or None."""
@@ -6451,6 +6462,7 @@ def main():
             _PluginHooks._history = history
             cmd_log.clear()
             _reset_session_cost()
+            _CURRENT_SESSION_ID = None
             print(f"  {t['bright']}+ History cleared{RST}\n")
             continue
 
@@ -6561,6 +6573,7 @@ def main():
 
         if cmd == 'save':
             session_id = cmd_session_save(args_str, history, cmd_log)
+            _CURRENT_SESSION_ID = session_id
             print()
             continue
 
@@ -6572,6 +6585,7 @@ def main():
                 _PluginHooks._history = history
                 cmd_log = data.get("cmd_log", [])
                 _reset_session_cost()
+                _CURRENT_SESSION_ID = data.get("id")
             print()
             continue
 
@@ -6583,6 +6597,8 @@ def main():
                     history[:] = loaded_history
                     _PluginHooks._history = history
                     cmd_log = loaded_cmd_log if loaded_cmd_log else []
+                    _reset_session_cost()
+                    _CURRENT_SESSION_ID = args_str.strip()
                     viz.status("Session restored", "success")
             else:
                 print(f"  Usage: load <session_id>")
@@ -6633,7 +6649,7 @@ def main():
                     else:
                         print(f"  Usage: provider rm <name>")
                 elif subcmd == 'api':
-                    url = parts[1].strip() if len(parts) > 1 else ""
+                    url = parts[1].split()[0] if len(parts) > 1 and parts[1].split() else ""
                     if url:
                         Config.API_BASE = url
                         Config.save_config()
@@ -6642,7 +6658,7 @@ def main():
                         print(f"  Current API: {t['bright']}{Config.API_BASE}{RST}")
                         print(f"  Usage: provider api <url>")
                 elif subcmd == 'key':
-                    key = parts[1].strip() if len(parts) > 1 else ""
+                    key = parts[1].split()[0] if len(parts) > 1 and parts[1].split() else ""
                     if key:
                         Config.API_KEY = key
                         Config.save_config()
@@ -7173,9 +7189,11 @@ def main():
                 val = args_str.strip().lower()
                 if val in ("", "off", "none"):
                     Config.THINKING_EFFORT = ""
+                    Config.save_config()
                     print(f"  {t['bright']}+ Thinking effort: off{RST}")
                 elif val in ("low", "medium", "high"):
                     Config.THINKING_EFFORT = val
+                    Config.save_config()
                     print(f"  {t['bright']}+ Thinking effort: {val}{RST}")
                 else:
                     print(f"  {t['dim']}Usage: thinking <off|low|medium|high>{RST}")
@@ -7995,8 +8013,8 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
                 Config.MODEL = chosen
                 if _saved:
                     Config.PROVIDER = provider
-                    Config.API_KEY = _saved["key"]
-                    Config.save_config()
+                    if PROVIDER_REGISTRY.get(provider, {}).get("default_key"):
+                        Config.API_KEY = PROVIDER_REGISTRY[provider]["default_key"]
                 Config.save_config()
                 print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
                 if _saved:
