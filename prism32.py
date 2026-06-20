@@ -2218,76 +2218,108 @@ atexit.register(_cleanup)
 _shutdown_flag = False
 def _do_git_update(project_dir=None):
     t = T()
+    home = os.path.expanduser("~")
+    clone_dir = os.path.join(home, "prism32")
+
+    # Check that git is available
+    git_bin = shutil.which("git") if hasattr(shutil, 'which') else None
+    if not git_bin:
+        print(f"  {t['err']}git not found. Install: apt install git / brew install git / pkg install git{RST}")
+        return
+
     if not project_dir:
-        # Try to find the git repo: check the runtime dir, then the script dir
-        runtime_py = os.path.join(os.path.expanduser("~"), ".prism32", "prism32.py")
+        runtime_py = os.path.join(home, ".prism32", "prism32.py")
         if os.path.exists(runtime_py):
             project_dir = os.path.dirname(os.path.realpath(runtime_py))
         else:
-            project_dir = os.path.dirname(os.path.realpath(__file__))
-    
-    # Check if this is actually a git repo
-    git_check = subprocess.run("git rev-parse --git-dir", shell=True, capture_output=True, text=True, cwd=project_dir)
-    
+            project_dir = clone_dir
+
+    # Check if project_dir is actually a git repo
+    git_check = subprocess.run([git_bin, "rev-parse", "--git-dir"], capture_output=True, text=True, cwd=project_dir)
+
     if git_check.returncode != 0:
-        # No git repo — clone fresh
-        print(f"  {t['warn']}No git repo found at {project_dir}{RST}")
-        print(f"  {t['dim']}Cloning from GitHub...{RST}")
-        clone_dir = os.path.join(os.path.expanduser("~"), "prism32")
-        clone = subprocess.run(
-            ["git", "clone", "https://github.com/MegaDyneSystems/prism32.git", clone_dir],
-            capture_output=True, text=True
-        )
-        if clone.returncode != 0:
-            print(f"  {t['err']}Clone failed:{RST}\n  {clone.stderr[:300]}")
-            return
-        project_dir = clone_dir
-    
-    install_sh = os.path.join(project_dir, "install.sh")
-    if not os.path.exists(install_sh):
-        print(f"  {t['err']}install.sh not found in {project_dir}{RST}")
-        return
-    
-    # Fetch latest from remote
-    print(f"  {t['bright']}Updating Prism32 from {project_dir}...{RST}")
-    subprocess.run("git fetch origin", shell=True, capture_output=True, text=True, cwd=project_dir)
-    
-    # Check for local changes
-    status = subprocess.run("git status --porcelain", shell=True, capture_output=True, text=True, cwd=project_dir)
+        if os.path.isdir(os.path.join(clone_dir, ".git")):
+            project_dir = clone_dir
+        else:
+            print(f"  {t['warn']}No git repo found. Cloning from GitHub...{RST}")
+            if os.path.isdir(clone_dir) and not os.path.isdir(os.path.join(clone_dir, ".git")):
+                try:
+                    shutil.rmtree(clone_dir)
+                except Exception:
+                    print(f"  {t['err']}Cannot remove stale {clone_dir}. Remove manually.{RST}")
+                    return
+            clone = subprocess.run(
+                [git_bin, "clone", "https://github.com/MegaDyneSystems/prism32.git", clone_dir],
+                capture_output=True, text=True
+            )
+            if clone.returncode != 0:
+                print(f"  {t['err']}Clone failed:{RST}\n  {clone.stderr[:300]}")
+                return
+            project_dir = clone_dir
+
+    print(f"  {t['bright']}Updating Prism32...{RST}")
+    subprocess.run([git_bin, "fetch", "origin"], capture_output=True, text=True, cwd=project_dir)
+
+    status = subprocess.run([git_bin, "status", "--porcelain"], capture_output=True, text=True, cwd=project_dir)
     has_local_changes = bool(status.stdout.strip())
-    
+
     if has_local_changes:
         print(f"  {t['warn']}Local changes detected, stashing...{RST}")
-        subprocess.run("git stash", shell=True, capture_output=True, text=True, cwd=project_dir)
-    
-    # Hard reset to origin/main to ensure clean state
-    reset = subprocess.run("git reset --hard origin/main", shell=True, capture_output=True, text=True, cwd=project_dir)
+        subprocess.run([git_bin, "stash"], capture_output=True, text=True, cwd=project_dir)
+
+    reset = subprocess.run([git_bin, "reset", "--hard", "origin/main"], capture_output=True, text=True, cwd=project_dir)
     if reset.returncode != 0:
-        print(f"  {t['warn']}Reset failed, trying git pull...{RST}")
-        pull = subprocess.run("git pull origin main", shell=True, capture_output=True, text=True, cwd=project_dir)
+        pull = subprocess.run([git_bin, "pull", "origin", "main"], capture_output=True, text=True, cwd=project_dir)
         if pull.returncode != 0:
-            print(f"  {t['err']}Both reset and pull failed:{RST}\n  {pull.stderr[:300]}")
+            print(f"  {t['err']}Update failed:{RST}\n  {pull.stderr[:300]}")
             return
-        print(f"  {pull.stdout.strip()}")
-    else:
-        # Get what changed
-        log = subprocess.run("git log --oneline -3", shell=True, capture_output=True, text=True, cwd=project_dir)
-        print(f"  {t['dim']}Reset to latest. Recent commits:{RST}")
+
+    log = subprocess.run([git_bin, "log", "--oneline", "-3"], capture_output=True, text=True, cwd=project_dir)
+    if log.stdout.strip():
+        print(f"  {t['dim']}Latest commits:{RST}")
         for line in log.stdout.strip().split('\n')[:3]:
             print(f"  {t['dim']}  {line}{RST}")
-    
-    # Run installer with -y
-    c = f'bash "{install_sh}" -y'
-    result = subprocess.run(["bash", install_sh, "-y"], capture_output=True, text=True, cwd=project_dir)
-    if result.returncode == 0:
-        # Check versions
-        try:
-            ver_check = subprocess.run(
-                [sys.executable, os.path.join(os.path.expanduser("~"), ".prism32", "prism32.py"), "--version"],
-                capture_output=True, text=True, timeout=5
+
+    # Run the appropriate installer for this platform
+    install_sh = os.path.join(project_dir, "install.sh")
+    install_ps1 = os.path.join(project_dir, "install.ps1")
+    openwrt_sh = os.path.join(project_dir, "openwrt-install.sh")
+
+    if sys.platform == 'win32':
+        if os.path.exists(install_ps1):
+            result = subprocess.run(
+                ["powershell", "-ExecutionPolicy", "Bypass", "-File", install_ps1, "-y"],
+                capture_output=True, text=True, cwd=project_dir
             )
-            ver = ver_check.stdout.strip() if ver_check.returncode == 0 else "unknown"
-        except Exception:
+        else:
+            target = os.path.join(home, ".prism32")
+            os.makedirs(target, exist_ok=True)
+            shutil.copy2(os.path.join(project_dir, "prism32.py"), os.path.join(target, "prism32.py"))
+            result = subprocess.CompletedProcess(args=[], returncode=0, stdout="Direct copy", stderr="")
+    elif not os.path.exists(install_sh) and os.path.exists(openwrt_sh):
+        result = subprocess.run(["sh", openwrt_sh, "-y"], capture_output=True, text=True, cwd=project_dir)
+    elif os.path.exists(install_sh):
+        shell_bin = shutil.which("bash") or shutil.which("sh") or "sh"
+        result = subprocess.run([shell_bin, install_sh, "-y"], capture_output=True, text=True, cwd=project_dir)
+    else:
+        print(f"  {t['warn']}No installer found. Direct copying prism32.py.{RST}")
+        target = os.path.join(home, ".prism32")
+        os.makedirs(target, exist_ok=True)
+        shutil.copy2(os.path.join(project_dir, "prism32.py"), os.path.join(target, "prism32.py"))
+        result = subprocess.CompletedProcess(args=[], returncode=0, stdout="Direct copy", stderr="")
+
+    if result.returncode == 0:
+        runtime_py = os.path.join(home, ".prism32", "prism32.py")
+        if os.path.exists(runtime_py):
+            try:
+                ver_check = subprocess.run(
+                    [sys.executable, runtime_py, "--version"],
+                    capture_output=True, text=True, timeout=5
+                )
+                ver = ver_check.stdout.strip() if ver_check.returncode == 0 else "updated"
+            except Exception:
+                ver = "updated"
+        else:
             ver = "updated"
         print(f"\n  {t['ok']}Update complete! Version: {ver}{RST}")
         print(f"  {t['dim']}Restart prism32 to use the new version.{RST}")
