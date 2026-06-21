@@ -2896,6 +2896,17 @@ class Platform:
         # WAGO PFC industrial PLC
         if os.path.exists('/etc/specific'):
             return "WAGO PFC (industrial PLC)"
+        # Robot vacuums (rooted — embedded Linux)
+        if os.path.exists('/etc/irobot_version') or os.path.exists('/usr/bin/bba-server'):
+            return "iRobot Roomba (rooted Linux)"
+        if os.path.isdir('/etc/roborock/') or os.path.exists('/etc/roborock_version'):
+            return "Roborock vacuum (rooted Linux)"
+        if os.path.isdir('/usr/ecovacs/') or os.path.exists('/etc/ecovacs_version'):
+            return "Ecovacs Deebot (rooted Linux)"
+        if os.path.exists('/etc/vorwerk-version') or os.path.exists('/etc/vorwerk_version'):
+            return "Vorwerk VR200/VR220 (rooted Linux)"
+        if os.path.exists('/etc/dreame_release') or os.path.isdir('/data/miio/'):
+            return "Dreame vacuum (rooted Linux)"
         # Tesla MCU
         if os.path.isdir('/usr/tesla/') or os.path.isdir('/persist/'):
             try:
@@ -2993,6 +3004,19 @@ class Platform:
         if Platform.ANDROID and not Platform.TERMUX:
             return "Android"
         if Platform.MACOS:
+            # Apple TV (jailbroken, runs macOS/Darwin)
+            try:
+                import plistlib
+                sv_path = '/System/Library/CoreServices/SystemVersion.plist'
+                if os.path.exists(sv_path):
+                    with open(sv_path, 'rb') as f:
+                        pl = plistlib.load(f)
+                    pname = pl.get('ProductName', '')
+                    if 'Apple TV' in pname or 'AppleTV' in pname:
+                        ver = pl.get('ProductVersion', '')
+                        return f"Apple TV {ver}" if ver else "Apple TV"
+            except Exception:
+                pass
             return "macOS"
         if Platform.IRIX:
             return "IRIX"
