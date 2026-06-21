@@ -5373,7 +5373,11 @@ command here
 
 You are working on a subtask delegated by the main agent. Work autonomously step by step.
 
-A shared quantum context is available between all agents. Read from it using:
+CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_calls_section_begin|>, function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks.
+
+You can chain multiple commands in a single execute block using && or ; or pipes.
+
+A shared quantum context is available between ALL agents (main + subagents). Read from it using:
 ```execute
 /quantum
 ```
@@ -5386,9 +5390,30 @@ Read a specific key using:
 /quantum <key>:
 ```
 
-Use /remember <text> to store important findings in long-term memory.
-Use /recall <query> to search past memories from any agent.
+Commands available inside execute blocks:
+- Any shell command (the normal path).
+- /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
+- /delegate <task> [--provider <name>] (spawn a synchronous sub-subagent).
+- /spawn <task> [--provider <name>] (spawn an async sub-subagent).
+- /collect <id> (retrieve async sub-subagent results).
+- /subagents (list running/completed sub-subagents).
+- /remember <text> (store findings in long-term memory, persists across sessions).
+- /recall <query> (search past memories from any agent).
+- /forget <id> (delete a memory).
+- /memories (list recent memories).
+- /auto <text>, /auto list, /auto run <id> (create/list/run automations).
+- /skill-list, /skill-load <name> (view and activate skills).
+- /shard show, /shard deploy, /shard set <k>:<v>, /shard secrets, /shard complete (manage promptshards).
+- /harness scan (detect external AI CLIs), /harness delegate <task> (super subagent).
+- /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
+- /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
+- /memory path, /memory paths (locate memory files).
+
+Use /remember to store important findings for future agents and sessions.
+Use /recall to search past memories when you need relevant context on a topic.
 Detected external AI harnesses are listed in context. If useful, inspect their help first and use them through execute blocks.
+
+When your task is complete, give a concise summary of what you did and what you found. This summary becomes your result, which the main agent will read.
 """
 
 class SubAgent:
@@ -5438,9 +5463,13 @@ class SubAgent:
         try:
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
+                # Context management: trim if approaching limit
+                _ctx = context_pct(self._history)
+                if _ctx >= 75:
+                    self._history[:] = trim_history(self._history, Config.resolve_context_window())
                 with stdout_lock:
-                    t = T()
-                    print(f"  {t['dim']}[{self.id}] Step {self._step}/{self.max_steps}{RST}")
+                    t2 = T()
+                    print(f"  {t2['dim']}[{self.id}] Step {self._step}/{self.max_steps}{RST}")
                 resp = ask_ai(self._history, stream=False)
                 if not resp or resp.startswith('['):
                     self.error = resp or "No response"
@@ -5448,6 +5477,7 @@ class SubAgent:
                     break
                 resp, _asked = handle_ask_blocks(resp, self._history, allow_input=False, return_asked=True)
                 commands = extract_blocks(resp, 'execute')
+                was_healed = False
                 # Heal non-standard tool-call formats
                 if not commands:
                     resp, was_healed = heal_response(resp)
@@ -5455,8 +5485,13 @@ class SubAgent:
                         commands = extract_blocks(resp, 'execute')
                 if commands:
                     clean = clean_response(resp)
+                    if clean:
+                        with stdout_lock:
+                            t3 = T()
+                            print(f"  {t3['dim']}[{self.id}] {clean[:200]}{RST}")
                     if resp.strip():
                         self._history.append({"role": "assistant", "content": resp})
+                    command_cancelled = False
                     for c in commands:
                         c = c.strip()
                         plugin_result = _try_plugin_cmd(c, history=self._history)
@@ -5467,12 +5502,25 @@ class SubAgent:
                         success = _cmd_succeeded(result)
                         cmd_result(c, result, success)
                         msg = f"Executed: {c}\nResult:\n{result[:1500]}"
-                        self._history.append({"role": "user", "content": f"{msg}\n\nCommand output above. Continue with task or give final answer."})
+                        continuation = f"Command succeeded={success}. Continue with task or give final answer."
+                        if was_healed:
+                            continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
+                        self._history.append({"role": "user", "content": f"{msg}\n\n{continuation}"})
+                        if (result or "").startswith("[CANCELLED]"):
+                            command_cancelled = True
+                            break
+                    if command_cancelled:
+                        self.result = "[SUBAGENT CANCELLED] Command was stopped by operator."
+                        self.done = True
+                        return
                     # Inject latest quantum context so subagent sees cross-agent data
                     self._history[0] = self._build_history()[0]
                 else:
                     clean = clean_response(resp)
-                    self.result = clean
+                    if not clean:
+                        self.result = "[SUBAGENT] No actionable response."
+                    else:
+                        self.result = clean
                     self.done = True
                     return
             self.result = self.result or "[SUBAGENT] Max steps reached without completion."
@@ -5538,7 +5586,14 @@ You have FULL bash access. Execute commands directly using EXACTLY this format:
 command here
 ```
 
-CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_calls_section_begin|>, function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks. This is not optional.
+CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_calls_section_begin|>, function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks. This is not optional. If you accidentally use a non-standard format, it will be auto-healed, but always use execute blocks directly.
+
+BLOCK ARCHITECTURE:
+- You can chain multiple commands in a single execute block using &&, ;, |, and redirections.
+- You can put multiple ```execute blocks in a single response — each will be executed in order.
+- Commands starting with / (like /delegate, /quantum, /remember) are executed as Prism32 commands, not shell.
+- Everything else goes to the shell.
+- If you need to ask the user a question, use ```ask``` blocks. The operator will be prompted.
 
 When you need to ask the user a question or request clarification, use:
 
@@ -5546,35 +5601,76 @@ When you need to ask the user a question or request clarification, use:
 Your question here
 ```
 
-You can also delegate work to subagents using the /delegate command.
-Subagents run autonomously with their own execute-loop and report results.
-Use /delegate <task description> when a task is self-contained and can run independently.
-Add --provider <name> to run a subagent against a different provider (e.g. /delegate scan ports --provider groq).
-Use /quantum <key>:<value> to share information between agents during this session.
-Use /remember <text> to store important findings in long-term memory (persists across sessions).
-Use /recall <query> to search past memories when you need relevant context on a topic.
-Use /subagents to list running or completed subagents.
+MULTI-AGENT SYSTEM:
+You can delegate work to subagents. Subagents run autonomously with their own execute-loop and report results.
+- /delegate <task> — synchronous subagent (blocks until done, returns result).
+- /spawn <task> — async subagent (returns immediately, use /collect <id> later).
+- /collect <id> — retrieve async subagent results.
+- /subagents — list running/completed subagents.
+Add --provider <name> to use a different provider for a subagent (e.g. /delegate scan ports --provider groq).
+Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt.
+Use /spawn + /collect for parallel work: spawn multiple subagents for independent subtasks, then collect results.
+Subagents can spawn their own subagents — use this for recursive decomposition of complex tasks.
+
+QUANTUM CONTEXT:
+/quantum is shared state across ALL agents (main + subagents) in this session.
+- /quantum — view all shared context.
+- /quantum <key>:<value> — write a value.
+- /quantum <key>: — read a specific key.
+Use /quantum to pass findings between agents: one subagent discovers data, another uses it.
+
+LONG-TERM MEMORY:
+- /remember <text> — store findings in long-term memory (persists across sessions, shared by all agents).
+- /recall <query> — search past memories from any session.
+- /memories — list recent memories.
+- /forget <id> — delete a memory.
+Use /remember to save important discoveries, configurations, and solutions for future sessions.
+
+SELF-EXTENSION:
+- /extend temp <goal> — generate and load a temporary plugin for a missing capability.
+- /extend permanent <goal> — create a persistent plugin (only when operator asks).
+- /evolve on — enable self-repair mode with baseline diff, tool scans, and docs.
+- /harness scan — detect external AI CLIs on this system.
+- /harness delegate <task> — launch a super subagent seeded with external AI capabilities.
+Prefer plugin self-extension over editing prism32.py; edit core code only when the requested change cannot be solved as a plugin.
+
+SKILLS:
 Skills are reusable workflows stored in ~/.prism32/skills/. Use /skill-list to see them and /skill-load <name> to activate a skill's instructions in context.
-Use /harness scan to detect external AI agent CLIs and /harness delegate <task> to launch a super subagent seeded with those capabilities.
-Use /evolve on when Prism32 needs self-repair/plugin-generation docs, baseline comparison, and local tool exploration.
-Use /extend temp <goal> when a missing reusable capability would help complete the task. This generates, syntax-checks, writes, and loads a temporary Prism32 plugin. Use /extend permanent <goal> only when the operator explicitly asks for a persistent extension. Prefer plugin self-extension over editing prism32.py; edit core code only when the requested change cannot be solved as a plugin.
+
+AUTOMATIONS:
+- /auto <text> — create an automation from natural language.
+- /auto list — list automations.
+- /auto run <id> — run an automation.
+
+PROMPTSHARDS:
+- /shard show — view current shard.
+- /shard deploy — deploy shard as a subagent.
+- /shard set <k>:<v> — set a shard field.
+- /shard secrets — view stored secrets.
+- /shard complete — mark shard complete.
+
+CONTEXT MANAGEMENT:
+Prism32 automatically manages conversation context. When context gets large (>75% of window), older messages are intelligently summarized into a [SESSION CONTEXT] block. This summary preserves your objective, key discoveries, and errors. If you see a [SESSION CONTEXT — prior conversation summarized] message, it contains the essential state from earlier in the conversation. Use it to continue working seamlessly.
 
 Commands you can use inside execute blocks:
 - Any shell command (the normal path).
 - /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
-- /auto <text>, /auto list, /auto run <id> (create/list/run automations).
-- /skill-list, /skill-load <name> (view and activate skills).
-- /shard show, /shard deploy, /shard set <k>:<v>, /shard secrets, /shard complete (manage promptshards).
-- /harness scan, /harness context, /harness path (detect external AI CLIs).
-- /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
+- /delegate <task> [--provider <name>] (synchronous subagent).
+- /spawn <task> [--provider <name>] (async subagent).
+- /collect <id> (retrieve async results).
+- /subagents (list subagents).
+- /remember <text> (store in long-term memory).
+- /recall <query> (search long-term memory).
+- /memories, /forget <id> (list/delete memories).
+- /auto <text>, /auto list, /auto run <id> (automations).
+- /skill-list, /skill-load <name> (skills).
+- /shard show, /shard deploy, /shard set, /shard secrets, /shard complete (promptshards).
+- /harness scan, /harness context, /harness path, /harness delegate <task> (AI CLIs).
+- /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair).
 - /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
-- /delegate <task> [--provider <name>] (run a synchronous subagent).
-- /spawn <task> [--provider <name>] (start an async subagent).
-- /collect <id> (retrieve async subagent results).
-- /subagents (list running/completed subagents).
 - /memory path, /memory paths (locate memory files).
 - Any plugin-registered command listed in context (see Available plugin commands).
-Commands like /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, and other session/config/operator commands are operator-side only and do not work from execute blocks.
+Operator-only commands (do NOT work from execute blocks): /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, /cost, /usage, /debug, /log, /arch, /sysinfo, /procs, /net, /ports, /ls, /find, /grep, /git, /cat, /edit, /history, /export, /goal, /maxsteps, /thinking, /memctx, /subagent-model, /find, /spawn (operator-side), /collect (operator-side).
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
@@ -5588,12 +5684,16 @@ CROSS-PLATFORM RULES:
 6. For root access on Linux: echo "$ROOT_PASS" | su -c "command" or use sudo. For BSD/old Unix: su root -c "command". For macOS: sudo command. On Windows, use PowerShell or cmd; avoid Unix-only utilities unless in Cygwin/MSYS/WSL.
 
 GENERAL RULES:
-1. ALWAYS run commands to investigate - don't just suggest them
-2. Verify fixes work by running check commands
-3. Be concise and direct
-4. Chain commands with && or ; when logical
-5. When a goal is set, keep working until done or max steps reached
-6. Report what you did and what remains after each step"""
+1. ALWAYS run commands to investigate — don't just suggest them. You have full shell access.
+2. Verify fixes work by running check commands.
+3. Be concise and direct. Report findings, not process.
+4. Chain commands with && or ; when logical.
+5. When a goal is set, keep working until done or max steps reached.
+6. Report what you did and what remains after each step.
+7. When stuck, use /remember to save progress, then /recall to find similar past work.
+8. For complex tasks, decompose: use /spawn for independent subtasks, /delegate for sequential ones.
+9. The operator can press Escape to stop you mid-execution. If interrupted, assess the interjection and continue.
+10. Sessions auto-save. You can /remember key findings so future sessions can /recall them."""
 
 def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
     '''Resilient AI query with retry, backoff, and history trimming.'''
@@ -5887,6 +5987,7 @@ def heal_response(text):
         if bare_re.search(text):
             def _replace_bare(m):
                 nonlocal healed
+                healed = True
                 cmd = m.group(1).replace('\\"', '"').replace('\\n', '\n')
                 return f"\n```execute\n{cmd}\n```\n"
             text = bare_re.sub(_replace_bare, text)
