@@ -2323,7 +2323,8 @@ def _do_git_update(project_dir=None):
         if os.path.exists(install_ps1):
             result = subprocess.run(
                 ["powershell", "-ExecutionPolicy", "Bypass", "-File", install_ps1, "-y"],
-                capture_output=True, text=True, cwd=project_dir
+                capture_output=True, text=True, cwd=project_dir,
+                stdin=subprocess.DEVNULL, timeout=120
             )
         else:
             target = os.path.join(home, ".prism32")
@@ -2331,10 +2332,12 @@ def _do_git_update(project_dir=None):
             shutil.copy2(os.path.join(project_dir, "prism32.py"), os.path.join(target, "prism32.py"))
             result = subprocess.CompletedProcess(args=[], returncode=0, stdout="Direct copy", stderr="")
     elif not os.path.exists(install_sh) and os.path.exists(openwrt_sh):
-        result = subprocess.run(["sh", openwrt_sh, "-y"], capture_output=True, text=True, cwd=project_dir)
+        result = subprocess.run(["sh", openwrt_sh, "-y"], capture_output=True, text=True, cwd=project_dir,
+                                stdin=subprocess.DEVNULL, timeout=120)
     elif os.path.exists(install_sh):
         shell_bin = shutil.which("bash") or shutil.which("sh") or "sh"
-        result = subprocess.run([shell_bin, install_sh, "-y"], capture_output=True, text=True, cwd=project_dir)
+        result = subprocess.run([shell_bin, install_sh, "-y"], capture_output=True, text=True, cwd=project_dir,
+                                stdin=subprocess.DEVNULL, timeout=120)
     else:
         print(f"  {t['warn']}No installer found. Direct copying prism32.py.{RST}")
         target = os.path.join(home, ".prism32")
@@ -2348,7 +2351,7 @@ def _do_git_update(project_dir=None):
             try:
                 ver_check = subprocess.run(
                     [sys.executable, runtime_py, "--version"],
-                    capture_output=True, text=True, timeout=5
+                    capture_output=True, text=True, timeout=10
                 )
                 ver = ver_check.stdout.strip() if ver_check.returncode == 0 else "updated"
             except Exception:
