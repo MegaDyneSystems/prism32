@@ -2850,6 +2850,24 @@ class Platform:
         # WD My Cloud NAS
         if os.path.exists('/etc/NAS_CFG') or os.path.exists('/etc/version') and os.path.exists('/CacheVolume'):
             return "WD My Cloud (NAS)"
+        # Network printers (embedded Linux on enterprise/home printers)
+        printer_checks = [
+            ('/etc/hp-version', '/opt/hp/', 'HP printer (embedded Linux)'),
+            ('/etc/brother-version', '/opt/brother/', 'Brother printer (embedded Linux)'),
+            ('/etc/epson-version', '/opt/epson/', 'Epson printer (embedded Linux)'),
+            ('/etc/canon-version', '/opt/canon/', 'Canon printer (embedded Linux)'),
+            ('/etc/lexmark-version', '/usr/local/lexmark/', 'Lexmark printer (embedded Linux)'),
+            ('/etc/xerox-version', '/opt/xerox/', 'Xerox printer (embedded Linux)'),
+            ('/etc/samsung-version', '/opt/samsung/', 'Samsung printer (embedded Linux)'),
+            ('/etc/ricoh-version', '/opt/ricoh/', 'Ricoh printer (embedded Linux)'),
+            ('/etc/konicaminolta-version', '/opt/konica/', 'Konica Minolta printer (embedded Linux)'),
+            ('/etc/kyocera-version', '/opt/kyocera/', 'Kyocera printer (embedded Linux)'),
+            ('/etc/sharp-version', '/opt/sharp/', 'Sharp printer (embedded Linux)'),
+            ('/etc/zebra-version', '/opt/zebra/', 'Zebra label printer (embedded Linux)'),
+        ]
+        for ver_file, vendor_dir, label in printer_checks:
+            if os.path.exists(ver_file) or os.path.isdir(vendor_dir):
+                return label
         # Kindle (jailbroken)
         if (os.path.exists('/usr/bin/lipc-get') or os.path.exists('/etc/prettyversion.txt') or
                 os.path.exists('/etc/kdb.src')):
