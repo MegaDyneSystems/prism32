@@ -5,6 +5,10 @@ Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
 import urllib.error
+try:
+    import ssl
+except ImportError:  # Some minimal/embedded builds lack ssl
+    ssl = None
 import json
 import sys
 import os
@@ -181,9 +185,12 @@ class PluginAPI:
 
     def http_get(self, url, headers=None, timeout=10):
         import urllib.request
-        req = urllib.request.Request(url, headers=headers or {})
+        h = dict(PRISM32_DEFAULT_HEADERS)
+        if headers:
+            h.update(headers)
+        req = urllib.request.Request(url, headers=h)
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urlopen_with_ssl(req, timeout=timeout) as r:
                 return r.read().decode('utf-8', errors='replace')
         except Exception as e:
             return f"Error: {e}"
@@ -191,13 +198,21 @@ class PluginAPI:
     def http_post(self, url, data=None, headers=None, timeout=10):
         import urllib.request
         import json as _j
-        data_bytes = _j.dumps(data).encode() if isinstance(data, dict) else (data.encode() if isinstance(data, str) else data)
+        if isinstance(data, dict):
+            data_bytes = _j.dumps(data).encode()
+        elif isinstance(data, str):
+            data_bytes = data.encode()
+        elif isinstance(data, (bytes, bytearray)):
+            data_bytes = bytes(data)
+        else:
+            data_bytes = _j.dumps(data).encode() if data is not None else b""
         h = {"Content-Type": "application/json"}
+        h.update(PRISM32_DEFAULT_HEADERS)
         if headers:
             h.update(headers)
         req = urllib.request.Request(url, data=data_bytes, headers=h, method='POST')
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with urlopen_with_ssl(req, timeout=timeout) as r:
                 return r.read().decode('utf-8', errors='replace')
         except Exception as e:
             return f"Error: {e}"
@@ -3085,6 +3100,7 @@ class Config:
     AUTO_SAVE_INTERVAL = 0    # 0 = save-on-interaction instead of timed
     THINKING_EFFORT = ""
     SLOW_CPU = False  # "", "low", "medium", "high"
+    VERIFY_SSL = True  # Set False for self-signed/internal HTTPS APIs
 
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
     ROOT_PASS = ""  # root password for su/sudo commands (injected as $ROOT_PASS env)
@@ -3162,6 +3178,7 @@ class Config:
                 "max_context_tokens": cls.MAX_CONTEXT_TOKENS,
                 "agent_name": cls.AGENT_NAME,
                 "custom_arch_map": cls.CUSTOM_ARCH_MAP,
+                "verify_ssl": cls.VERIFY_SSL,
             }
             
             with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -3205,6 +3222,10 @@ class Config:
             # configs may contain stream=true, which can re-enable fragile
             # token-level terminal output on legacy systems.
             if "slow_cpu" in data: cls.SLOW_CPU = data["slow_cpu"]
+            if "verify_ssl" in data:
+                cls.VERIFY_SSL = bool(data["verify_ssl"])
+            else:
+                cls.VERIFY_SSL = os.environ.get("PRISM32_VERIFY_SSL", "1").lower() not in ("0", "false", "no", "off")
             if "subagent_model" in data: cls.SUBAGENT_MODEL = data["subagent_model"]
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
@@ -5712,9 +5733,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
     # Trim history if too large (use model's actual context window)
     clean_messages = trim_history(clean_messages, Config.resolve_context_window())
     
-    _base = Config.API_BASE.rstrip('/')
-    if _base.endswith('/v1'):
-        _base = _base[:-3]
+    _base = normalize_api_base(Config.API_BASE)
     url = f"{_base}/v1/chat/completions"
     payload = {
         "model": Config.MODEL,
@@ -5736,7 +5755,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
                 data=json.dumps(payload).encode(),
                 headers=build_headers(),
             )
-            with urllib.request.urlopen(req, timeout=600) as resp:
+            with urlopen_with_ssl(req, timeout=600) as resp:
                 if stream if stream is not None else Config.STREAM:
                     return stream_response(resp, cancel_event=cancel_event)
                 data = json.loads(resp.read().decode())
@@ -6330,9 +6349,10 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
    /autosave <sec>      Set auto-save interval (>=10s)
    /maxhistory <n>      Set max conversation history length
    /maxtokens <n>       Override max context tokens (>=10000)
-   /maxsteps <n>        Set max goal-mode steps
-   /subagent-model [m]  Show/set default subagent model (/sam <m>)
-   /rootpass <pw>       Set root password ($ROOT_PASS env for su/sudo)
+    /maxsteps <n>        Set max goal-mode steps
+    /subagent-model [m]  Show/set default subagent model (/sam <m>)
+    /rootpass <pw>       Set root password ($ROOT_PASS env for su/sudo)
+    /verify-ssl [on|off] Toggle HTTPS certificate verification
 
  {bold}Manual Tools{reset}
    /bash <cmd>          Run shell command
@@ -7282,7 +7302,7 @@ def main():
                         print(f"  Current API: {t['bright']}{Config.API_BASE}{RST}")
                         print(f"  Usage: provider api <url>")
                 elif subcmd == 'key':
-                    key = parts[1].split()[0] if len(parts) > 1 and parts[1].split() else ""
+                    key = parts[1].strip() if len(parts) > 1 else ""
                     if key:
                         Config.API_KEY = key
                         Config.save_config()
@@ -7752,6 +7772,26 @@ def main():
             print()
             continue
 
+        if cmd in ('verify-ssl', 'ssl'):
+            if args_str:
+                val = args_str.strip().lower()
+                if val in ('on', 'true', '1', 'yes'):
+                    Config.VERIFY_SSL = True
+                    Config.save_config()
+                    print(f"  {t['bright']}+ HTTPS certificate verification: ON{RST}")
+                elif val in ('off', 'false', '0', 'no'):
+                    Config.VERIFY_SSL = False
+                    Config.save_config()
+                    print(f"  {t['warn']}+ HTTPS certificate verification: OFF (self-signed/internal APIs allowed){RST}")
+                else:
+                    print(f"  {t['dim']}Usage: /verify-ssl on|off{RST}")
+            else:
+                status = t['bright'] + 'ON' if Config.VERIFY_SSL else t['warn'] + 'OFF'
+                print(f"  HTTPS certificate verification: {status}{RST}")
+                print(f"  {t['dim']}Usage: /verify-ssl on|off — also PRISM32_VERIFY_SSL=0 env var{RST}")
+            print()
+            continue
+
         if cmd in ('maxhistory', 'history-limit'):
             if args_str:
                 try:
@@ -7840,7 +7880,7 @@ def main():
                         f"{Config.API_BASE.rstrip('/')}/auth/key",
                         headers=build_headers(),
                     )
-                    with urllib.request.urlopen(req, timeout=10) as resp:
+                    with urlopen_with_ssl(req, timeout=10) as resp:
                         d = json.loads(resp.read().decode()).get("data", {})
                     limit = d.get("limit", 0)
                     remaining = d.get("limit_remaining", 0)
@@ -8473,6 +8513,68 @@ def main():
     reset_scroll_region()
     print(SHOW)
 
+# ── HTTP Helpers ────────────────────────────────────────────
+
+PRISM32_USER_AGENT = "Prism32/6.8"
+PRISM32_DEFAULT_HEADERS = {
+    "User-Agent": PRISM32_USER_AGENT,
+    "Accept": "application/json, text/plain, text/html, */*",
+}
+
+
+def _env_verify_ssl():
+    """Check environment override for SSL verification."""
+    val = os.environ.get("PRISM32_VERIFY_SSL", "").lower()
+    if val in ("0", "false", "no", "off"):
+        return False
+    if val in ("1", "true", "yes", "on"):
+        return True
+    return None
+
+
+def create_ssl_context():
+    """Create SSL context honoring Config.VERIFY_SSL and PRISM32_VERIFY_SSL.
+    Returns None when the ssl module is unavailable or disabled, so callers
+    can fall back to urllib without a context argument."""
+    env = _env_verify_ssl()
+    verify = Config.VERIFY_SSL if env is None else env
+    if not verify:
+        if ssl:
+            try:
+                return ssl._create_unverified_context()
+            except Exception:
+                pass
+        return None
+    if ssl:
+        try:
+            return ssl.create_default_context()
+        except Exception:
+            pass
+    return None
+
+
+def urlopen_with_ssl(req, **kwargs):
+    """urllib.request.urlopen wrapper that injects the configured SSL context.
+    Still delegates to urllib.request.urlopen so tests that monkeypatch it work."""
+    ctx = create_ssl_context()
+    if ctx is not None:
+        kwargs["context"] = ctx
+    return urllib.request.urlopen(req, **kwargs)
+
+
+def normalize_api_base(base):
+    """Normalize an OpenAI-compatible API base URL.
+    Strips trailing slashes and exactly one trailing /v1 path segment so that
+    appending /v1/<endpoint> never produces double slashes.
+    """
+    base = (base or "").strip()
+    if not base:
+        return "http://127.0.0.1:8080"
+    base = base.rstrip('/')
+    if base.lower().endswith('/v1'):
+        base = base[:-3].rstrip('/')
+    return base
+
 # ── Model Selector ──────────────────────────────────────────
 
 _IS_OPENROUTER = None
@@ -8496,14 +8598,12 @@ def fetch_models():
     Returns a list of model IDs/names, or empty list on failure.
     """
     try:
-        _base = Config.API_BASE.rstrip('/')
-        if _base.endswith('/v1'):
-            _base = _base[:-3]
+        _base = normalize_api_base(Config.API_BASE)
         req = urllib.request.Request(
             f"{_base}/v1/models",
             headers=build_headers(),
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urlopen_with_ssl(req, timeout=15) as resp:
             data = json.loads(resp.read().decode())
     except Exception:
         return []
@@ -8762,7 +8862,8 @@ def cmd_image(args_str):
     try:
         if path.startswith(('http://', 'https://')):
             print(f"  {t['dim']}Downloading image...{RST}")
-            with urllib.request.urlopen(path, timeout=30) as r:
+            req = urllib.request.Request(path, headers=PRISM32_DEFAULT_HEADERS)
+            with urlopen_with_ssl(req, timeout=30) as r:
                 data = r.read()
             ext = os.path.splitext(path.split('?')[0])[1].lower()
         else:

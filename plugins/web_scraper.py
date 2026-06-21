@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shlex
+import ssl
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
@@ -153,10 +154,25 @@ def _decode_body(body, content_type):
         return body.decode("utf-8", errors="replace")
 
 
+def _fetch_ssl_context():
+    """Respect PRISM32_VERIFY_SSL=0 to allow self-signed/internal HTTPS."""
+    val = os.environ.get("PRISM32_VERIFY_SSL", "").lower()
+    if val in ("0", "false", "no", "off"):
+        try:
+            return ssl._create_unverified_context()
+        except Exception:
+            return None
+    return None
+
+
 def _fetch(url, timeout):
     try:
         req = urllib.request.Request(url, headers=DEFAULT_HEADERS)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        ctx = _fetch_ssl_context()
+        kw = {"timeout": timeout}
+        if ctx is not None:
+            kw["context"] = ctx
+        with urllib.request.urlopen(req, **kw) as resp:
             body = resp.read()
             headers = _headers_to_dict(resp.headers)
             return {
