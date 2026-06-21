@@ -2679,16 +2679,159 @@ class Platform:
             return ""
 
     @staticmethod
+    def _humanize_arch(machine):
+        """Humanize a platform.machine() string for fallback CPU display."""
+        if not machine:
+            return None
+        m = machine.lower()
+        label_map = {
+            'x86_64': 'x86_64', 'amd64': 'x86_64',
+            'i386': 'x86', 'i486': 'x86', 'i586': 'x86', 'i686': 'x86',
+            'aarch64': 'ARM64', 'arm64': 'ARM64',
+            'armv8l': 'ARMv8', 'armv8': 'ARMv8',
+            'armv7l': 'ARMv7', 'armv7': 'ARMv7',
+            'armv6l': 'ARMv6', 'armv6': 'ARMv6',
+            'armv5tel': 'ARMv5TE', 'armv5': 'ARMv5',
+            'arm': 'ARM',
+            'mips': 'MIPS', 'mipsel': 'MIPS (LE)',
+            'mips64': 'MIPS64', 'mips64el': 'MIPS64 (LE)',
+            'mipsisa32r2el': 'MIPS32r2 (LE)',
+            'mipsisa32r6el': 'MIPS32r6 (LE)',
+            'mipsisa64r6el': 'MIPS64r6 (LE)',
+            'ppc': 'PowerPC', 'ppc64': 'PowerPC 64',
+            'ppc64le': 'PowerPC 64 LE',
+            'powerpc': 'PowerPC', 'powerpc64': 'PowerPC 64',
+            'powerpcspe': 'PowerPC SPE',
+            'riscv32': 'RISC-V 32', 'riscv64': 'RISC-V 64', 'riscv': 'RISC-V',
+            'sparc': 'SPARC', 'sparc64': 'SPARC 64', 'sparcv9': 'SPARC 64',
+            'sun4u': 'SPARC 64', 'sun4v': 'SPARC 64',
+            's390': 'IBM S/390', 's390x': 'IBM Z', 'zarch': 'IBM Z',
+            'alpha': 'Alpha',
+            'hppa': 'PA-RISC', 'parisc': 'PA-RISC',
+            'ia64': 'Itanium',
+            'loongarch64': 'LoongArch 64', 'loong64': 'LoongArch 64',
+            'e2k': 'Elbrus', 'vax': 'VAX',
+        }
+        if m in label_map:
+            return label_map[m]
+        for k, v in sorted(label_map.items(), key=lambda x: -len(x[0])):
+            if m.startswith(k):
+                return v
+        return machine
+
+    @staticmethod
+    def _get_cpu_linux():
+        """Get CPU model on Linux across all architectures.
+
+        /proc/cpuinfo field name varies by family:
+        - x86, ARM (most): 'model name'
+        - MIPS: 'cpu model' + 'system type' (SoC)
+        - PowerPC: 'cpu' (+ 'clock')
+        - Android/some ARM: 'Hardware'
+        - SPARC (Linux): 'CPU' (capitalized)
+        - s390x: 'vendor_id'
+        - RISC-V: 'uarch' + 'isa' (no 'model name')
+        """
+        all_fields = {}
+        try:
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if ':' not in line:
+                        continue
+                    key, _, val = line.partition(':')
+                    key = key.strip()
+                    val = val.strip()
+                    if val and key not in all_fields:
+                        all_fields[key] = val
+        except (IOError, OSError):
+            pass
+
+        # Priority 1: 'model name' (x86, ARM)
+        model = all_fields.get('model name')
+        if model:
+            return model
+
+        # Priority 2: MIPS — 'cpu model' (+ 'system type' for SoC context)
+        cpu_model = all_fields.get('cpu model')
+        system_type = all_fields.get('system type')
+        if cpu_model:
+            if system_type:
+                return f"{cpu_model} ({system_type})"
+            return cpu_model
+
+        # Priority 3: Android/some ARM — 'Hardware' field
+        hardware = all_fields.get('Hardware')
+        if hardware:
+            return hardware
+
+        # Priority 4: PowerPC — 'cpu' (optionally with 'clock')
+        cpu = all_fields.get('cpu')
+        if cpu:
+            clock = all_fields.get('clock')
+            if clock:
+                return f"{cpu} @ {clock}"
+            return cpu
+
+        # Priority 5: SPARC Linux — 'CPU' (capitalized on Linux/sparc)
+        sparc_cpu = all_fields.get('CPU')
+        if sparc_cpu:
+            return sparc_cpu
+
+        # Priority 6: s390x — 'vendor_id'
+        vendor = all_fields.get('vendor_id')
+        if vendor:
+            nprocs = all_fields.get('# processors') or all_fields.get('processors')
+            if nprocs:
+                return f"{vendor} ({nprocs} CPUs)"
+            return vendor
+
+        # Priority 7: RISC-V — 'uarch' or 'isa'
+        uarch = all_fields.get('uarch')
+        isa = all_fields.get('isa')
+        if uarch:
+            if isa:
+                return f"{uarch} (ISA: {isa})"
+            return uarch
+        if isa:
+            return f"RISC-V ({isa})"
+
+        # Priority 8: 'Processor' (older ARMs, BeagleBone etc.)
+        proc_field = all_fields.get('Processor')
+        if proc_field and not proc_field.isdigit():
+            return proc_field
+
+        # Priority 9: OpenWrt embedded — /tmp/sysinfo/model_name (rare)
+        try:
+            with open('/tmp/sysinfo/model_name') as f:
+                val = f.read().strip()
+                if val:
+                    return val
+        except (IOError, OSError):
+            pass
+
+        # Priority 10: platform.processor() if non-empty and non-numeric
+        proc = platform.processor()
+        if proc and proc.strip() and not proc.strip().isdigit():
+            return proc.strip()
+
+        # Priority 11: humanized platform.machine()
+        humanized = Platform._humanize_arch(platform.machine())
+        if humanized:
+            return humanized
+
+        return "Unknown CPU"
+
+    @staticmethod
     def get_cpu():
         """Get CPU model name."""
         try:
             if Platform.LINUX:
-                with open('/proc/cpuinfo') as f:
-                    for line in f:
-                        if line.startswith('model name'):
-                            return line.split(':')[1].strip()
+                return Platform._get_cpu_linux()
             elif Platform.MACOS:
-                return Platform._run_cmd(['sysctl', '-n', 'machdep.cpu.brand_string'])
+                cpu = Platform._run_cmd(['sysctl', '-n', 'machdep.cpu.brand_string'])
+                if not cpu:
+                    cpu = Platform._run_cmd(['sysctl', '-n', 'hw.model'])
+                return cpu or "Unknown CPU"
             elif Platform.WINDOWS:
                 result = Platform._run_cmd(['powershell', '-NoProfile', '-Command',
                     '(Get-CimInstance Win32_Processor).Name'])
@@ -2698,6 +2841,7 @@ class Platform:
                 lines = result.strip().split('\n')
                 if len(lines) > 1:
                     return lines[1].strip()
+                return "Unknown CPU"
             elif Platform.BSD:
                 return Platform._run_cmd(['sysctl', '-n', 'hw.model']) or "Unknown CPU"
             elif Platform.AIX:
@@ -2731,7 +2875,11 @@ class Platform:
                 return Platform._run_cmd(['psrinfo']) or "Unknown CPU"
         except Exception:
             pass
-        return platform.processor() or "Unknown CPU"
+        proc = platform.processor()
+        if proc and proc.strip() and not proc.strip().isdigit():
+            return proc.strip()
+        humanized = Platform._humanize_arch(platform.machine())
+        return humanized or "Unknown CPU"
 
     @staticmethod
     def get_ram():
