@@ -2437,11 +2437,37 @@ class Platform:
 
     @staticmethod
     def _linux_special_name():
+        # os-release ID map first (Tizen, webOS, SteamOS, HA OS, Lakka, Maemo, etc.)
+        osr = Platform._read_key_value_file('/etc/os-release')
+        rid = (osr.get('ID') or '').lower()
+        os_id_map = {
+            'tizen': 'Tizen',
+            'webos': 'webOS',
+            'steam': 'SteamOS',
+            'hassos': 'Home Assistant OS',
+            'lakka': 'Lakka',
+            'maemo': 'Maemo',
+            'buildroot': 'Buildroot Linux',
+            'clear-linux-os': 'Clear Linux',
+            'asteroidos': 'AsteroidOS (smartwatch)',
+            'amigos': 'Amazfit (AmiGo OS)',
+            'zepp': 'Amazfit (Zepp OS)',
+            'remarkable': 'reMarkable tablet',
+            'castos': 'Google Cast OS (Nest)',
+            'wago-pfc': 'WAGO PFC (industrial PLC)',
+        }
+        if rid in os_id_map:
+            pretty = osr.get('PRETTY_NAME', '')
+            return pretty if pretty else os_id_map[rid]
+
         checks = [
             ('/etc/unraid-version', 'Unraid'),
             ('/etc/truenas-release', 'TrueNAS SCALE'),
             ('/etc/ix-release', 'TrueNAS SCALE'),
             ('/etc/openwrt_release', 'OpenWrt'),
+            ('/etc/dogtag', ''),
+            ('/etc/palm', 'webOS (Palm)'),
+            ('/etc/armbian-release', ''),
             ('/etc/os-release', ''),
         ]
         for path, name in checks:
@@ -2452,6 +2478,457 @@ class Platform:
         if os.path.exists('/mnt/chromeos') or os.path.exists('/dev/.cros_milestone'):
             return 'ChromeOS/Crostini'
         return ""
+
+    @staticmethod
+    def _read_devicetree_model():
+        """Read /proc/device-tree/model or /sys/firmware/devicetree/base/model."""
+        for path in ('/proc/device-tree/model', '/sys/firmware/devicetree/base/model'):
+            try:
+                with open(path, 'rb') as f:
+                    val = f.read().split(b'\x00')[0].decode('utf-8', errors='replace').strip()
+                    if val:
+                        return val
+            except (IOError, OSError):
+                pass
+        return ""
+
+    @staticmethod
+    def _read_devicetree_compatible():
+        """Return list of compatible strings from DeviceTree."""
+        for path in ('/proc/device-tree/compatible', '/sys/firmware/devicetree/base/compatible'):
+            try:
+                with open(path, 'rb') as f:
+                    return [s.decode('utf-8', errors='replace') for s in f.read().split(b'\x00') if s]
+            except (IOError, OSError):
+                pass
+        return []
+
+    @staticmethod
+    def _read_cpuinfo_field(field_name):
+        """Read a single field from /proc/cpuinfo (case-insensitive)."""
+        try:
+            with open('/proc/cpuinfo') as f:
+                fl = field_name.lower()
+                for line in f:
+                    if ':' not in line:
+                        continue
+                    key, _, val = line.partition(':')
+                    if key.strip().lower() == fl:
+                        return val.strip()
+        except (IOError, OSError):
+            pass
+        return ""
+
+    @staticmethod
+    def _read_cpuinfo_all():
+        """Return dict of all fields from /proc/cpuinfo (first occurrence)."""
+        result = {}
+        try:
+            with open('/proc/cpuinfo') as f:
+                for line in f:
+                    if ':' not in line:
+                        continue
+                    key, _, val = line.partition(':')
+                    key = key.strip()
+                    val = val.strip()
+                    if val and key not in result:
+                        result[key] = val
+        except (IOError, OSError):
+            pass
+        return result
+
+    @staticmethod
+    def _getprop(prop):
+        """Read Android system property via getprop."""
+        try:
+            result = subprocess.run(['getprop', prop], capture_output=True, text=True, timeout=3)
+            return result.stdout.strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def device_model():
+        """Best-effort hardware device identification across all platforms.
+        Returns device name string (e.g. 'Raspberry Pi 4 B', 'Steam Deck', 'Chromecast')
+        or empty string if not identifiable."""
+        # 1. DeviceTree model (most ARM SBCs, modern Linux)
+        dt_model = Platform._read_devicetree_model()
+        if dt_model:
+            return dt_model
+        # 2. /proc/cpuinfo Hardware field (older ARM, Kindle, etc.)
+        hw = Platform._read_cpuinfo_field('Hardware')
+        if hw:
+            return hw
+        # 3. OpenWrt /tmp/sysinfo/model_name
+        for p in ('/tmp/sysinfo/model_name', '/tmp/sysinfo/board_name'):
+            try:
+                with open(p) as f:
+                    v = f.read().strip()
+                    if v:
+                        return v
+            except (IOError, OSError):
+                pass
+        # 4. DMI sysfs (Steam Deck, Tesla, etc.)
+        for p in ('/sys/class/dmi/id/product_name', '/sys/class/dmi/id/board_name'):
+            try:
+                with open(p) as f:
+                    v = f.read().strip()
+                    if v and v.lower() not in ('to be filled by o.e.m.', 'none', 'default string', ''):
+                        return v
+            except (IOError, OSError):
+                pass
+        # 5. /proc/hardware Model: line (Linux/m68k — Amiga, Atari, X68000)
+        try:
+            with open('/proc/hardware') as f:
+                for line in f:
+                    if line.startswith('Model:'):
+                        return line.split(':', 1)[1].strip()
+        except (IOError, OSError):
+            pass
+        return ""
+
+    @staticmethod
+    def _detect_android_device():
+        """Detect specific Android device (Chromecast, Fire TV, Android TV, Wear OS, Switch, etc.)
+        Returns (device_name, form_factor) or ("", "")."""
+        manufacturer = Platform._getprop('ro.product.manufacturer')
+        brand = Platform._getprop('ro.product.brand')
+        model = Platform._getprop('ro.product.model')
+        device = Platform._getprop('ro.product.device')
+        # ro.build.characteristics is multi-value (e.g. "nosdcard,watch")
+        characteristics = Platform._getprop('ro.build.characteristics')
+        characteristic = Platform._getprop('ro.build.characteristic')
+        ui_mode = Platform._getprop('ro.product.ui')
+        fireos = Platform._getprop('ro.build.version.fireos')
+        # Form factor: check both single and multi-value characteristic props
+        char_list = set()
+        if characteristic:
+            char_list.add(characteristic)
+        if characteristics:
+            char_list.update(c.strip() for c in characteristics.split(','))
+        if ui_mode == 'watch' or 'watch' in char_list:
+            form = "watch"
+        elif 'tv' in char_list or characteristic == 'tv':
+            form = "TV"
+        elif 'tablet' in char_list or characteristic == 'tablet':
+            form = "tablet"
+        else:
+            form = ""
+        # Fire OS / Amazon device detection
+        if fireos or brand == 'Amazon' or manufacturer == 'Amazon':
+            kindle = 'Kindle' if form == 'tablet' else 'Fire TV'
+            return f"Amazon {kindle} ({model})", form
+        # Chromecast with Google TV
+        if manufacturer == 'Google' and 'Chromecast' in model:
+            return f"Chromecast ({device})", form
+        # Nintendo Switch (Switchroot LineageOS)
+        if manufacturer == 'Nintendo' or device in ('nx', 'icosa'):
+            return f"Nintendo Switch ({device})", form
+        # Wear OS / Android Wear smartwatch
+        if form == 'watch':
+            return f"Wear OS smartwatch ({model})", form
+        # Android TV (generic)
+        if form == 'tv':
+            return f"Android TV ({model})", form
+        # Onyx Boox e-reader
+        if brand == 'ONYX' or manufacturer == 'ONYX':
+            return f"Onyx Boox e-reader ({model})", form
+        # Generic Android device (phone, car stereo, etc.)
+        if model or device:
+            label = model or device
+            return f"Android ({label})", form
+        return "", ""
+
+    @staticmethod
+    def _detect_linux_console():
+        """Detect game consoles running Linux (PS2, PS3, Wii, GameCube, Xbox, Dreamcast, etc.)
+        Returns device name or empty string."""
+        # PowerPC Linux: /proc/cpuinfo 'platform:' line → PS3, Wii, GameCube, PowerMac
+        platform_line = Platform._read_cpuinfo_field('platform')
+        if platform_line:
+            plat = platform_line.lower()
+            if 'ps3' in plat:
+                cpu = Platform._read_cpuinfo_field('cpu')
+                if 'cell' in cpu.lower():
+                    return "Sony PlayStation 3 (Cell, OtherOS Linux)"
+                return "Sony PlayStation 3 (Linux)"
+            if 'wii' in plat:
+                return "Nintendo Wii (Wii Linux)"
+            if 'gekko' in plat or 'gamecube' in plat:
+                return "Nintendo GameCube (GameCube Linux)"
+            if 'powermac' in plat or 'powerle' in plat:
+                return None  # Not a console — fall through
+        # PS2: R5900 cpu
+        cpu = Platform._read_cpuinfo_field('cpu')
+        if cpu and 'R5900' in cpu:
+            return "Sony PlayStation 2 (PS2 Linux)"
+        # Dreamcast: SH-4 / SH7750
+        machine = (platform.machine() or '').lower()
+        if machine in ('sh4', 'superh') or 'SH7750' in cpu:
+            return "Sega Dreamcast (LinuxDC)"
+        # Original Xbox Linux: /proc/version contains "Xbox"
+        try:
+            with open('/proc/version') as f:
+                ver = f.read()
+                if 'Xbox' in ver or 'Microsoft Xbox' in ver:
+                    return "Microsoft Xbox (Xbox Linux)"
+        except (IOError, OSError):
+            pass
+        # Nintendo 3DS: device-tree compatible contains 'nintendo,ctr'
+        for c in Platform._read_devicetree_compatible():
+            if c.startswith('nintendo,'):
+                dev = c.split(',', 1)[1]
+                return f"Nintendo {dev} (Linux)"
+        # Linux/m68k: Amiga, Atari, X68000 via /proc/hardware Model:
+        try:
+            with open('/proc/hardware') as f:
+                for line in f:
+                    if line.startswith('Model:'):
+                        model = line.split(':', 1)[1].strip()
+                        ml = model.lower()
+                        if 'amiga' in ml:
+                            return f"Commodore Amiga ({model})"
+                        if 'atari' in ml:
+                            return f"Atari ST/TT/Falcon ({model})"
+                        if 'x68000' in ml:
+                            return f"Sharp X68000 ({model})"
+                        return model
+        except (IOError, OSError):
+            pass
+        return ""
+
+    @staticmethod
+    def _detect_sbc():
+        """Detect single-board computers (Raspberry Pi, BeagleBone, Pine64, Odroid, etc.)
+        Returns device name or empty string."""
+        # DeviceTree compatible strings (modern kernel — most SBCs)
+        compat = Platform._read_devicetree_compatible()
+        sbc_compat_map = {
+            'raspberrypi,': 'Raspberry Pi',
+            'ti,am335x': 'TI AM335x (BeagleBone-class)',
+            'ti,am572x': 'TI AM572x (BeagleBone AI)',
+            'ti,am57': 'TI AM57xx (BeagleBone AI)',
+            'pine64,': 'Pine64',
+            'hardkernel,odroid': 'Hardkernel Odroid',
+            'xunlong,orangepi': 'Orange Pi',
+            'bananapi,': 'Banana Pi',
+            'friendlyarm,nanopi': 'NanoPi',
+            'olimex,': 'OLinuXino',
+            'gumstix,': 'Gumstix',
+            'nextthing,': 'NextThing Chip',
+            'nextthing,gr8': 'NextThing Chip (GR8)',
+            'openmoko,': 'OpenMoko',
+            'asus,rk3288-tinker': 'ASUS Tinker Board',
+            'intel,edison': 'Intel Edison',
+            'intel,galileo': 'Intel Galileo',
+            'hisilicon,hi6220-hikey': 'HiKey 620 (96Boards)',
+            'hisilicon,hi3660-hikey960': 'HiKey 960 (96Boards)',
+            'img,ci20': 'MIPS Creator CI20',
+            'nvidia,tegra': 'NVIDIA Tegra',
+            'allwinner,sun': 'Allwinner SoC',
+            'rockchip,rk': 'Rockchip SoC',
+            'samsung,s3c': 'Samsung S3C SoC (GamePark)',
+            'marvell,mmp2': 'Marvell MMP2 (OLPC XO-1.75)',
+            'marvell,': 'Marvell SoC',
+            'fsl,imx': 'Freescale i.MX SoC',
+            'freescale,imx': 'Freescale i.MX SoC',
+            'brcm,bcm': 'Broadcom SoC',
+            'geforce,': 'NVIDIA GeForce (Tegra)',
+            'radxa,': 'Radxa SBC',
+            'radxa,rock': 'Radxa Rock',
+            'radxa,zero': 'Radxa Zero',
+            'khadas,vim': 'Khadas VIM',
+            'libretech,': 'Libre Computer Board',
+            'libretech,cc': 'Libre Computer Le Potato',
+            'libretech,renegade': 'Libre Computer Renegade',
+            'firefly,': 'Firefly SBC',
+            'cz.nic,turris': 'Turris router',
+            'altr,socfpga': 'MiSTer FPGA (Altera SoC)',
+            'remarkable,': 'reMarkable tablet',
+            'kobo,': 'Kobo e-reader',
+            'sinovoip,bpi': 'Banana Pi',
+            'wago,': 'WAGO PFC',
+            'mediatek,': 'MediaTek SoC',
+            'amlogic,': 'Amlogic SoC',
+            'sinovoip,': 'Banana Pi',
+            'lemaker,': 'LeMaker SBC',
+            'garmin,': 'Garmin device',
+            'xisemo,': 'Xisemo SBC',
+        }
+        for c in compat:
+            cl = c.lower()
+            for prefix, label in sbc_compat_map.items():
+                if cl.startswith(prefix):
+                    # Refine Raspberry Pi model from the compatible string
+                    if prefix == 'raspberrypi,':
+                        tag = c.split(',', 1)[1] if ',' in c else ''
+                        pi_map = {
+                            'model-b': 'Pi 1 B', '2-model-b': 'Pi 2 B',
+                            '3-model-b': 'Pi 3 B', '3-model-b-plus': 'Pi 3 B+',
+                            '4-model-b': 'Pi 4 B', '5-model-b': 'Pi 5',
+                            'model-zero': 'Pi Zero', 'model-zero-w': 'Pi Zero W',
+                            'model-zero-2-w': 'Pi Zero 2 W',
+                            'compute-module-4': 'Pi CM4',
+                            'compute-module-5': 'Pi CM5',
+                            'model-a': 'Pi 1 A', 'model-a-plus': 'Pi 1 A+',
+                            'model-b-plus': 'Pi 1 B+',
+                            '400': 'Pi 400',
+                        }
+                        return pi_map.get(tag, label)
+                    return label
+        # BeagleBoard /etc/dogtag file
+        if os.path.exists('/etc/dogtag'):
+            try:
+                with open('/etc/dogtag') as f:
+                    return f.readline().strip()
+            except (IOError, OSError):
+                pass
+        # Odroid /proc/cpuinfo Hardware (older kernels)
+        hw = Platform._read_cpuinfo_field('Hardware')
+        if hw:
+            hw_lower = hw.lower()
+            if 'odroid' in hw_lower:
+                return f"Hardkernel {hw}"
+            if hw in ('Gumstix Pepper', 'Gumstix Overo', 'Gumstix DuoVerde'):
+                return hw
+            if 'am33xx' in hw_lower:
+                return "TI AM335x (BeagleBone-class)"
+        # BeagleBone DeviceTree model
+        dt_model = Platform._read_devicetree_model()
+        if dt_model:
+            dl = dt_model.lower()
+            if 'beaglebone' in dl or 'beagleboard' in dl:
+                return dt_model
+            if 'odroid' in dl:
+                return dt_model
+            if 'pandora' in dl:
+                return f"OpenPandora ({dt_model})"
+        # PogoPlug / SheevaPlug / GuruPlug via /proc/cpuinfo Hardware
+        plug_map = {
+            'Marvell SheevaPlug Reference Board': 'SheevaPlug',
+            'Marvell Guruplug Reference Board': 'GuruPlug',
+            'Globalscale Technologies GuruPlug': 'GuruPlug',
+            'DreamPlug': 'DreamPlug',
+            'D-Link DNS-323': 'D-Link DNS-323 NAS',
+            'SqueezeOS': 'Squeezebox (SqueezeOS)',
+            'Chumby': 'Chumby',
+            'Nokia 770': 'Nokia 770',
+            'Nokia N800': 'Nokia N800',
+            'Nokia N810': 'Nokia N810',
+            'GTA01': 'OpenMoko Neo 1973',
+            'GTA02': 'OpenMoko FreeRunner',
+            'YOPY': 'Yopy PDA',
+            'PMA400': 'Archos PMA400',
+            'GP2X': 'GamePark GP2X',
+            'Caanoo': 'GamePark Caanoo',
+            'Sharp-C700': 'Sharp Zaurus',
+            'Sharp Zaurus': 'Sharp Zaurus',
+        }
+        if hw in plug_map:
+            return plug_map[hw]
+        # Sony Reader detection
+        if os.path.exists('/etc/sony') or 'Sony PRS-T' in (Platform._read_cpuinfo_field('Hardware') or ''):
+            return "Sony Reader (PRS)"
+        return ""
+
+    @staticmethod
+    def _detect_appliance():
+        """Detect appliance / IoT devices (NAS, smart TV, e-reader, smart home hub, router, etc.)
+        Returns device name or empty string."""
+        # Synology DSM
+        if os.path.exists('/etc/synoinfo.conf') or os.path.exists('/etc.defaults/synoinfo.conf'):
+            return "Synology DSM (NAS)"
+        # QNAP QTS
+        if os.path.exists('/etc/config/uLinux.conf') or os.path.exists('/etc/qnap_config'):
+            return "QNAP QTS (NAS)"
+        # ReadyNAS
+        if os.path.exists('/etc/readynas'):
+            return "Netgear ReadyNAS"
+        # WD My Cloud NAS
+        if os.path.exists('/etc/NAS_CFG') or os.path.exists('/etc/version') and os.path.exists('/CacheVolume'):
+            return "WD My Cloud (NAS)"
+        # Kindle (jailbroken)
+        if (os.path.exists('/usr/bin/lipc-get') or os.path.exists('/etc/prettyversion.txt') or
+                os.path.exists('/etc/kdb.src')):
+            return "Amazon Kindle"
+        # Kobo e-reader
+        if os.path.exists('/etc/kobo-version') or os.path.exists('/mnt/onboard/.kobo/version'):
+            return "Kobo e-reader"
+        # Chumby
+        if os.path.exists('/etc/chumbyver'):
+            return "Chumby"
+        # Samsung Orsay TV (SamyGO)
+        if os.path.exists('/mtd_rwarea/SamyGO.txt') or os.path.exists('/dtv/'):
+            return "Samsung Orsay TV (SamyGO)"
+        # Homebridge
+        if os.path.exists('/var/lib/homebridge/'):
+            return "Homebridge hub"
+        # Turris router
+        if os.path.exists('/etc/turris-version'):
+            return "Turris router"
+        # Fritz!Box router
+        if os.path.exists('/proc/sys/urlader/environment'):
+            return "AVM Fritz!Box router"
+        # Mikrotik RouterOS
+        if os.path.isdir('/sys/firmware/mikrotik'):
+            return "Mikrotik RouterOS"
+        # WAGO PFC industrial PLC
+        if os.path.exists('/etc/specific'):
+            return "WAGO PFC (industrial PLC)"
+        # Tesla MCU
+        if os.path.isdir('/usr/tesla/') or os.path.isdir('/persist/'):
+            try:
+                with open('/etc/version') as f:
+                    return f"Tesla MCU ({f.readline().strip()})"
+            except (IOError, OSError):
+                return "Tesla MCU"
+        # Steam Deck
+        dmi_vendor = ""
+        try:
+            with open('/sys/class/dmi/id/sys_vendor') as f:
+                dmi_vendor = f.read().strip()
+        except (IOError, OSError):
+            pass
+        if dmi_vendor == 'Valve':
+            try:
+                with open('/sys/class/dmi/id/product_name') as f:
+                    pn = f.read().strip()
+                    if pn == 'Jupiter':
+                        return "Steam Deck (LCD)"
+                    if pn == 'Galileo':
+                        return "Steam Deck (OLED)"
+                    return f"Valve {pn}"
+            except (IOError, OSError):
+                pass
+        return ""
+
+    @staticmethod
+    def detect_device():
+        """Master device detection combining all signals.
+        Returns a device name string (or empty if not detected)."""
+        # env override
+        env_dev = os.environ.get('PRISM32_DEVICE', '')
+        if env_dev:
+            return env_dev
+        # Android-specific (Chromecast, Fire TV, Switch, etc.)
+        if Platform.ANDROID:
+            dev, form = Platform._detect_android_device()
+            if dev:
+                return dev
+        # Game consoles
+        console = Platform._detect_linux_console()
+        if console:
+            return console
+        # SBCs
+        sbc = Platform._detect_sbc()
+        if sbc:
+            return sbc
+        # Appliances / IoT
+        appliance = Platform._detect_appliance()
+        if appliance:
+            return appliance
+        # Catch-all: device_model() (DT model, cpuinfo Hardware, OpenWrt sysinfo, DMI product, /proc/hardware Model)
+        return Platform.device_model()
 
     @staticmethod
     def get_windows_name():
@@ -2473,9 +2950,26 @@ class Platform:
     @staticmethod
     def get_system():
         """Get the operating system name."""
+        # MicroPython / CircuitPython early exit (no Prism32 support)
+        impl = getattr(sys, 'implementation', None)
+        if impl and getattr(impl, 'name', '') in ('micropython', 'circuitpython'):
+            impl_name = {'micropython': 'MicroPython', 'circuitpython': 'CircuitPython'}.get(impl.name, impl.name)
+            return f"{impl_name} (no CPython — Prism32 requires CPython 3.7+)"
+        if sys.platform in ('symbian', 's60'):
+            return "Symbian S60 (PyS60 — Prism32 not supported)"
+        if sys.platform.startswith('wince') or (sys.platform == 'win32' and getattr(os, 'name', '') == 'ce'):
+            return "Windows CE (Prism32 not supported)"
+        # QNX / BlackBerry
+        if Platform.QNX:
+            if os.path.exists('/base/usr/bin/python') or os.path.exists('/pps'):
+                return "BlackBerry 10 (QNX)"
+            return "QNX Neutrino"
         if Platform.TERMUX:
+            dev = Platform.detect_device()
+            if dev and 'Android' not in dev:
+                return f"Android/Termux on {dev}"
             return "Android (Termux)"
-        if Platform.ANDROID:
+        if Platform.ANDROID and not Platform.TERMUX:
             return "Android"
         if Platform.MACOS:
             return "macOS"
@@ -2504,8 +2998,6 @@ class Platform:
             return "Tru64"
         if Platform.HAIKU:
             return "Haiku"
-        if Platform.QNX:
-            return "QNX Neutrino"
         if Platform.MINIX:
             return "MINIX"
         if Platform.CYGWIN:
@@ -2519,6 +3011,11 @@ class Platform:
         if Platform.OPENVMS:
             return "OpenVMS"
         if Platform.LINUX:
+            # Detect PlayStation 4/5 Orbis (FreeBSD-based — sys.platform starts with 'freebsd' on Orbis
+            # BUT Platform.LINUX is set on Orbis/FreeBSD userspace if running Linux compat layer)
+            # Actually Orbis is detected as BSD, not Linux. We'll handle it in BSD branch.
+            # Linux: detect specific device (Steam Deck, RPi, Wii, PS3-Linux, Switch, etc.)
+            detected_device = Platform.detect_device()
             special = Platform._linux_special_name()
             base = special or Platform._linux_release_name()
             for rel in ('/etc/redhat-release', '/etc/SuSE-release',
@@ -2529,13 +3026,15 @@ class Platform:
                 except Exception:
                     pass
             try:
-                import subprocess
                 result = subprocess.run(['uname', '-sr'], capture_output=True, text=True)
                 if result.returncode == 0 and not base:
                     base = result.stdout.strip()
             except Exception:
                 pass
             base = base or "Linux"
+            # Append detected device
+            if detected_device and detected_device not in base:
+                base = f"{base} on {detected_device}"
             tags = []
             if Platform.is_wsl():
                 tags.append("WSL")
@@ -2545,8 +3044,27 @@ class Platform:
                 tags.append("Flatpak sandbox")
             return base + (" (" + ", ".join(tags) + ")" if tags else "")
         if Platform.WINDOWS:
+            # Detect Xbox Dev Mode via WinRT/registry — best-effort, requires PowerShell
+            try:
+                result = subprocess.run(
+                    ['powershell', '-NoProfile', '-Command',
+                     '(Get-CimInstance Win32_ComputerSystem).Model'],
+                    capture_output=True, text=True, timeout=5)
+                if result.returncode == 0:
+                    model = result.stdout.strip()
+                    if 'Xbox' in model or 'Xbox' in result.stdout:
+                        return "Xbox Dev Mode (Windows UWP)"
+            except Exception:
+                pass
             return Platform.get_windows_name()
         if Platform.BSD:
+            # PlayStation 4/5 Orbis OS (FreeBSD-derived)
+            try:
+                result = subprocess.run(['uname', '-r'], capture_output=True, text=True, timeout=3)
+                if 'orbis' in result.stdout.lower():
+                    return "Sony PlayStation 4/5 (Orbis OS, jailbroken)"
+            except Exception:
+                pass
             for path in ('/etc/version', '/etc/platform', '/conf/base/etc/version'):
                 try:
                     with open(path) as f:
@@ -2672,7 +3190,6 @@ class Platform:
     @staticmethod
     def _run_cmd(args):
         try:
-            import subprocess
             result = subprocess.run(args, capture_output=True, text=True, timeout=5)
             return result.stdout.strip()
         except Exception:
@@ -5845,7 +6362,7 @@ When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
 
 CROSS-PLATFORM RULES:
-1. Detect the OS first: uname -s when available, plus /sysinfo context. Targets include Linux, Android/Termux, ChromeOS/Crostini, WSL/WSL2, Docker/Podman/Kubernetes/CI containers, Proxmox, TrueNAS, pfSense, OPNsense, Unraid, SteamOS, macOS, BSD, Windows, SunOS/Solaris/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX, MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, OpenVMS, and embedded BusyBox systems.
+1. Detect the OS first: uname -s when available, plus /sysinfo context. Targets include Linux, Android/Termux, ChromeOS/Crostini, WSL/WSL2, Docker/Podman/Kubernetes/CI containers, Proxmox, TrueNAS, pfSense, OPNsense, Unraid, SteamOS, macOS, BSD, Windows, SunOS/Solaris/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX/MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, OpenVMS, and embedded BusyBox systems. Also: Chromecast, Fire TV, Android TV, Wear OS smartwatches, AsteroidOS watches, Samsung Tizen/webOS TVs, Kindle, Kobo, reMarkable, Onyx Boox e-readers, Nintendo Switch/Wii/PS3 (Linux), Steam Deck, Tesla MCU, NAS (Synology/QNAP/WD), routers (OpenWrt/Turris/Fritz!Box/Mikrotik/GL.iNet), SBCs (Raspberry Pi/BeagleBone/Pine64/Odroid/Orange Pi/Radxa/Khadas/Libre Computer), MiSTer FPGA, WAGO PLC, and disposable IoT devices with embedded Linux.
 2. Use the system's actual package manager: apt/apt-get, dnf/microdnf/tdnf/yum, pacman, zypper, apk, rpm-ostree, swupd, opkg/ipkg, emerge, xbps-install, eopkg, slackpkg, guix, nix, brew/port, pkgin/pkg_add/pkg, Solaris pkg/pkgadd/pkgutil, swinstall, inst, setld, installp, pkgman, winget/choco/scoop. Prefer OS-native over universal ones.
 3. Use appropriate network command: ip/ss (modern Linux), busybox/ip/ifconfig/netstat (embedded), ifconfig/netstat (macOS/BSD/Solaris/old Unix), ipconfig/route/netstat/Get-NetAdapter (Windows). In containers/CI, check namespace and mounted filesystem limits before changing networking.
 4. Prefer POSIX sh syntax on unknown Unix, embedded systems, containers, Solaris, AIX, HP-UX, IRIX, Tru64, QNX, and appliance/NAS platforms. Avoid GNU-only flags unless GNU tools are detected.
