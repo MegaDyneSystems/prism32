@@ -254,11 +254,28 @@ if [ -d "$SRC_DIR/plugins" ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════
-#  5. API config (multi-provider)
+#  5. API config (multi-provider) — skipped in auto mode if config exists
 # ═══════════════════════════════════════════════════════════════
 header "Step 5/9 - API Configuration"
 
-ALL_PROVIDERS="{}"
+# In auto-update mode, preserve existing config — don't clobber provider info
+if [ "$AUTO" = "1" ] && [ -f "$CONFIG_FILE" ]; then
+  ok "Auto-update mode: preserving existing config (provider, model, API key)"
+  # Load current values from config so Steps 6-9 have them
+  eval "$("$PY3" -c "
+import json, sys
+c = json.load(open(sys.argv[1]))
+print(f'PROV=\"{c.get(\"provider\",\"local\")}\"')
+print(f'MODEL=\"{c.get(\"model\",\"\")}\"')
+print(f'API_BASE=\"{c.get(\"api_base\",\"\")}\"')
+" "$CONFIG_FILE" 2>/dev/null)" 2>/dev/null || {
+    PROV="local"; MODEL=""; API_BASE="http://127.0.0.1:8080"
+  }
+  ALL_PROVIDERS="{}"
+  # Skip to step 6
+  skip_config_write=1
+else
+  skip_config_write=0
 
 _configure_provider() {
   echo ""
@@ -385,6 +402,8 @@ while [ -t 0 ]; do
   _configure_provider
 done
 
+fi  # end of else (non-auto or no config)
+
 # ═══════════════════════════════════════════════════════════════
 #  6. Connection test
 # ═══════════════════════════════════════════════════════════════
@@ -416,7 +435,9 @@ rc="$(_test_url "${API_BASE}/models")"
 
 header "Step 7/9 - Writing Config"
 
-if [ -f "$CONFIG_FILE" ]; then
+if [ "$skip_config_write" = "1" ]; then
+  ok "Config preserved (auto-update mode)"
+elif [ -f "$CONFIG_FILE" ]; then
   "$PY3" -c "
 import json, sys
 c = json.load(open(sys.argv[1]))
