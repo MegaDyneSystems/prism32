@@ -58,7 +58,8 @@ Install on NAS (Synology/QNAP/WD — no git needed):
 ```sh
 # Via SSH (auto-detects NAS, falls back to direct download):
 curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-# If $HOME doesn't exist, the script uses /tmp automatically
+# The script auto-detects persistent storage (/volume1/prism32 on Synology)
+# and installs system-wide to /usr/bin/prism32
 ```
 
 Portable install to floppy/USB/CD:
@@ -87,6 +88,7 @@ Most-used first commands inside Prism32:
 /extend <goal>        Generate/load a temporary plugin for a missing capability
 /extend prompt        Print the plugin-generation prompt
 /evolve on            Enable self-repair/plugin/tool-scan context
+/json <file>          Read JSON files with pretty-printing and smart summary
 /quit                 Exit
 ```
 

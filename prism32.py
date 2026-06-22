@@ -4499,6 +4499,12 @@ def set_scroll_region():
     if not ansi_enabled() or not sys.stdout.isatty():
         _footer_reserved = False
         return
+    # Refresh cached terminal size
+    try:
+        global _term_size
+        _term_size = shutil.get_terminal_size()
+    except Exception:
+        pass
     _footer_reserved = True
     h = _term_size.lines
     if h > 1:
@@ -4537,6 +4543,12 @@ def move_to_scroll_bottom():
     """Move cursor to the last line of the scroll region (just above footer)."""
     if not _footer_reserved or not ansi_enabled():
         return
+    # Refresh cached size in case of resize
+    try:
+        global _term_size
+        _term_size = shutil.get_terminal_size()
+    except Exception:
+        pass
     h = _term_size.lines
     if h > 1:
         sys.stdout.write(f"\x1b[{h-1};1H")
@@ -4664,8 +4676,13 @@ def read_footer_input(status_bar):
         t = T()
         return input(rl_prompt(f" {t['primary']}prism32>{RST} ")).strip()
     t = T()
-    # Clear footer and position cursor there for input.
-    # Don't release/re-set scroll region — that causes visual glitches.
+    # Refresh terminal size in case of resize
+    try:
+        global _term_size
+        _term_size = shutil.get_terminal_size()
+    except Exception:
+        pass
+    # Position cursor at the footer line and clear it
     with stdout_lock:
         if ansi_enabled() and _term_size:
             sys.stdout.write(f"\x1b[{_term_size.lines};1H\x1b[K")
@@ -4940,7 +4957,32 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     if include_indicator:
         indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
         parts.append(f" {indicator}")
-    return "".join(parts)
+    bar = "".join(parts)
+    # Truncate to terminal width if needed
+    tw = _terminal_width()
+    vis_len = len(strip_ansi(bar))
+    if vis_len > tw - 2:
+        # Truncate visible content, preserving color
+        result = ""
+        vis_count = 0
+        i = 0
+        while i < len(bar) and vis_count < tw - 5:
+            if bar[i] == '\x1b':
+                # Copy ANSI escape sequence
+                j = i + 1
+                while j < len(bar) and bar[j] not in 'm':
+                    j += 1
+                if j < len(bar):
+                    j += 1
+                result += bar[i:j]
+                i = j
+            else:
+                result += bar[i]
+                vis_count += 1
+                i += 1
+        result += f"{t['dim']}…{RST}"
+        return result
+    return bar
 
 def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=None):
     """Run a blocking foreground operation while Escape can stop waiting for it."""
@@ -5007,10 +5049,28 @@ def ask_ai_cancelable(messages, history=None):
 
 # ── Box Drawing ──────────────────────────────────────────────
 
+def _terminal_width():
+    """Get current terminal width, with minimum."""
+    try:
+        w = _term_size.columns if _term_size else shutil.get_terminal_size().columns
+        return max(20, w)
+    except Exception:
+        return 80
+
+def _terminal_height():
+    """Get current terminal height, with minimum."""
+    try:
+        h = _term_size.lines if _term_size else shutil.get_terminal_size().lines
+        return max(3, h)
+    except Exception:
+        return 24
+
 def _wrap_line(line, cw):
     """Word-wrap a single line to fit within cw columns, preserving ANSI codes."""
     visible = strip_ansi(line)
     if len(visible) <= cw:
+        return [line]
+    if cw < 4:
         return [line]
 
     chunks = []
@@ -5021,16 +5081,28 @@ def _wrap_line(line, cw):
         if len(strip_ansi(test)) > cw:
             if current:
                 chunks.append(current)
-            current = word
+            # If single word is wider than cw, hard-split it
+            if len(strip_ansi(word)) > cw:
+                w = word
+                while len(strip_ansi(w)) > cw:
+                    chunks.append(w[:cw])
+                    w = w[cw:]
+                current = w
+            else:
+                current = word
         else:
             current = test
     if current:
         chunks.append(current)
     return chunks
 
-def box(title, content, color_key="primary", width=62):
+def box(title, content, color_key="primary", width=None):
     t = T()
     c = t[color_key]
+    # Adapt width to terminal size
+    if width is None:
+        tw = _terminal_width()
+        width = min(62, max(40, tw - 2))
     raw_lines = content.split('\n')
     iw = width - 2
     cw = width - 4
@@ -5059,9 +5131,10 @@ def progress_bar(current, total, label="", width=40, color_key="primary"):
 
 def step_header(step, total, goal_text):
     t = T()
-    print(f"\n{t['bright']}{'='*62}{RST}")
-    print(f" {t['bright']}STEP {step}/{total}{RST}  {t['dim']}{goal_text[:50]}{RST}")
-    print(f"{t['bright']}{'='*62}{RST}")
+    w = min(62, _terminal_width() - 2)
+    print(f"\n{t['bright']}{'='*w}{RST}")
+    print(f" {t['bright']}STEP {step}/{total}{RST}  {t['dim']}{goal_text[:max(10, w-15)]}{RST}")
+    print(f"{t['bright']}{'='*w}{RST}")
 
 # ── Spinner ──────────────────────────────────────────────────
 
@@ -6127,9 +6200,16 @@ def cmd_result(cmd, output, success=True):
     t = T()
     c = t['bright'] if success else t['err']
     icon = "+" if success else "!"
-    print(f"{c} {icon} {cmd}{RST}")
+    tw = _terminal_width()
+    # Truncate long commands to terminal width
+    cmd_display = cmd[:tw-6] + (RST + t['dim'] + '…' if len(cmd) > tw-6 else '')
+    print(f"{c} {icon} {cmd_display}{RST}")
     for line in output.split('\n')[:25]:
-        print(f"  {DIM}{line}{RST}")
+        # Truncate long output lines to terminal width
+        if len(line) > tw - 2:
+            print(f"  {DIM}{line[:tw-4]}…{RST}")
+        else:
+            print(f"  {DIM}{line}{RST}")
     if output.count('\n') > 25:
         print(f"  {DIM}... ({output.count(chr(10)) + 1} lines){RST}")
 
@@ -7730,8 +7810,25 @@ def main():
     global _shutdown_flag, _LAST_INTERJECT, _INTERJECTION_RESULT
     
     def _on_resize(sig, frame):
-        update_terminal_size()
-        set_scroll_region()
+        global _term_size
+        try:
+            _term_size = shutil.get_terminal_size()
+        except Exception:
+            pass
+        # Re-set scroll region with new dimensions, then redraw footer
+        if _footer_reserved:
+            h = _term_size.lines
+            if ansi_enabled() and h > 1:
+                with stdout_lock:
+                    sys.stdout.write(f"\x1b[1;{h-1}r")
+                    sys.stdout.write(f"\x1b[{h};1H\x1b[2K")
+                    try:
+                        bar = build_status_bar(include_indicator=not _AGENT_BUSY)
+                        ind = activity_vector(frame=_FOOTER_FRAME, busy=_AGENT_BUSY)
+                        sys.stdout.write(f"{bar} {ind} {T()['primary'] if not _AGENT_BUSY else T()['dim']}>{RST} ")
+                    except Exception:
+                        pass
+                    sys.stdout.flush()
     if hasattr(signal, 'SIGWINCH'):
         signal.signal(signal.SIGWINCH, _on_resize)
     
