@@ -14,8 +14,18 @@ set -eu
 
 REPO="https://github.com/MegaDyneSystems/prism32"
 RAW="https://raw.githubusercontent.com/MegaDyneSystems/prism32/main"
+
+# If HOME directory doesn't exist (common on Synology/NAS devices), use a writable fallback
+if [ ! -d "$HOME" ]; then
+  if [ -d "/tmp" ] && [ -w "/tmp" ]; then
+    HOME="/tmp"
+  else
+    HOME="/root"
+  fi
+  export HOME
+fi
+
 RUNTIME_DIR="$HOME/.prism32"
-BIN_TYPE=""
 
 # ── ANSI ──
 if [ -t 1 ]; then
