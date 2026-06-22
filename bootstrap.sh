@@ -16,12 +16,18 @@ REPO="https://github.com/MegaDyneSystems/prism32"
 RAW="https://raw.githubusercontent.com/MegaDyneSystems/prism32/main"
 
 # If HOME directory doesn't exist (common on Synology/NAS devices), use a writable fallback
-if [ ! -d "$HOME" ]; then
-  if [ -d "/tmp" ] && [ -w "/tmp" ]; then
-    HOME="/tmp"
-  else
-    HOME="/root"
-  fi
+# On some NAS devices /tmp is mounted noexec, so prefer /volume1/@tmp or similar
+if [ ! -d "$HOME" ] || [ ! -w "$HOME" ]; then
+  # Try /volume1/@tmp (Synology), /volume1/@apphome, then /tmp, then /root
+  for candidate in "/volume1/@tmp/prism32" "/volume1/@apphome/prism32" "/tmp" "/root"; do
+    if mkdir -p "$candidate" 2>/dev/null && [ -w "$candidate" ]; then
+      # Check that the directory allows execution (not mounted noexec)
+      if [ "$candidate" != "/tmp" ] || ! mount 2>/dev/null | grep -q "on /tmp.*noexec"; then
+        HOME="$candidate"
+        break
+      fi
+    fi
+  done
   export HOME
 fi
 
