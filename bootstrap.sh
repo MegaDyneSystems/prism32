@@ -16,18 +16,26 @@ REPO="https://github.com/MegaDyneSystems/prism32"
 RAW="https://raw.githubusercontent.com/MegaDyneSystems/prism32/main"
 
 # If HOME directory doesn't exist (common on Synology/NAS devices), use a writable fallback
-# On some NAS devices /tmp is mounted noexec, so prefer /volume1/@tmp or similar
+# On some NAS devices /tmp is mounted noexec and cleared on reboot, so prefer persistent locations
 if [ ! -d "$HOME" ] || [ ! -w "$HOME" ]; then
-  # Try /volume1/@tmp (Synology), /volume1/@apphome, then /tmp, then /root
-  for candidate in "/volume1/@tmp/prism32" "/volume1/@apphome/prism32" "/tmp" "/root"; do
-    if mkdir -p "$candidate" 2>/dev/null && [ -w "$candidate" ]; then
-      # Check that the directory allows execution (not mounted noexec)
-      if [ "$candidate" != "/tmp" ] || ! mount 2>/dev/null | grep -q "on /tmp.*noexec"; then
-        HOME="$candidate"
-        break
+  _find_exec_home() {
+    for candidate in "/volume1/prism32" "/volume1/@apphome/prism32" "/volume1/@tmp/prism32" "/tmp" "/root"; do
+      mkdir -p "$candidate" 2>/dev/null || continue
+      [ -w "$candidate" ] || continue
+      # Test that the filesystem allows execution (not mounted noexec)
+      printf '#!/bin/sh\necho ok\n' > "$candidate/.exec_test.$$" 2>/dev/null || continue
+      chmod +x "$candidate/.exec_test.$$" 2>/dev/null || continue
+      if sh "$candidate/.exec_test.$$" >/dev/null 2>&1; then
+        rm -f "$candidate/.exec_test.$$"
+        echo "$candidate"
+        return 0
       fi
-    fi
-  done
+      rm -f "$candidate/.exec_test.$$"
+    done
+    echo "/root"
+    return 1
+  }
+  HOME=$(_find_exec_home)
   export HOME
 fi
 
