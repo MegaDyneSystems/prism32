@@ -2968,9 +2968,10 @@ class Platform:
         """Master device detection combining all signals.
         Returns a device name string (or empty if not detected)."""
         # env override
-        env_dev = os.environ.get('PRISM32_DEVICE', '')
+        env_dev = os.environ.get('PRISM32_DEVICE', '').strip()
+        env_dev = env_dev.replace('\n', ' ').replace('\r', '').replace('\x1b', '')
         if env_dev:
-            return env_dev
+            return env_dev[:80]
         # Android-specific (Chromecast, Fire TV, Switch, etc.)
         if Platform.ANDROID:
             dev, form = Platform._detect_android_device()
@@ -4408,6 +4409,8 @@ def T():
     if theme not in _T_CACHE:
         data = dict(THEME_REGISTRY.get(theme, THEME_REGISTRY.get("phosphor", {})))
         data.setdefault("ok", data.get("bright", ""))
+        for key, default in _PLAIN_THEME.items():
+            data.setdefault(key, default)
         _T_CACHE[theme] = data
     return _T_CACHE[theme]
 
@@ -4423,7 +4426,8 @@ BOLD = "\x1b[1m"
 DIM  = "\x1b[2m"
 HIDE = "\x1b[?25l"
 SHOW = "\x1b[?25h"
-CLS  = "\x1b[2J\x1b[H"
+CLS  = "\x1b[H"
+CLR_LINE = "\x1b[K"
 _ANSI_ENABLED = None
 _PLAIN_THEME = {"primary": "", "bright": "", "dim": "", "accent": "", "warn": "", "err": "", "glow": "", "bar": "", "ok": ""}
 
@@ -4438,10 +4442,14 @@ def strip_ansi(text):
 
 def _supports_ansi():
     """Check if terminal supports ANSI escape codes."""
-    term = os.environ.get('TERM', '').lower()
     if 'NO_COLOR' in os.environ:
         return False
+    term = os.environ.get('TERM', '').lower()
+    if term in ('dumb', 'emacs', '', 'none', 'unknown'):
+        return False
     if Platform.WINDOWS:
+        if any(t in term for t in ('xterm', 'vt100', 'rxvt', 'screen', 'tmux')):
+            return True
         try:
             import ctypes
             kernel32 = ctypes.windll.kernel32
@@ -4449,14 +4457,11 @@ def _supports_ansi():
             mode = ctypes.c_uint32()
             if not kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 return False
-            # Windows 10+ supports virtual terminal sequences when enabled.
             if kernel32.SetConsoleMode(handle, mode.value | 0x0004):
                 return True
             return False
         except Exception:
             return False
-    if term in ('dumb', 'emacs', '', 'none', 'unknown'):
-        return False
     if not sys.stdout.isatty():
         return False
     if term:
@@ -4474,7 +4479,7 @@ def _supports_ansi():
                 return int(result.stdout.strip()) >= 8
         except Exception:
             pass
-    return True
+    return False
 
 def ansi_enabled():
     global _ANSI_ENABLED
@@ -4484,11 +4489,13 @@ def ansi_enabled():
 
 def apply_ansi_compat():
     """Disable escape sequences on consoles that cannot handle them."""
-    global RST, BOLD, DIM, HIDE, SHOW, CLS
+    global RST, BOLD, DIM, HIDE, SHOW, CLS, CLR_LINE
     if ansi_enabled():
         return
-    RST = BOLD = DIM = HIDE = SHOW = CLS = ""
+    RST = BOLD = DIM = HIDE = SHOW = CLS = CLR_LINE = ""
     _clear_theme_cache()
+
+apply_ansi_compat()
 
 # ── Persistent footer / scroll region ───────────────────────
 _term_size = os.terminal_size((80, 24))
@@ -4508,17 +4515,18 @@ def set_scroll_region():
     if not ansi_enabled() or not sys.stdout.isatty():
         _footer_reserved = False
         return
-    # Refresh cached terminal size
     try:
         global _term_size
         _term_size = shutil.get_terminal_size()
     except Exception:
         pass
-    _footer_reserved = True
     h = _term_size.lines
     if h > 1:
+        _footer_reserved = True
         sys.stdout.write(f"\x1b[1;{h-1}r")
-    sys.stdout.flush()
+        sys.stdout.flush()
+    else:
+        _footer_reserved = False
 
 def reset_scroll_region():
     """Reset scrolling region to full screen."""
@@ -4538,7 +4546,8 @@ def release_footer_for_output():
         return
     h = _term_size.lines
     if h > 0:
-        sys.stdout.write(f"\x1b[{h};1H\r\x1b[K\n")
+        nl = "\n" if h > 1 else ""
+        sys.stdout.write(f"\x1b[{h};1H\r{CLR_LINE}{nl}")
     sys.stdout.flush()
 
 def move_to_footer():
@@ -4606,21 +4615,21 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
     if busy is None:
         busy = _AGENT_BUSY
     cols = _term_size.columns if _term_size else 80
-    sys.stdout.write("\x1b[s")
+    sys.stdout.write("\x1b7")
     try:
         move_to_footer()
         if _INTERJECTION_HAS_TYPED:
             buf = _INTERJECTION_BUF
             cur = _INTERJECTION_CURSOR
             prefix = f" {t['bright']}interject>{RST} "
-            prefix_len = 12
+            prefix_len = len(strip_ansi(prefix))
             max_text = max(0, cols - prefix_len - 1)
             display_buf = buf if len(buf) <= max_text else buf[:max_text-1] + "\u2026"
             if len(buf) <= max_text:
                 display_cur = cur
             else:
                 display_cur = min(cur, max_text - 1)
-            sys.stdout.write(prefix + display_buf + "\x1b[K")
+            sys.stdout.write(prefix + display_buf + CLR_LINE)
             move_back = max(0, len(display_buf) - display_cur)
             if move_back > 0:
                 sys.stdout.write(f"\x1b[{move_back}D")
@@ -4631,9 +4640,9 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
             else:
                 indicator = activity_vector(history=history)
             bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
-            sys.stdout.write(f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} \x1b[K")
+            sys.stdout.write(f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} {CLR_LINE}")
     finally:
-        sys.stdout.write("\x1b[u")
+        sys.stdout.write("\x1b8")
         sys.stdout.flush()
 
 def _footer_animator_loop():
@@ -4967,29 +4976,22 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
         indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
         parts.append(f" {indicator}")
     bar = "".join(parts)
-    # Truncate to terminal width if needed
     tw = _terminal_width()
     vis_len = len(strip_ansi(bar))
     if vis_len > tw - 2:
-        # Truncate visible content, preserving color
         result = ""
         vis_count = 0
         i = 0
         while i < len(bar) and vis_count < tw - 5:
-            if bar[i] == '\x1b':
-                # Copy ANSI escape sequence
-                j = i + 1
-                while j < len(bar) and bar[j] not in 'm':
-                    j += 1
-                if j < len(bar):
-                    j += 1
-                result += bar[i:j]
-                i = j
+            m = _RE_ANSI.match(bar, i)
+            if m:
+                result += m.group(0)
+                i = m.end()
             else:
                 result += bar[i]
                 vis_count += 1
                 i += 1
-        result += f"{t['dim']}…{RST}"
+        result += "\u2026"
         return result
     return bar
 
@@ -5032,7 +5034,7 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
                 with stdout_lock:
                     t = T()
                     char = activity_vector(frame=frame, busy=True, history=history)
-                    sys.stdout.write(f"\r\033[K {t['dim']}{char} {message}...{RST}")
+                    sys.stdout.write(f"\r{CLR_LINE} {t['dim']}{char} {message}...{RST}")
                     sys.stdout.flush()
                 frame += 1
                 last_draw = now
@@ -5061,16 +5063,14 @@ def ask_ai_cancelable(messages, history=None):
 def _terminal_width():
     """Get current terminal width, with minimum."""
     try:
-        w = _term_size.columns if _term_size else shutil.get_terminal_size().columns
-        return max(20, w)
+        return max(20, shutil.get_terminal_size().columns)
     except Exception:
         return 80
 
 def _terminal_height():
     """Get current terminal height, with minimum."""
     try:
-        h = _term_size.lines if _term_size else shutil.get_terminal_size().lines
-        return max(3, h)
+        return max(3, shutil.get_terminal_size().lines)
     except Exception:
         return 24
 
@@ -5094,7 +5094,7 @@ def _wrap_line(line, cw):
             if len(strip_ansi(word)) > cw:
                 w = word
                 while len(strip_ansi(w)) > cw:
-                    chunks.append(w[:cw])
+                    chunks.append(w[:cw] + RST)
                     w = w[cw:]
                 current = w
             else:
@@ -5111,7 +5111,7 @@ def box(title, content, color_key="primary", width=None):
     # Adapt width to terminal size
     if width is None:
         tw = _terminal_width()
-        width = min(62, max(40, tw - 2))
+        width = min(62, max(4, tw - 2))
     raw_lines = content.split('\n')
     iw = width - 2
     cw = width - 4
@@ -5131,6 +5131,8 @@ def box(title, content, color_key="primary", width=None):
     print(f"{c}{'+' + '='*iw + '+'}{RST}")
 
 def progress_bar(current, total, label="", width=40, color_key="primary"):
+    if not sys.stdout.isatty():
+        return
     t = T()
     c = t[color_key]
     filled = int(width * current / total) if total > 0 else 0
@@ -5141,13 +5143,16 @@ def progress_bar(current, total, label="", width=40, color_key="primary"):
 def step_header(step, total, goal_text):
     t = T()
     w = min(62, _terminal_width() - 2)
+    safe_goal = strip_ansi(goal_text)
     print(f"\n{t['bright']}{'='*w}{RST}")
-    print(f" {t['bright']}STEP {step}/{total}{RST}  {t['dim']}{goal_text[:max(10, w-15)]}{RST}")
+    print(f" {t['bright']}STEP {step}/{total}{RST}  {t['dim']}{safe_goal[:max(10, w-15)]}{RST}")
     print(f"{t['bright']}{'='*w}{RST}")
 
 # ── Spinner ──────────────────────────────────────────────────
 
 def spinner(label="processing", timeout=8):
+    if not sys.stdout.isatty():
+        return
     t = T()
     frames = ["|", "/", "-", "\\"]
     start = time.time()
@@ -5310,14 +5315,17 @@ def get_session_stats(session_data):
 
 class ToolVisualizer:
     def __init__(self):
-        self.t = T()
         self.thinking_chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
         self.thinking_idx = 0
-    
+
+    @property
+    def t(self):
+        return T()
+
     def thinking(self, message="thinking"):
         char = self.thinking_chars[self.thinking_idx % len(self.thinking_chars)]
         self.thinking_idx += 1
-        sys.stdout.write(f"\r {self.t['dim']}{char} {message}...{RST}\x1b[K")
+        sys.stdout.write(f"\r {self.t['dim']}{char} {message}...{RST}{CLR_LINE}")
         sys.stdout.flush()
     
     def tool_call(self, tool_name, args=""):
@@ -5400,7 +5408,7 @@ class SpinnerThread(threading.Thread):
                 else:
                     t = T()
                     char = activity_vector(frame=i, busy=True)
-                    sys.stdout.write(f"\r\033[K {t['dim']}{char} {self.message}...{RST}")
+                    sys.stdout.write(f"\r{CLR_LINE} {t['dim']}{char} {self.message}...{RST}")
                     sys.stdout.flush()
                     i += 1
 
@@ -5653,7 +5661,6 @@ def banner():
     t = T()
     c = t['bright']
     d = t['dim']
-    print(f"{c}")
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
         "|  _ \\|  _ \\|_ _/ ___||  \\/  |___ /___ \\ ",
@@ -5662,9 +5669,7 @@ def banner():
         "|_|   |_| \\_\\___|____/|_|  |_|____/_____|",
         "                                         ",
     ]
-    for line in art:
-        print(f"  {line}")
-    print(f"{RST}")
+    print(c + "\n".join(f"  {line}" for line in art) + RST)
     print(f"{d}  v6.8 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
@@ -7819,25 +7824,27 @@ def main():
     global _shutdown_flag, _LAST_INTERJECT, _INTERJECTION_RESULT
     
     def _on_resize(sig, frame):
-        global _term_size
         try:
-            _term_size = shutil.get_terminal_size()
+            global _term_size
+            try:
+                _term_size = shutil.get_terminal_size()
+            except Exception:
+                pass
+            if _footer_reserved and ansi_enabled() and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+                h = _term_size.lines
+                if h > 1:
+                    with stdout_lock:
+                        sys.stdout.write(f"\x1b[1;{h-1}r")
+                        sys.stdout.write(f"\x1b[{h};1H\x1b[2K")
+                        try:
+                            bar = build_status_bar(include_indicator=not _AGENT_BUSY)
+                            ind = activity_vector(frame=_FOOTER_FRAME, busy=_AGENT_BUSY)
+                            sys.stdout.write(f"{bar} {ind} {T()['primary'] if not _AGENT_BUSY else T()['dim']}>{RST} ")
+                        except Exception:
+                            pass
+                        sys.stdout.flush()
         except Exception:
             pass
-        # Re-set scroll region with new dimensions, then redraw footer
-        if _footer_reserved:
-            h = _term_size.lines
-            if ansi_enabled() and h > 1:
-                with stdout_lock:
-                    sys.stdout.write(f"\x1b[1;{h-1}r")
-                    sys.stdout.write(f"\x1b[{h};1H\x1b[2K")
-                    try:
-                        bar = build_status_bar(include_indicator=not _AGENT_BUSY)
-                        ind = activity_vector(frame=_FOOTER_FRAME, busy=_AGENT_BUSY)
-                        sys.stdout.write(f"{bar} {ind} {T()['primary'] if not _AGENT_BUSY else T()['dim']}>{RST} ")
-                    except Exception:
-                        pass
-                    sys.stdout.flush()
     if hasattr(signal, 'SIGWINCH'):
         signal.signal(signal.SIGWINCH, _on_resize)
     
@@ -9429,11 +9436,12 @@ def main():
         # Save session after each interaction
         save_current_session(history, cmd_log)
 
-        sys.stdout.write("\r\033[K")
+        sys.stdout.write(f"\r{CLR_LINE}")
         sys.stdout.flush()
 
-    reset_scroll_region()
-    print(SHOW)
+        reset_scroll_region()
+        if SHOW:
+            print(SHOW)
 
 # ── HTTP Helpers ────────────────────────────────────────────
 
