@@ -276,6 +276,7 @@ print(f'API_BASE=\"{c.get(\"api_base\",\"\")}\"')
   skip_config_write=1
 else
   skip_config_write=0
+  ALL_PROVIDERS="{}"
 
 _configure_provider() {
   echo ""
