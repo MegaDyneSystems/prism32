@@ -60,7 +60,7 @@ def test_ask_ai_filters_empty_assistant_messages():
         def read(self):
             return json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
 
-    def fake_urlopen(req, timeout=0):
+    def fake_urlopen(req, timeout=0, **kwargs):
         captured['payload'] = json.loads(req.data.decode())
         return FakeResponse()
 
