@@ -32,6 +32,7 @@ stdout_lock = threading.RLock()
 import queue
 import hashlib
 import importlib.util
+import py_compile
 try:
     import pty
 except ImportError:
@@ -330,6 +331,13 @@ def _load_plugin_file(mod_path, mod_name=None, quiet=False):
     mod_name = mod_name or os.path.splitext(os.path.basename(mod_path))[0]
     if mod_name in _PLUGINS:
         return True, f"Already loaded: {mod_name}"
+    try:
+        py_compile.compile(mod_path, doraise=True)
+    except py_compile.PyCompileError as e:
+        msg = f"Syntax error in plugin file {mod_path}: {e}"
+        if not quiet:
+            print(f"  [plugin] {msg}")
+        return False, msg
     try:
         spec = importlib.util.spec_from_file_location(mod_name, mod_path)
         if not spec or not spec.loader:
