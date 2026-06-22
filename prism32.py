@@ -101,10 +101,11 @@ class CommandRegistry:
         if not cmd:
             return None
         old_stdout = sys.stdout
-        sys.stdout = io.StringIO()
+        captured = io.StringIO()
+        sys.stdout = captured
         try:
             cmd.handler(args_str, [], [])
-            result = sys.stdout.getvalue()
+            result = captured.getvalue()
         finally:
             sys.stdout = old_stdout
         return result
