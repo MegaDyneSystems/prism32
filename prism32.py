@@ -539,8 +539,7 @@ def save_memory(memory):
         if len(memory.get("error_patterns", {})) > 15:
             sorted_errs = sorted(memory["error_patterns"].items(), key=lambda x: -x[1].get("count", 0))
             memory["error_patterns"] = dict(sorted_errs[:15])
-        with open(MEMORY_FILE, 'w', encoding='utf-8') as f:
-            json.dump(memory, f, indent=2)
+        _safe_write_json(MEMORY_FILE, memory)
     except Exception:
         pass
 
@@ -660,6 +659,27 @@ def _safe_write(path, text):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
+
+def _safe_write_json(path, data, timeout=5):
+    """Write JSON to file with a timeout to prevent hangs on slow/locked filesystems (e.g. NAS)."""
+    import threading
+    result = {'error': None}
+    def _write():
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2)
+        except Exception as e:
+            result['error'] = e
+    t = threading.Thread(target=_write, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        # File I/O hung — likely a locked filesystem or stale lock
+        # Don't wait for it; the write may complete in the background
+        pass
+    elif result['error']:
+        raise result['error']
 
 def _startup_auto_block():
     try:
