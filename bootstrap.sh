@@ -58,7 +58,7 @@ done
 
 # ── Crosh (ChromeOS developer shell) ──
 # Crosh has no Python, no apt, no git. But it can launch Crostini.
-if [ -n "${CROS_WORKON}" ] || [ "$(basename "${SHELL:-}")" = "crosh" ] || \
+if [ -n "${CROS_WORKON:-}" ] || [ "$(basename "${SHELL:-}")" = "crosh" ] || \
    (command -v help >/dev/null 2>&1 && ! command -v ls >/dev/null 2>&1) 2>/dev/null; then
   ok "Platform: ChromeOS Crosh shell"
   echo -e "  ${DIM}Crosh has no Python. Bootstrapping into Crostini (Linux container)...${RST}"
