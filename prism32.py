@@ -5877,6 +5877,77 @@ def _try_plugin_cmd(c, history=None):
         if sub in ("path", "paths"):
             return f"startup_memory={STARTUP_MEMORY_FILE}\nmemory_json={MEMORY_FILE}"
         return startup_memory_context(limit=3000)
+    if cmd_name in ('/json', 'json'):
+        path = cmd_args.strip()
+        if not path:
+            return "Usage: /json <file.json> [--key <path>] [--compact]"
+        parts = path.split(None, 1)
+        file_path = parts[0]
+        key_path = ""
+        compact = False
+        rest = parts[1] if len(parts) > 1 else ""
+        if '--key' in rest:
+            kp_parts = rest.split('--key', 1)
+            key_path = kp_parts[1].strip().split()[0] if kp_parts[1].strip() else ""
+        if '--compact' in rest:
+            compact = True
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # Navigate to key path if specified
+            if key_path:
+                for k in key_path.split('.'):
+                    if isinstance(data, dict):
+                        data = data.get(k)
+                    elif isinstance(data, list) and k.isdigit():
+                        data = data[int(k)]
+                    else:
+                        return f"Key path '{key_path}' not found in {file_path}"
+                if data is None:
+                    return f"Key '{key_path}' not found in {file_path}"
+            # Small files: pretty-print fully (up to 4000 chars)
+            formatted = json.dumps(data, indent=2, ensure_ascii=False) if not compact else json.dumps(data, ensure_ascii=False)
+            if len(formatted) <= 4000:
+                return formatted
+            # Large files: summarize structure
+            if isinstance(data, dict):
+                lines = [f"JSON object with {len(data)} keys:"]
+                for k, v in list(data.items())[:20]:
+                    vstr = json.dumps(v, ensure_ascii=False)
+                    if len(vstr) > 100:
+                        vstr = vstr[:97] + "..."
+                    lines.append(f"  {k}: {vstr}")
+                if len(data) > 20:
+                    lines.append(f"  ... and {len(data) - 20} more keys")
+                lines.append(f"\nFull size: {len(formatted)} chars. Use --key <path> to navigate, or --compact for raw.")
+                return "\n".join(lines)
+            elif isinstance(data, list):
+                lines = [f"JSON array with {len(data)} items:"]
+                for i, item in enumerate(data[:10]):
+                    istr = json.dumps(item, ensure_ascii=False)
+                    if len(istr) > 100:
+                        istr = istr[:97] + "..."
+                    lines.append(f"  [{i}]: {istr}")
+                if len(data) > 10:
+                    lines.append(f"  ... and {len(data) - 10} more items")
+                lines.append(f"\nFull size: {len(formatted)} chars. Use --key <path> to navigate, or --compact for raw.")
+                return "\n".join(lines)
+            else:
+                return formatted[:4000] + (f"\n... ({len(formatted)} chars total)" if len(formatted) > 4000 else "")
+        except FileNotFoundError:
+            return f"File not found: {file_path}"
+        except json.JSONDecodeError as e:
+            # Not valid JSON — show raw content if small
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    raw = f.read()
+                if len(raw) <= 2000:
+                    return f"Not valid JSON ({e}): raw content:\n{raw}"
+                return f"Not valid JSON ({e}): file is {len(raw)} chars. Use /cat or cat to read raw."
+            except Exception:
+                return f"Not valid JSON ({e})"
+        except Exception as e:
+            return f"Error reading {file_path}: {e}"
     if cmd_name in ('/delegate', 'delegate'):
         task = cmd_args.strip()
         if not task:
@@ -6420,6 +6491,7 @@ Commands you can use inside execute blocks:
 - /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair).
 - /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
 - /memory path, /memory paths (locate memory files).
+- /json <file> [--key <path>] [--compact] (read JSON files with pretty-printing, smart summary for large files, key path navigation).
 - Any plugin-registered command listed in context (see Available plugin commands).
 Operator-only commands (do NOT work from execute blocks): /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, /cost, /usage, /debug, /log, /arch, /sysinfo, /procs, /net, /ports, /ls, /find, /grep, /git, /cat, /edit, /history, /export, /goal, /maxsteps, /thinking, /memctx, /subagent-model, /find, /spawn (operator-side), /collect (operator-side).
 
@@ -7083,6 +7155,8 @@ CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
     /subagent-model [m]  Show/set default subagent model (/sam <m>)
     /rootpass <pw>       Set root password ($ROOT_PASS env for su/sudo)
     /verify-ssl [on|off] Toggle HTTPS certificate verification
+    /json <file>          Read/pretty-print JSON files (smart summary for large)
+                          Use: /json file.json --key data.users --compact
 
  {bold}Manual Tools{reset}
    /bash <cmd>          Run shell command
@@ -7896,7 +7970,19 @@ def main():
                 try:
                     with open(args_str) as f:
                         content = f.read()
-                    if len(content) > 3000:
+                    # Auto-detect JSON files and pretty-print
+                    if args_str.endswith('.json'):
+                        try:
+                            import json as _j
+                            data = _j.loads(content)
+                            pretty = _j.dumps(data, indent=2, ensure_ascii=False)
+                            if len(pretty) > 4000:
+                                print(pretty[:4000] + f"\n  {t['warn']}... ({len(pretty)} chars, use /json for smart summary){RST}")
+                            else:
+                                print(pretty)
+                        except Exception:
+                            print(content[:3000] + (f"\n  {t['warn']}... ({len(content)} chars){RST}" if len(content) > 3000 else ""))
+                    elif len(content) > 3000:
                         print(content[:3000] + f"\n  {t['warn']}... ({len(content)} chars){RST}")
                     else:
                         print(content)
