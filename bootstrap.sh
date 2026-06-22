@@ -232,15 +232,45 @@ if [ "$OS" = "Linux" ]; then
     fi
   fi
 
+  # If git is available, clone the repo; otherwise download files directly
   CLONE_DIR="$HOME/prism32"
-  if [ -d "$CLONE_DIR/.git" ]; then
-    ok "Updating existing clone..."
-    git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+  if command -v git >/dev/null 2>&1; then
+    if [ -d "$CLONE_DIR/.git" ]; then
+      ok "Updating existing clone..."
+      git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+    else
+      git clone --depth 1 "$REPO" "$CLONE_DIR"
+    fi
+    cd "$CLONE_DIR"
+    sh install.sh -y
   else
-    git clone --depth 1 "$REPO" "$CLONE_DIR"
+    # No git — download prism32.py + install.sh directly
+    warn "git not available. Downloading files directly..."
+    mkdir -p "$CLONE_DIR" "$RUNTIME_DIR"
+    DL_CMD=""
+    if command -v curl >/dev/null 2>&1; then DL_CMD="curl -fsSL"
+    elif command -v wget >/dev/null 2>&1; then DL_CMD="wget -qO-"
+    fi
+    if [ -z "$DL_CMD" ] && [ -n "${PY3:-}" ]; then
+      "$PY3" -c "import urllib.request; urllib.request.urlretrieve('$RAW/prism32.py', '$CLONE_DIR/prism32.py')"
+      "$PY3" -c "import urllib.request; urllib.request.urlretrieve('$RAW/install.sh', '$CLONE_DIR/install.sh')"
+    elif [ -n "$DL_CMD" ]; then
+      $DL_CMD "$RAW/prism32.py" > "$CLONE_DIR/prism32.py"
+      $DL_CMD "$RAW/install.sh" > "$CLONE_DIR/install.sh"
+    else
+      fail "Cannot download — no git, curl, wget, or python3 available."
+      exit 1
+    fi
+    # Copy plugins if any
+    mkdir -p "$CLONE_DIR/plugins"
+    for p in web_scraper.py; do
+      if [ -n "$DL_CMD" ]; then
+        $DL_CMD "$RAW/plugins/$p" > "$CLONE_DIR/plugins/$p" 2>/dev/null || true
+      fi
+    done
+    cd "$CLONE_DIR"
+    sh install.sh -y
   fi
-  cd "$CLONE_DIR"
-  sh install.sh -y
   exit 0
 fi
 
