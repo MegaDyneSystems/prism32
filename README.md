@@ -1364,6 +1364,27 @@ cd ~/prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
 - Shared filesystem: files in the Crostini container's home directory are accessible from the ChromeOS Files app under "Linux files".
 - Clipboard sharing works between ChromeOS and the Crostini terminal.
 
+### Installing from Crosh (Ctrl+Alt+T shell)
+
+Crosh is the restricted ChromeOS shell (Ctrl+Alt+T). It has no Python, no package manager, and very few commands — but it can bootstrap you into the Linux container:
+
+```text
+# In Crosh (Ctrl+Alt+T):
+vmc start termina
+vmc container termina -- penguin -- sh -c "curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh"
+```
+
+Or just paste the bootstrap command — `bootstrap.sh` detects Crosh automatically and launches Crostini for you:
+
+```text
+# In Crosh (Ctrl+Alt+T):
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
+If Crostini isn't enabled yet, the bootstrap script prints instructions on how to enable it (Settings → Linux development environment → Turn on).
+
+If you have Developer Mode enabled, type `shell` in Crosh to get a root bash shell, then run the bootstrap command.
+
 ## Termux / Android Install
 
 One-command install for Android phones, tablets, Chromecast, Wear OS watches, and other Android devices via Termux:

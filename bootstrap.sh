@@ -56,6 +56,54 @@ for py in python3 python3.11 python3.10 python3.9 python3.8 python3.7; do
   fi
 done
 
+# ── Crosh (ChromeOS developer shell) ──
+# Crosh has no Python, no apt, no git. But it can launch Crostini.
+if [ -n "${CROS_WORKON}" ] || [ "$(basename "${SHELL:-}")" = "crosh" ] || \
+   (command -v help >/dev/null 2>&1 && ! command -v ls >/dev/null 2>&1) 2>/dev/null; then
+  ok "Platform: ChromeOS Crosh shell"
+  echo -e "  ${DIM}Crosh has no Python. Bootstrapping into Crostini (Linux container)...${RST}"
+  echo ""
+
+  # Try to start Crostini VM (termina) and enter the container (penguin)
+  if command -v vmc >/dev/null 2>&1; then
+    ok "Starting Crostini VM..."
+    vmc start termina 2>/dev/null || true
+    # Enter the container and run the bootstrap inside it
+    echo -e "  ${DIM}Installing Prism32 inside Crostini...${RST}"
+    vmc container termina -- penguin -- sh -c \
+      "curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh" 2>/dev/null || \
+    {
+      warn "Could not enter Crostini container automatically."
+      echo ""
+      echo -e "  ${BLD}Manual steps:${RST}"
+      echo -e "  1. Open the Terminal app (not Crosh) — this starts Crostini"
+      echo -e "  2. Run this in the Terminal app:"
+      echo -e "     ${CY}curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh${RST}"
+    }
+    exit 0
+  fi
+
+  # Developer Mode: try 'shell' command for root bash
+  if command -v shell >/dev/null 2>&1; then
+    ok "Developer Mode detected. Launching root shell..."
+    echo -e "  ${DIM}Run this in the root shell:${RST}"
+    echo -e "  ${CY}curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh${RST}"
+    exit 0
+  fi
+
+  # No Crostini, no Dev Mode — give instructions
+  warn "No Crostini or Developer Mode detected."
+  echo ""
+  echo -e "  ${BLD}To install Prism32 on ChromeOS:${RST}"
+  echo -e "  1. Enable Linux apps: Settings → Linux development environment → Turn on"
+  echo -e "  2. Open the Terminal app (starts Crostini)"
+  echo -e "  3. Run: ${CY}curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh${RST}"
+  echo ""
+  echo -e "  ${DIM}Or if you have Developer Mode enabled:${RST}"
+  echo -e "  ${DIM}Type 'shell' in Crosh, then run the bootstrap command above.${RST}"
+  exit 0
+fi
+
 # ── Termux / Android ──
 if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
   ok "Platform: Android (Termux)"
