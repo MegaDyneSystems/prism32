@@ -35,6 +35,24 @@ sh /tmp/install.sh -y            # auto mode
 sh /tmp/install.sh /mnt/usb      # install to USB drive
 ```
 
+Install on ChromeOS (Crostini):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
+Install on Android/Termux:
+
+```sh
+pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh
+```
+
+Universal bootstrap (auto-detects any platform):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
 Portable install to floppy/USB/CD:
 
 ```sh
@@ -435,6 +453,23 @@ Arrow keys are handled as escape sequences, so normal arrow-key editing does not
 - Creates runtime directories under `%USERPROFILE%\.prism32`.
 - Runs `--setup-runtime` when possible.
 - Adds the install directory to the user PATH.
+
+`bootstrap.sh` is a universal auto-detecting installer:
+
+- Detects: Termux/Android, OpenWrt, macOS, Linux (apt/dnf/yum/pacman/zypper/apk/emerge/xbps), BSD (pkg/pkgin/pkg_add), and unknown platforms.
+- Installs Python 3 + git if missing (via the system package manager).
+- Clones the repo (`--depth 1`) and runs the appropriate installer.
+- Updates existing clones with `git pull`.
+- Falls back to direct `wget`/`curl` download of `prism32.py` for unknown platforms.
+- One-liner: `curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh`
+
+`termux-install.sh` is a quick installer for Android/Termux:
+
+- Installs `python3` and `git` via `pkg`.
+- Clones the repo and installs Prism32.
+- Preserves existing config.
+- Creates `prism32` command in `$PREFIX/bin` (no root needed).
+- One-liner: `pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh`
 
 ## First Run Setup
 
@@ -1287,6 +1322,97 @@ The OpenWrt installer:
 - Router-tuned config: lower `max_history` (500), `max_tokens` (4096), `stream: false`
 - Creates `/etc/profile.d/prism32.sh` for USB PATH setup
 - Works on 4 MB+ flash (with USB), 32 MB+ RAM
+
+## ChromeOS Install
+
+ChromeOS supports Linux apps via the Crostini container (built into ChromeOS 69+). This gives you a Debian-based Linux environment that can run Prism32 natively — no Developer Mode or Crouton needed.
+
+### Option 1: Universal Bootstrap (easiest)
+
+```sh
+# In the Terminal app (Crostini), run:
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
+This auto-detects ChromeOS/Crostini as Linux, installs Python 3 + git if needed, clones the repo, and runs the installer — all non-interactively. Your provider config is preserved on updates.
+
+### Option 2: Manual Install
+
+```sh
+# 1. Open the Terminal app (Crostini Linux container)
+# 2. Install Python and git if not already present:
+sudo apt-get update && sudo apt-get install -y python3 git
+
+# 3. Clone and install:
+git clone https://github.com/MegaDyneSystems/prism32.git ~/prism32
+cd ~/prism32 && bash install.sh
+```
+
+### Option 3: Run Without Installing
+
+```sh
+git clone https://github.com/MegaDyneSystems/prism32.git ~/prism32
+cd ~/prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
+```
+
+### ChromeOS Notes
+
+- **Crostini** is recommended over Crouton/Developer Mode — it's sandboxed, stable, and supported on all Chromebooks from 2019 onward.
+- Prism32 runs at full speed in the Crostini container (it's a real Linux environment with `apt`, `python3`, `git`, etc.).
+- To detect ChromeOS/Crostini from inside the container: `cat /etc/os-release` shows `ID=debian` but the ChromeOS host is visible via `ls /mnt/chromeos`.
+- The `bootstrap.sh` script detects ChromeOS and installs automatically.
+- Shared filesystem: files in the Crostini container's home directory are accessible from the ChromeOS Files app under "Linux files".
+- Clipboard sharing works between ChromeOS and the Crostini terminal.
+
+## Termux / Android Install
+
+One-command install for Android phones, tablets, Chromecast, Wear OS watches, and other Android devices via Termux:
+
+```sh
+# 1. Install Termux from F-Droid (Google Play version is deprecated)
+# 2. In Termux, run:
+pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh
+```
+
+This installs Python 3 + git, clones Prism32, creates a `prism32` command in `$PREFIX/bin`, and preserves existing config on updates.
+
+```sh
+# After install, start Prism32:
+prism32
+
+# Use a cloud provider:
+prism32 --provider openrouter --api-key sk-or-v1-...
+```
+
+Works on: phones, tablets, Chromecast with Google TV, Android TV, Wear OS watches, Fire TV (sideloaded Termux), and any device that can run Termux.
+
+## Universal Bootstrap (Any Platform)
+
+A single command that auto-detects the platform and installs everything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+# or:
+wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
+The bootstrap script auto-detects:
+
+| Platform | Package Manager | Install Path |
+|----------|----------------|-------------|
+| Termux/Android | `pkg` | `~/prism32` + `install.sh -y` |
+| OpenWrt | `opkg` or `apk` | `~/prism32` + `openwrt-install.sh -y` |
+| macOS | `brew` (auto-installs if needed) | `~/prism32` + `install.sh -y` + SSL fix |
+| Linux (Debian/Ubuntu) | `apt-get` | `~/prism32` + `install.sh -y` |
+| Linux (Fedora/RHEL) | `dnf` | `~/prism32` + `install.sh -y` |
+| Linux (Arch/Manjaro) | `pacman` | `~/prism32` + `install.sh -y` |
+| Linux (Alpine) | `apk` | `~/prism32` + `install.sh -y` |
+| Linux (Gentoo) | `emerge` | `~/prism32` + `install.sh -y` |
+| Linux (Void) | `xbps-install` | `~/prism32` + `install.sh -y` |
+| BSD (FreeBSD/NetBSD/OpenBSD) | `pkg`/`pkgin`/`pkg_add` | `~/prism32` + `install.sh -y` |
+| Unknown | N/A | Direct download of `prism32.py` via `wget`/`curl`/`python3` |
+
+If Python 3 is not installed, the bootstrap script installs it via the system's package manager automatically. If no recognized package manager exists, it falls back to downloading `prism32.py` directly.
 
 ## Safety Notes
 
