@@ -53,6 +53,14 @@ Universal bootstrap (auto-detects any platform):
 curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
 ```
 
+Install on NAS (Synology/QNAP/WD — no git needed):
+
+```sh
+# Via SSH (auto-detects NAS, falls back to direct download):
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+# If $HOME doesn't exist, the script uses /tmp automatically
+```
+
 Portable install to floppy/USB/CD:
 
 ```sh
@@ -1431,9 +1439,58 @@ The bootstrap script auto-detects:
 | Linux (Gentoo) | `emerge` | `~/prism32` + `install.sh -y` |
 | Linux (Void) | `xbps-install` | `~/prism32` + `install.sh -y` |
 | BSD (FreeBSD/NetBSD/OpenBSD) | `pkg`/`pkgin`/`pkg_add` | `~/prism32` + `install.sh -y` |
+| Synology/QNAP/WD NAS | N/A (no package manager) | Direct download via `curl`/`wget` (no git needed) |
 | Unknown | N/A | Direct download of `prism32.py` via `wget`/`curl`/`python3` |
 
-If Python 3 is not installed, the bootstrap script installs it via the system's package manager automatically. If no recognized package manager exists, it falls back to downloading `prism32.py` directly.
+If Python 3 is not installed, the bootstrap script installs it via the system's package manager automatically. If no recognized package manager exists (e.g. Synology DSM, QNAP QTS), it falls back to downloading `prism32.py` + `install.sh` directly via `curl`/`wget`/`python3 urllib` — no git required.
+
+If the `$HOME` directory doesn't exist (common on Synology NAS where the user home may not be provisioned), the bootstrap script automatically falls back to `/tmp` as HOME.
+
+## NAS Install (Synology / QNAP / WD My Cloud)
+
+Most NAS devices ship with Python 3 and `curl`/`wget` but no `git` and no package manager (`apt-get`, `dnf`, etc.). The universal bootstrap handles this automatically:
+
+### Synology DSM
+
+```sh
+# Via SSH (Synology DSM has curl preinstalled):
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+
+# If curl is unavailable, use wget:
+wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+
+# If GitHub CDN is cached, pipe directly from your local machine:
+cat bootstrap.sh | ssh user@nas "cat > /tmp/bootstrap.sh && HOME=/tmp sh /tmp/bootstrap.sh"
+```
+
+Tested on Synology DS414 (Marvell Armada XP, ARMv7l, 2GB RAM, Python 3.8.12, DSM 7.x). The installer:
+- Detects missing git and falls back to direct download of `prism32.py` + `install.sh`
+- Detects missing `$HOME` directory and falls back to `/tmp` as HOME
+- Copies `prism32.py` to `~/.prism32/` (or `/tmp/.prism32/`)
+- Creates wrapper command in `~/.local/bin/prism32`
+- No root required (installs to user-local paths)
+
+After install, run with:
+
+```sh
+HOME=/tmp python3 ~/.prism32/prism32.py
+# or if wrapper is in PATH:
+HOME=/tmp prism32
+```
+
+To connect to a cloud provider (since NAS likely has no local LLM):
+
+```sh
+HOME=/tmp prism32 --provider openrouter --api-key sk-or-v1-...
+```
+
+### QNAP QTS
+
+Same procedure as Synology. QNAP NAS devices also ship with Python 3 and `curl`. The bootstrap script auto-detects QNAP via `/etc/config/uLinux.conf` or `/etc/qnap_config`.
+
+### WD My Cloud
+
+WD My Cloud NAS devices run busybox Linux with Python 3 available via optware. The bootstrap script detects WD via `/etc/NAS_CFG` and uses direct download.
 
 ## Safety Notes
 
