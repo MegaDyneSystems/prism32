@@ -6384,11 +6384,9 @@ class SubAgent:
             prov = PROVIDER_REGISTRY[self.provider]
             Config.PROVIDER = self.provider
             Config.API_BASE = prov["api_base"]
-            Config.MODEL = prov.get("model", self.model)
             if prov.get("default_key"):
                 Config.API_KEY = prov["default_key"]
-        else:
-            Config.MODEL = self.model
+        Config.MODEL = self.model
         Config.STREAM = False
         try:
             for iteration in range(self.max_steps):
@@ -8954,7 +8952,7 @@ def main():
                 print(f"  {t['warn']}╭─ SPAWNED [{sa.id}] ASYNC ─────────────────{RST}")
                 print(f"  {t['warn']}│{RST}  {t['bright']}Task:{RST} {task[:80]}")
                 prov_info = f"  {t['dim']}Provider:{RST} {provider}" if provider else ""
-                model_str = provider if provider else Config.MODEL
+                model_str = sa.model or Config.MODEL
                 print(f"  {t['warn']}│{RST}  {t['dim']}Model:{RST} {model_str[:40]}{prov_info}")
                 print(f"  {t['warn']}╰{'─' * 50}{RST}")
                 print(f"  {t['dim']}Use /collect {sa.id} to retrieve results.{RST}")
@@ -9158,7 +9156,8 @@ def main():
                     print()
                     continue
                 if not models:
-                    print(f"  No models available.")
+                    print(f"  {t['warn']}No models available from {Config.PROVIDER}.{RST}")
+                    print(f"  {t['dim']}Check your API key with /provider key, or the provider may not expose /v1/models.{RST}")
                     print()
                     continue
                 models.sort(key=lambda m: m["id"].lower())
@@ -9547,18 +9546,16 @@ def build_headers(extra=None):
 def fetch_models():
     """Fetch available models from the current provider's /v1/models endpoint.
     
-    Returns a list of model IDs/names, or empty list on failure.
+    Returns a list of model IDs/names, or empty list on success but no data.
+    Raises Exception on failure so callers can show diagnostics.
     """
-    try:
-        _base = normalize_api_base(Config.API_BASE)
-        req = urllib.request.Request(
-            f"{_base}/v1/models",
-            headers=build_headers(),
-        )
-        with urlopen_with_ssl(req, timeout=15) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
-        return []
+    _base = normalize_api_base(Config.API_BASE)
+    req = urllib.request.Request(
+        f"{_base}/v1/models",
+        headers=build_headers(),
+    )
+    with urlopen_with_ssl(req, timeout=15) as resp:
+        data = json.loads(resp.read().decode())
 
     models = []
     if "data" in data and isinstance(data["data"], list):
@@ -9752,7 +9749,9 @@ def cmd_provider_set(provider_name):
     prov = PROVIDER_REGISTRY[provider_name]
     Config.PROVIDER = provider_name
     Config.API_BASE = prov.get("api_base", Config.API_BASE)
-    Config.MODEL = prov.get("model", Config.MODEL)
+    # Only suggest a default model if user hasn't set one; never overwrite their choice
+    if not Config.MODEL:
+        Config.MODEL = prov.get("model", Config.MODEL)
     Config.save_config()
     
     viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
