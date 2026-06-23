@@ -4623,7 +4623,7 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
                 display_cur = cur
             else:
                 display_cur = min(cur, max_text - 1)
-            sys.stdout.write(prefix + display_buf + CLR_LINE)
+            sys.stdout.write(prefix + display_buf + CLR_LINE + SHOW)
             move_back = max(0, len(display_buf) - display_cur)
             if move_back > 0:
                 sys.stdout.write(f"\x1b[{move_back}D")
@@ -4634,7 +4634,7 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
             else:
                 indicator = activity_vector(history=history)
             bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
-            sys.stdout.write(f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} {CLR_LINE}")
+            sys.stdout.write(f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} {CLR_LINE}{SHOW}")
     finally:
         sys.stdout.write("\x1b8")
         sys.stdout.flush()
@@ -4714,10 +4714,10 @@ def read_footer_input(status_bar):
         _term_size = shutil.get_terminal_size()
     except Exception:
         pass
-    # Position cursor at the footer line and clear it
+    # Position cursor at the footer line, clear it, and ensure cursor is visible
     with stdout_lock:
         if ansi_enabled() and _term_size:
-            sys.stdout.write(f"\x1b[{_term_size.lines};1H{CLR_LINE}")
+            sys.stdout.write(f"\x1b[{_term_size.lines};1H{CLR_LINE}{SHOW}")
             sys.stdout.flush()
     try:
         line = input(rl_prompt(f" {status_bar}{prompt_prefix}"))
