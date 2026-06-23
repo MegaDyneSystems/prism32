@@ -3894,11 +3894,8 @@ class Config:
     
     @classmethod
     def save_config(cls):
-        """Save current config to file."""
+        """Save current config to file with timeout-safe write."""
         try:
-            config_dir = os.path.dirname(cls.CONFIG_FILE)
-            os.makedirs(config_dir, exist_ok=True)
-            
             data = {
                 "api_base": cls.API_BASE,
                 "model": cls.MODEL,
@@ -3920,10 +3917,8 @@ class Config:
                 "custom_arch_map": cls.CUSTOM_ARCH_MAP,
                 "verify_ssl": cls.VERIFY_SSL,
             }
-            
-            with open(cls.CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(data, f, indent=2)
-        except OSError as e:
+            _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
+        except Exception as e:
             print(f"  Config save failed: {e}")
     
     @classmethod
@@ -3941,13 +3936,15 @@ class Config:
             if "theme" in data: cls.THEME = data["theme"]
             if "provider" in data:
                 cls.PROVIDER = data["provider"]
+                # Only apply registry defaults for fields that were NOT explicitly saved
                 if data["provider"] in PROVIDER_REGISTRY:
+                    reg = PROVIDER_REGISTRY[data["provider"]]
                     if "api_base" not in data:
-                        cls.API_BASE = PROVIDER_REGISTRY[data["provider"]]["api_base"]
+                        cls.API_BASE = reg.get("api_base", cls.API_BASE)
                     if "model" not in data:
-                        cls.MODEL = PROVIDER_REGISTRY[data["provider"]]["model"]
-                    if "api_key" not in data and PROVIDER_REGISTRY[data["provider"]].get("default_key"):
-                        cls.API_KEY = PROVIDER_REGISTRY[data["provider"]]["default_key"]
+                        cls.MODEL = reg.get("model", cls.MODEL)
+                    if "api_key" not in data and reg.get("default_key"):
+                        cls.API_KEY = reg["default_key"]
             if "max_history" in data: cls.MAX_HISTORY = int(data["max_history"])
             if "max_response_tokens" in data: cls.MAX_RESPONSE_TOKENS = int(data["max_response_tokens"])
             if "cmd_timeout" in data: cls.CMD_TIMEOUT = int(data["cmd_timeout"])
@@ -3958,9 +3955,6 @@ class Config:
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
             if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = int(data["max_memory_ctx"])
             if "max_context_tokens" in data: cls.MAX_CONTEXT_TOKENS = int(data["max_context_tokens"])
-            # Live stream rendering is intentionally session-only. Older saved
-            # configs may contain stream=true, which can re-enable fragile
-            # token-level terminal output on legacy systems.
             if "slow_cpu" in data: cls.SLOW_CPU = data["slow_cpu"]
             if "verify_ssl" in data:
                 cls.VERIFY_SSL = bool(data["verify_ssl"])
@@ -3979,12 +3973,12 @@ class Config:
                         "name": prov_name.replace("_", " ").title(),
                         "api_base": prov_cfg.get("api_base", cls.API_BASE),
                         "model": prov_cfg.get("model", cls.MODEL),
-                        "description": f"Configured via installer",
+                        "description": "Configured via installer",
                     })
                     if prov_cfg.get("api_key"):
                         PROVIDER_REGISTRY[prov_name]["default_key"] = prov_cfg["api_key"]
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"  Config load failed ({cls.CONFIG_FILE}): {e}")
 
 # ── Resilient helpers ──
 def estimate_tokens(text):
@@ -4690,10 +4684,30 @@ def _footer_animate_stop():
 def read_footer_input(status_bar):
     """Read one line from the reserved footer with proper arrow key support."""
     global _footer_reserved
-    if not _footer_reserved:
-        t = T()
-        return input(rl_prompt(f" {t['primary']}prism32>{RST} ")).strip()
     t = T()
+    tw = _terminal_width()
+    # Ensure prompt leaves room for typing: cap prompt to ~60% of terminal width
+    prompt_prefix = f" {t['primary']}>{RST} "
+    prefix_vis = len(strip_ansi(prompt_prefix))
+    max_bar_vis = max(8, tw - prefix_vis - int(tw * 0.35))
+    bar_vis = len(strip_ansi(status_bar))
+    if bar_vis > max_bar_vis:
+        # Truncate status bar, preserving ANSI codes
+        truncated = ""
+        vis_count = 0
+        i = 0
+        while i < len(status_bar) and vis_count < max_bar_vis - 1:
+            m = _RE_ANSI.match(status_bar, i)
+            if m:
+                truncated += m.group(0)
+                i = m.end()
+            else:
+                truncated += status_bar[i]
+                vis_count += 1
+                i += 1
+        status_bar = truncated + "\u2026"
+    if not _footer_reserved:
+        return input(rl_prompt(f" {status_bar}{prompt_prefix}")).strip()
     # Refresh terminal size in case of resize
     try:
         global _term_size
@@ -4703,10 +4717,10 @@ def read_footer_input(status_bar):
     # Position cursor at the footer line and clear it
     with stdout_lock:
         if ansi_enabled() and _term_size:
-            sys.stdout.write(f"\x1b[{_term_size.lines};1H\x1b[K")
+            sys.stdout.write(f"\x1b[{_term_size.lines};1H{CLR_LINE}")
             sys.stdout.flush()
     try:
-        line = input(rl_prompt(f" {status_bar} {t['primary']}>{RST} "))
+        line = input(rl_prompt(f" {status_bar}{prompt_prefix}"))
     except (EOFError, KeyboardInterrupt):
         with stdout_lock:
             draw_footer(build_status_bar())
@@ -4714,7 +4728,7 @@ def read_footer_input(status_bar):
     # Clear the footer line after input
     with stdout_lock:
         if ansi_enabled() and _term_size:
-            sys.stdout.write(f"\x1b[{_term_size.lines};1H\x1b[K")
+            sys.stdout.write(f"\x1b[{_term_size.lines};1H{CLR_LINE}")
             sys.stdout.flush()
     return line.strip()
 
@@ -7131,8 +7145,11 @@ def cmd_goal(goal_text, history, cmd_log):
             box("STOPPED", msg, "warn")
             cancelled = True
             break
-        if not resp or resp.startswith('['):
-            box("AI ERROR", resp or "No response", "err")
+        if not resp:
+            box("AI ERROR", "No response", "err")
+            break
+        if resp.startswith('[HTTP ERROR') or resp.startswith('[NETWORK ERROR') or resp.startswith('[ERROR]'):
+            box("AI ERROR", resp, "err")
             break
 
         resp = handle_ask_blocks(resp, history, goal_mode=True)
@@ -9346,8 +9363,13 @@ def main():
                 clear_agent_cancel()
                 box("STOPPED", msg, "warn")
                 break
-            if not resp or resp.startswith('['):
-                box("AI ERROR", resp or "No response", "err")
+            if not resp:
+                box("AI ERROR", "No response", "err")
+                break
+            if resp.startswith('[HTTP ERROR') or resp.startswith('[NETWORK ERROR') or resp.startswith('[ERROR]'):
+                box("AI ERROR", resp, "err")
+                if "401" in resp:
+                    print(f"  {T()['dim']}Tip: set your API key with /provider key <key> or switch provider with /provider <name>{RST}")
                 break
 
             resp, asked = handle_ask_blocks(resp, history, return_asked=True)
