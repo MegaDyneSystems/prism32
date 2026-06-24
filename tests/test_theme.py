@@ -4,6 +4,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 exec(open('prism32.py').read().split('if __name__')[0])
+_register_extended_themes()  # ensure deferred themes are loaded for tests
 
 def test_theme_registry_has_themes():
     """THEME_REGISTRY should have multiple themes."""

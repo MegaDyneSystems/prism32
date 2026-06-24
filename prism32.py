@@ -149,7 +149,7 @@ class PluginAPI:
 
     @property
     def memory(self):
-        return _mem_cache
+        return get_mem_cache()
 
     @property
     def history(self):
@@ -505,7 +505,7 @@ def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
     if _MEMORY_DIRTY:
         try:
-            save_memory(_mem_cache)
+            save_memory(get_mem_cache())
             _MEMORY_DIRTY = False
         except Exception:
             pass
@@ -535,8 +535,13 @@ def load_memory():
     except Exception:
         return _default_memory()
 
-_mem_cache = load_memory()
-_mem_cache_loaded = True
+_mem_cache = None
+
+def get_mem_cache():
+    global _mem_cache
+    if _mem_cache is None:
+        _mem_cache = load_memory()
+    return _mem_cache
 
 def save_memory(memory):
     try:
@@ -557,94 +562,96 @@ def save_memory(memory):
 STARTUP_AUTO_START = "<!-- PRISM32_AUTO_START -->"
 STARTUP_AUTO_END = "<!-- PRISM32_AUTO_END -->"
 
-HARNESS_CANDIDATES = [
-    {
-        "id": "opencode",
-        "display": "OpenCode",
-        "executables": ["opencode"],
-        "abilities": ["codebase editing", "tool calling", "subagents", "repo automation"],
-        "hint": "Use for multi-file software engineering after inspecting its help output.",
-    },
-    {
-        "id": "codex",
-        "display": "OpenAI Codex CLI",
-        "executables": ["codex"],
-        "abilities": ["code editing", "repo repair", "command execution"],
-        "hint": "Use for focused coding tasks when its CLI is configured.",
-    },
-    {
-        "id": "claude-code",
-        "display": "Claude Code",
-        "executables": ["claude", "claude-code"],
-        "abilities": ["code editing", "repo analysis", "agentic terminal work"],
-        "hint": "Use for coding tasks after checking authentication and CLI syntax.",
-    },
-    {
-        "id": "kimicode",
-        "display": "KimiCode",
-        "executables": ["kimicode", "kimi"],
-        "abilities": ["code editing", "long context analysis", "repo assistance"],
-        "hint": "Use when Kimi-based coding tools are installed and authenticated.",
-    },
-    {
-        "id": "pi",
-        "display": "Pi AI CLI",
-        "executables": ["pi"],
-        "abilities": ["assistant CLI", "terminal assistance"],
-        "hint": "Inspect help first; command names vary between Pi-related tools.",
-    },
-    {
-        "id": "aider",
-        "display": "Aider",
-        "executables": ["aider"],
-        "abilities": ["git-aware coding", "multi-file edits", "LLM pair programming"],
-        "hint": "Useful for git-backed code edits when configured with an API key.",
-    },
-    {
-        "id": "gemini-cli",
-        "display": "Gemini CLI",
-        "executables": ["gemini"],
-        "abilities": ["assistant CLI", "large context analysis", "code help"],
-        "hint": "Use for large context inspection if installed and authenticated.",
-    },
-    {
-        "id": "goose",
-        "display": "Goose",
-        "executables": ["goose"],
-        "abilities": ["desktop/terminal agent", "tool use", "automation"],
-        "hint": "Use for autonomous local automation after checking available extensions.",
-    },
-    {
-        "id": "hermes",
-        "display": "Hermes Agent",
-        "executables": ["hermes"],
-        "abilities": ["tool calling", "MCP", "skills/plugins", "chat", "computer use", "memory", "TUI/GUI"],
-        "hint": "Use for autonomous agent tasks, MCP servers, skills, and desktop automation when configured.",
-    },
-    {
-        "id": "cursor-agent",
-        "display": "Cursor Agent",
-        "executables": ["cursor-agent"],
-        "abilities": ["codebase editing", "repo automation"],
-        "hint": "Use for Cursor-backed coding workflows when present.",
-    },
-]
+def _get_harness_candidates():
+    return [
+        {
+            "id": "opencode",
+            "display": "OpenCode",
+            "executables": ["opencode"],
+            "abilities": ["codebase editing", "tool calling", "subagents", "repo automation"],
+            "hint": "Use for multi-file software engineering after inspecting its help output.",
+        },
+        {
+            "id": "codex",
+            "display": "OpenAI Codex CLI",
+            "executables": ["codex"],
+            "abilities": ["code editing", "repo repair", "command execution"],
+            "hint": "Use for focused coding tasks when its CLI is configured.",
+        },
+        {
+            "id": "claude-code",
+            "display": "Claude Code",
+            "executables": ["claude", "claude-code"],
+            "abilities": ["code editing", "repo analysis", "agentic terminal work"],
+            "hint": "Use for coding tasks after checking authentication and CLI syntax.",
+        },
+        {
+            "id": "kimicode",
+            "display": "KimiCode",
+            "executables": ["kimicode", "kimi"],
+            "abilities": ["code editing", "long context analysis", "repo assistance"],
+            "hint": "Use when Kimi-based coding tools are installed and authenticated.",
+        },
+        {
+            "id": "pi",
+            "display": "Pi AI CLI",
+            "executables": ["pi"],
+            "abilities": ["assistant CLI", "terminal assistance"],
+            "hint": "Inspect help first; command names vary between Pi-related tools.",
+        },
+        {
+            "id": "aider",
+            "display": "Aider",
+            "executables": ["aider"],
+            "abilities": ["git-aware coding", "multi-file edits", "LLM pair programming"],
+            "hint": "Useful for git-backed code edits when configured with an API key.",
+        },
+        {
+            "id": "gemini-cli",
+            "display": "Gemini CLI",
+            "executables": ["gemini"],
+            "abilities": ["assistant CLI", "large context analysis", "code help"],
+            "hint": "Use for large context inspection if installed and authenticated.",
+        },
+        {
+            "id": "goose",
+            "display": "Goose",
+            "executables": ["goose"],
+            "abilities": ["desktop/terminal agent", "tool use", "automation"],
+            "hint": "Use for autonomous local automation after checking available extensions.",
+        },
+        {
+            "id": "hermes",
+            "display": "Hermes Agent",
+            "executables": ["hermes"],
+            "abilities": ["tool calling", "MCP", "skills/plugins", "chat", "computer use", "memory", "TUI/GUI"],
+            "hint": "Use for autonomous agent tasks, MCP servers, skills, and desktop automation when configured.",
+        },
+        {
+            "id": "cursor-agent",
+            "display": "Cursor Agent",
+            "executables": ["cursor-agent"],
+            "abilities": ["codebase editing", "repo automation"],
+            "hint": "Use for Cursor-backed coding workflows when present.",
+        },
+    ]
 
-TOOL_SCAN_GROUPS = {
-    "shells": ["bash", "sh", "zsh", "fish", "ksh", "dash", "ash", "busybox", "cmd", "powershell", "pwsh"],
-    "python": ["python3", "python", "py"],
-    "vcs": ["git", "hg", "svn"],
-    "editors": ["nano", "vim", "vi", "nvim", "ed", "notepad", "code"],
-    "build": ["make", "cmake", "ninja", "gcc", "clang", "cc", "msbuild", "cl"],
-    "network": ["ssh", "scp", "sftp", "curl", "wget", "ftp", "nc", "ncat", "telnet", "ifconfig", "ip", "netstat", "ss"],
-    "archives": ["tar", "gzip", "gunzip", "zip", "unzip", "7z", "certutil"],
-    "package": ["apt", "apt-get", "dnf", "microdnf", "tdnf", "yum", "pacman", "zypper", "apk", "rpm-ostree", "swupd", "opkg", "ipkg", "emerge", "xbps-install", "eopkg", "slackpkg", "guix", "nix-env", "pkg", "pkgin", "pkg_add", "pkgadd", "pkgutil", "pkgman", "brew", "port", "winget", "choco", "scoop", "synopkg"],
-    "services": ["systemctl", "service", "rc-service", "rcctl", "svcadm", "initctl", "launchctl", "synoservice", "svcs"],
-    "embedded": ["busybox", "opkg", "ipkg", "uci", "ubus", "procd", "fw_printenv", "fw_setenv", "termux-setup-storage"],
-    "containers": ["docker", "podman", "kubectl", "nerdctl", "ctr", "crictl", "lxc", "lxc-info", "systemd-detect-virt"],
-    "storage_appliance": ["midclt", "cli", "synoshare", "synoservice", "synopkg", "qm", "pvesh", "pveversion"],
-    "windows": ["cmd", "powershell", "pwsh", "where", "wmic", "tasklist", "netstat", "ipconfig", "route", "reg", "wsl"],
-}
+def _get_tool_scan_groups():
+    return {
+        "shells": ["bash", "sh", "zsh", "fish", "ksh", "dash", "ash", "busybox", "cmd", "powershell", "pwsh"],
+        "python": ["python3", "python", "py"],
+        "vcs": ["git", "hg", "svn"],
+        "editors": ["nano", "vim", "vi", "nvim", "ed", "notepad", "code"],
+        "build": ["make", "cmake", "ninja", "gcc", "clang", "cc", "msbuild", "cl"],
+        "network": ["ssh", "scp", "sftp", "curl", "wget", "ftp", "nc", "ncat", "telnet", "ifconfig", "ip", "netstat", "ss"],
+        "archives": ["tar", "gzip", "gunzip", "zip", "unzip", "7z", "certutil"],
+        "package": ["apt", "apt-get", "dnf", "microdnf", "tdnf", "yum", "pacman", "zypper", "apk", "rpm-ostree", "swupd", "opkg", "ipkg", "emerge", "xbps-install", "eopkg", "slackpkg", "guix", "nix-env", "pkg", "pkgin", "pkg_add", "pkgadd", "pkgutil", "pkgman", "brew", "port", "winget", "choco", "scoop", "synopkg"],
+        "services": ["systemctl", "service", "rc-service", "rcctl", "svcadm", "initctl", "launchctl", "synoservice", "svcs"],
+        "embedded": ["busybox", "opkg", "ipkg", "uci", "ubus", "procd", "fw_printenv", "fw_setenv", "termux-setup-storage"],
+        "containers": ["docker", "podman", "kubectl", "nerdctl", "ctr", "crictl", "lxc", "lxc-info", "systemd-detect-virt"],
+        "storage_appliance": ["midclt", "cli", "synoshare", "synoservice", "synopkg", "qm", "pvesh", "pveversion"],
+        "windows": ["cmd", "powershell", "pwsh", "where", "wmic", "tasklist", "netstat", "ipconfig", "route", "reg", "wsl"],
+    }
 
 def _runtime_dir():
     return os.path.dirname(MEMORY_FILE)
@@ -813,9 +820,10 @@ def refresh_memory_profile(save=True):
     }
     if sys.platform.startswith("win"):
         profile["windows"] = platform.win32_ver()[0:3]
-    _mem_cache["system_profile"] = profile
+    cache = get_mem_cache()
+    cache["system_profile"] = profile
     if save:
-        save_memory(_mem_cache)
+        save_memory(cache)
     return profile
 
 def _probe_version(exe_path):
@@ -858,7 +866,7 @@ def detect_harnesses(probe_versions=True):
     installed = []
     missing = []
     seen_paths = set()
-    for cand in HARNESS_CANDIDATES:
+    for cand in _get_harness_candidates():
         found = None
         for exe in cand.get("executables", []):
             path = _find_exe(exe)
@@ -957,7 +965,7 @@ def _harness_super_task(task):
 
 def scan_available_tools():
     tools = {}
-    for group, names in TOOL_SCAN_GROUPS.items():
+    for group, names in _get_tool_scan_groups().items():
         found = []
         for name in names:
             try:
@@ -1026,7 +1034,7 @@ def _default_config_snapshot():
     }
 
 def evolve_doc_text():
-    help_text = globals().get("CMD_HELP", "Use /help inside Prism32 for command help.")
+    help_text = get_cmd_help() if 'get_cmd_help' in globals() else "Use /help inside Prism32 for command help."
     return f"""# Prism32 Evolve Mode Documentation
 
 This file is generated by Prism32 and injected into AI context when /evolve is on.
@@ -1431,7 +1439,8 @@ def _secrets_save(secrets):
 # skills, environment, domain prompt, secrets, and status.
 # The captain agent reads shards and delegates to subagent teams.
 
-PROMPTSHARD_DEFAULTS = """# promptshard: root
+def _get_promptshard_defaults():
+    return """# promptshard: root
 ## objective: main session objective
 ## agent: captain
 ## model_capabilities: chat
@@ -1451,7 +1460,7 @@ def read_promptshard():
         with open(PROMPTSHARD_FILE, 'r', encoding='utf-8') as f:
             raw = f.read()
     except (FileNotFoundError, IOError):
-        raw = PROMPTSHARD_DEFAULTS
+        raw = _get_promptshard_defaults()
         os.makedirs(os.path.dirname(PROMPTSHARD_FILE), exist_ok=True)
         with open(PROMPTSHARD_FILE, 'w', encoding='utf-8') as f:
             f.write(raw)
@@ -2166,7 +2175,7 @@ def _cleanup_subagents():
 
 def learn_command(cmd_name, success=True, duration=0):
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
-    stats = _mem_cache.setdefault("command_stats", {})
+    stats = get_mem_cache().setdefault("command_stats", {})
     entry = stats.setdefault(cmd_name, {"uses": 0, "failures": 0, "total_time": 0})
     entry["uses"] += 1
     if not success:
@@ -2179,7 +2188,7 @@ def learn_command(cmd_name, success=True, duration=0):
 
 def learn_error(error_msg, context=""):
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
-    patterns = _mem_cache.setdefault("error_patterns", {})
+    patterns = get_mem_cache().setdefault("error_patterns", {})
     fp = error_msg[:80] if error_msg else "unknown"
     entry = patterns.setdefault(fp, {"count": 0, "contexts": [], "fixed": False})
     entry["count"] += 1
@@ -2192,8 +2201,9 @@ def learn_error(error_msg, context=""):
 
 def learn_session(history_len, cmd_count, goal_mode=False):
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
-    _mem_cache["session_count"] = _mem_cache.get("session_count", 0) + 1
-    _mem_cache["last_session"] = {
+    cache = get_mem_cache()
+    cache["session_count"] = cache.get("session_count", 0) + 1
+    cache["last_session"] = {
         "time": datetime.now().isoformat(),
         "messages": history_len,
         "commands": cmd_count,
@@ -2218,7 +2228,7 @@ def get_memory_suggestions():
     return hints
 
 def memory_context():
-    mem = _mem_cache
+    mem = get_mem_cache()
     parts = []
     # System context
     info = get_system_info()
@@ -4226,160 +4236,133 @@ def trim_history(history, max_tokens=None):
 register_theme("phosphor", primary="\x1b[92m", bright="\x1b[1;92m", dim="\x1b[2;32m", accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m", glow="\x1b[5;92m", bar="\x1b[42m")
 register_theme("amber", primary="\x1b[33m", bright="\x1b[1;93m", dim="\x1b[2;33m", accent="\x1b[96m", warn="\x1b[92m", err="\x1b[91m", glow="\x1b[5;93m", bar="\x1b[43m")
 register_theme("cyan", primary="\x1b[96m", bright="\x1b[1;96m", dim="\x1b[2;36m", accent="\x1b[92m", warn="\x1b[93m", err="\x1b[91m", glow="\x1b[5;96m", bar="\x1b[46m")
-# ── Community Themes ─────────────────────────────────────────
+_EXTENDED_THEMES_REGISTERED = False
 
-register_theme("vapor",
-    primary="\033[38;5;219m", bright="\033[1;95m", dim="\033[2;38;5;245m",
-    accent="\033[38;5;87m", warn="\033[38;5;228m", err="\033[38;5;203m",
-    glow="\033[5;95m", bar="\033[48;5;201m")
-
-register_theme("nord",
-    primary="\033[38;5;109m", bright="\033[1;94m", dim="\033[2;38;5;60m",
-    accent="\033[38;5;143m", warn="\033[38;5;223m", err="\033[38;5;167m",
-    glow="\033[5;94m", bar="\033[48;5;67m")
-
-register_theme("solarized",
-    primary="\033[38;5;37m", bright="\033[1;36m", dim="\033[2;38;5;66m",
-    accent="\033[38;5;42m", warn="\033[38;5;3m", err="\033[38;5;124m",
-    glow="\033[5;36m", bar="\033[48;5;23m")
-
-register_theme("neon",
-    primary="\033[38;5;51m", bright="\033[1;96m", dim="\033[2;38;5;239m",
-    accent="\033[38;5;200m", warn="\033[38;5;226m", err="\033[38;5;196m",
-    glow="\033[5;96m", bar="\033[48;5;45m")
-
-register_theme("retro",
-    primary="\033[38;5;214m", bright="\033[1;33m", dim="\033[2;38;5;243m",
-    accent="\033[38;5;228m", warn="\033[38;5;215m", err="\033[38;5;124m",
-    glow="\033[5;33m", bar="\033[48;5;130m")
-
-register_theme("ice",
-    primary="\033[38;5;159m", bright="\033[1;97m", dim="\033[2;38;5;253m",
-    accent="\033[38;5;195m", warn="\033[38;5;229m", err="\033[38;5;203m",
-    glow="\033[5;97m", bar="\033[48;5;117m")
-
-register_theme("ocean",
-    primary="\033[38;5;45m", bright="\033[1;96m", dim="\033[2;38;5;24m",
-    accent="\033[38;5;51m", warn="\033[38;5;214m", err="\033[38;5;196m",
-    glow="\033[5;96m", bar="\033[48;5;30m")
-
-register_theme("sunset",
-    primary="\033[38;5;208m", bright="\033[1;91m", dim="\033[2;38;5;94m",
-    accent="\033[38;5;213m", warn="\033[38;5;226m", err="\033[38;5;160m",
-    glow="\033[5;91m", bar="\033[48;5;166m")
-
-register_theme("forest",
-    primary="\033[38;5;114m", bright="\033[1;32m", dim="\033[2;38;5;65m",
-    accent="\033[38;5;150m", warn="\033[38;5;214m", err="\033[38;5;124m",
-    glow="\033[5;32m", bar="\033[48;5;28m")
-
-register_theme("plasma",
-    primary="\033[38;5;183m", bright="\033[1;95m", dim="\033[2;38;5;61m",
-    accent="\033[38;5;169m", warn="\033[38;5;226m", err="\033[38;5;196m",
-    glow="\033[5;95m", bar="\033[48;5;128m")
-
-# ── Transparent-terminal themes ───────────────────────────────
-register_theme("clear",
-    primary="\x1b[39m", bright="\x1b[1m", dim="\x1b[2m",
-    accent="\x1b[36m", warn="\x1b[33m", err="\x1b[31m",
-    glow="\x1b[5m", bar="")
-
-register_theme("glass",
-    primary="\x1b[38;5;250m", bright="\x1b[1;97m", dim="\x1b[2;38;5;245m",
-    accent="\x1b[38;5;81m", warn="\x1b[38;5;220m", err="\x1b[38;5;203m",
-    glow="\x1b[5;38;5;250m", bar="")
-
-register_theme("ghost",
-    primary="\x1b[38;5;252m", bright="\x1b[1;38;5;255m", dim="\x1b[2;38;5;244m",
-    accent="\x1b[38;5;122m", warn="\x1b[38;5;178m", err="\x1b[38;5;204m",
-    glow="\x1b[5;38;5;252m", bar="")
-
-register_theme("smoke",
-    primary="\x1b[38;5;240m", bright="\x1b[1;38;5;238m", dim="\x1b[2;38;5;245m",
-    accent="\x1b[38;5;67m", warn="\x1b[38;5;130m", err="\x1b[38;5;124m",
-    glow="\x1b[5;38;5;240m", bar="")
-
-# ── Light / white-terminal themes ─────────────────────────────
-register_theme("paper",
-    primary="\x1b[30m", bright="\x1b[1;30m", dim="\x1b[2;30m",
-    accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
-    glow="\x1b[5;30m", bar="")
-
-register_theme("ink",
-    primary="\x1b[34m", bright="\x1b[1;34m", dim="\x1b[2;34m",
-    accent="\x1b[32m", warn="\x1b[33m", err="\x1b[31m",
-    glow="\x1b[5;34m", bar="")
-
-register_theme("daylight",
-    primary="\x1b[36m", bright="\x1b[1;90m", dim="\x1b[2;36m",
-    accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
-    glow="\x1b[5;36m", bar="")
-
-register_theme("slate",
-    primary="\x1b[38;5;238m", bright="\x1b[1;38;5;240m", dim="\x1b[2;38;5;244m",
-    accent="\x1b[34m", warn="\x1b[38;5;130m", err="\x1b[31m",
-    glow="\x1b[5;38;5;238m", bar="")
-
-# ── Legacy 16-color / retro terminal themes ──────────────────
-# These use ONLY standard ANSI 16-color codes (30-37, 90-97, 40-47, 100-107)
-# plus SGR attributes (1-7). No 256-color (38;5;N) sequences.
-# Safe on: IRIX iris-ansi, HP-UX hpterm, AIX xterm, Solaris CDE, DEC VTxxx,
-#          old xterm, rxvt, and any terminal with basic ANSI color support.
-
-register_theme("synthcity",
-    primary="\x1b[96m", bright="\x1b[95m", dim="\x1b[36m",
-    accent="\x1b[95m", warn="\x1b[93m", err="\x1b[91m",
-    glow="\x1b[5;95m", bar="\x1b[45m")
-
-register_theme("outrun",
-    primary="\x1b[95m", bright="\x1b[93m", dim="\x1b[35m",
-    accent="\x1b[96m", warn="\x1b[92m", err="\x1b[91m",
-    glow="\x1b[5;95m", bar="\x1b[104m")
-
-register_theme("laserdisc",
-    primary="\x1b[94m", bright="\x1b[96m", dim="\x1b[34m",
-    accent="\x1b[95m", warn="\x1b[93m", err="\x1b[91m",
-    glow="\x1b[5;96m", bar="\x1b[44m")
-
-register_theme("vapordark",
-    primary="\x1b[95m", bright="\x1b[97m", dim="\x1b[35m",
-    accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
-    glow="\x1b[5;95m", bar="\x1b[45m")
-
-register_theme("chromecrt",
-    primary="\x1b[92m", bright="\x1b[97m", dim="\x1b[32m",
-    accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
-    glow="\x1b[5;92m", bar="\x1b[42m")
-
-register_theme("sgi",
-    primary="\x1b[96m", bright="\x1b[97m", dim="\x1b[36m",
-    accent="\x1b[94m", warn="\x1b[93m", err="\x1b[91m",
-    glow="\x1b[5;36m", bar="\x1b[46m")
-
-register_theme("dec",
-    primary="\x1b[32m", bright="\x1b[92m", dim="\x1b[2;32m",
-    accent="\x1b[33m", warn="\x1b[33m", err="\x1b[91m",
-    glow="\x1b[5;92m", bar="\x1b[42m")
-
-register_theme("monoamber",
-    primary="\x1b[33m", bright="\x1b[93m", dim="\x1b[2;33m",
-    accent="\x1b[93m", warn="\x1b[93m", err="\x1b[91m",
-    glow="\x1b[5;33m", bar="\x1b[43m")
-
-register_theme("iris",
-    primary="\x1b[37m", bright="\x1b[97m", dim="\x1b[2;37m",
-    accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
-    glow="\x1b[5;37m", bar="\x1b[44m")
-
-register_theme("hpterm",
-    primary="\x1b[92m", bright="\x1b[93m", dim="\x1b[32m",
-    accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
-    glow="\x1b[5;92m", bar="\x1b[46m")
-
-register_theme("ember",
-    primary="\x1b[38;5;208m", bright="\x1b[1;38;5;214m", dim="\x1b[38;5;240m",
-    accent="\x1b[38;5;226m", warn="\x1b[38;5;220m", err="\x1b[38;5;196m",
-    glow="\x1b[5;38;5;208m", bar="\x1b[48;5;236m")
+def _register_extended_themes():
+    global _EXTENDED_THEMES_REGISTERED
+    if _EXTENDED_THEMES_REGISTERED:
+        return
+    _EXTENDED_THEMES_REGISTERED = True
+    # ── Community Themes ─────────────────────────────────────────
+    register_theme("vapor",
+        primary="\033[38;5;219m", bright="\033[1;95m", dim="\033[2;38;5;245m",
+        accent="\033[38;5;87m", warn="\033[38;5;228m", err="\033[38;5;203m",
+        glow="\033[5;95m", bar="\033[48;5;201m")
+    register_theme("nord",
+        primary="\033[38;5;109m", bright="\033[1;94m", dim="\033[2;38;5;60m",
+        accent="\033[38;5;143m", warn="\033[38;5;223m", err="\033[38;5;167m",
+        glow="\033[5;94m", bar="\033[48;5;67m")
+    register_theme("solarized",
+        primary="\033[38;5;37m", bright="\033[1;36m", dim="\033[2;38;5;66m",
+        accent="\033[38;5;42m", warn="\033[38;5;3m", err="\033[38;5;124m",
+        glow="\033[5;36m", bar="\033[48;5;23m")
+    register_theme("neon",
+        primary="\033[38;5;51m", bright="\033[1;96m", dim="\033[2;38;5;239m",
+        accent="\033[38;5;200m", warn="\033[38;5;226m", err="\033[38;5;196m",
+        glow="\033[5;96m", bar="\033[48;5;45m")
+    register_theme("retro",
+        primary="\033[38;5;214m", bright="\033[1;33m", dim="\033[2;38;5;243m",
+        accent="\033[38;5;228m", warn="\033[38;5;215m", err="\033[38;5;124m",
+        glow="\033[5;33m", bar="\033[48;5;130m")
+    register_theme("ice",
+        primary="\033[38;5;159m", bright="\033[1;97m", dim="\033[2;38;5;253m",
+        accent="\033[38;5;195m", warn="\033[38;5;229m", err="\033[38;5;203m",
+        glow="\033[5;97m", bar="\033[48;5;117m")
+    register_theme("ocean",
+        primary="\033[38;5;45m", bright="\033[1;96m", dim="\033[2;38;5;24m",
+        accent="\033[38;5;51m", warn="\033[38;5;214m", err="\033[38;5;196m",
+        glow="\033[5;96m", bar="\033[48;5;30m")
+    register_theme("sunset",
+        primary="\033[38;5;208m", bright="\033[1;91m", dim="\033[2;38;5;94m",
+        accent="\033[38;5;213m", warn="\033[38;5;226m", err="\033[38;5;160m",
+        glow="\033[5;91m", bar="\033[48;5;166m")
+    register_theme("forest",
+        primary="\033[38;5;114m", bright="\033[1;32m", dim="\033[2;38;5;65m",
+        accent="\033[38;5;150m", warn="\033[38;5;214m", err="\033[38;5;124m",
+        glow="\033[5;32m", bar="\033[48;5;28m")
+    register_theme("plasma",
+        primary="\033[38;5;183m", bright="\033[1;95m", dim="\033[2;38;5;61m",
+        accent="\033[38;5;169m", warn="\033[38;5;226m", err="\033[38;5;196m",
+        glow="\033[5;95m", bar="\033[48;5;128m")
+    # ── Transparent-terminal themes ───────────────────────────────
+    register_theme("clear",
+        primary="\x1b[39m", bright="\x1b[1m", dim="\x1b[2m",
+        accent="\x1b[36m", warn="\x1b[33m", err="\x1b[31m",
+        glow="\x1b[5m", bar="")
+    register_theme("glass",
+        primary="\x1b[38;5;250m", bright="\x1b[1;97m", dim="\x1b[2;38;5;245m",
+        accent="\x1b[38;5;81m", warn="\x1b[38;5;220m", err="\x1b[38;5;203m",
+        glow="\x1b[5;38;5;250m", bar="")
+    register_theme("ghost",
+        primary="\x1b[38;5;252m", bright="\x1b[1;38;5;255m", dim="\x1b[2;38;5;244m",
+        accent="\x1b[38;5;122m", warn="\x1b[38;5;178m", err="\x1b[38;5;204m",
+        glow="\x1b[5;38;5;252m", bar="")
+    register_theme("smoke",
+        primary="\x1b[38;5;240m", bright="\x1b[1;38;5;238m", dim="\x1b[2;38;5;245m",
+        accent="\x1b[38;5;67m", warn="\x1b[38;5;130m", err="\x1b[38;5;124m",
+        glow="\x1b[5;38;5;240m", bar="")
+    # ── Light / white-terminal themes ─────────────────────────────
+    register_theme("paper",
+        primary="\x1b[30m", bright="\x1b[1;30m", dim="\x1b[2;30m",
+        accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
+        glow="\x1b[5;30m", bar="")
+    register_theme("ink",
+        primary="\x1b[34m", bright="\x1b[1;34m", dim="\x1b[2;34m",
+        accent="\x1b[32m", warn="\x1b[33m", err="\x1b[31m",
+        glow="\x1b[5;34m", bar="")
+    register_theme("daylight",
+        primary="\x1b[36m", bright="\x1b[1;90m", dim="\x1b[2;36m",
+        accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
+        glow="\x1b[5;36m", bar="")
+    register_theme("slate",
+        primary="\x1b[38;5;238m", bright="\x1b[1;38;5;240m", dim="\x1b[2;38;5;244m",
+        accent="\x1b[34m", warn="\x1b[38;5;130m", err="\x1b[31m",
+        glow="\x1b[5;38;5;238m", bar="")
+    # ── Legacy 16-color / retro terminal themes ──────────────────
+    register_theme("synthcity",
+        primary="\x1b[96m", bright="\x1b[95m", dim="\x1b[36m",
+        accent="\x1b[95m", warn="\x1b[93m", err="\x1b[91m",
+        glow="\x1b[5;95m", bar="\x1b[45m")
+    register_theme("outrun",
+        primary="\x1b[95m", bright="\x1b[93m", dim="\x1b[35m",
+        accent="\x1b[96m", warn="\x1b[92m", err="\x1b[91m",
+        glow="\x1b[5;95m", bar="\x1b[104m")
+    register_theme("laserdisc",
+        primary="\x1b[94m", bright="\x1b[96m", dim="\x1b[34m",
+        accent="\x1b[95m", warn="\x1b[93m", err="\x1b[91m",
+        glow="\x1b[5;96m", bar="\x1b[44m")
+    register_theme("vapordark",
+        primary="\x1b[95m", bright="\x1b[97m", dim="\x1b[35m",
+        accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
+        glow="\x1b[5;95m", bar="\x1b[45m")
+    register_theme("chromecrt",
+        primary="\x1b[92m", bright="\x1b[97m", dim="\x1b[32m",
+        accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
+        glow="\x1b[5;92m", bar="\x1b[42m")
+    register_theme("sgi",
+        primary="\x1b[96m", bright="\x1b[97m", dim="\x1b[36m",
+        accent="\x1b[94m", warn="\x1b[93m", err="\x1b[91m",
+        glow="\x1b[5;36m", bar="\x1b[46m")
+    register_theme("dec",
+        primary="\x1b[32m", bright="\x1b[92m", dim="\x1b[2;32m",
+        accent="\x1b[33m", warn="\x1b[33m", err="\x1b[91m",
+        glow="\x1b[5;92m", bar="\x1b[42m")
+    register_theme("monoamber",
+        primary="\x1b[33m", bright="\x1b[93m", dim="\x1b[2;33m",
+        accent="\x1b[93m", warn="\x1b[93m", err="\x1b[91m",
+        glow="\x1b[5;33m", bar="\x1b[43m")
+    register_theme("iris",
+        primary="\x1b[37m", bright="\x1b[97m", dim="\x1b[2;37m",
+        accent="\x1b[34m", warn="\x1b[33m", err="\x1b[31m",
+        glow="\x1b[5;37m", bar="\x1b[44m")
+    register_theme("hpterm",
+        primary="\x1b[92m", bright="\x1b[93m", dim="\x1b[32m",
+        accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m",
+        glow="\x1b[5;92m", bar="\x1b[46m")
+    register_theme("ember",
+        primary="\x1b[38;5;208m", bright="\x1b[1;38;5;214m", dim="\x1b[38;5;240m",
+        accent="\x1b[38;5;226m", warn="\x1b[38;5;220m", err="\x1b[38;5;196m",
+        glow="\x1b[5;38;5;208m", bar="\x1b[48;5;236m")
 
 # ── Model Providers ────────────────────────────────────────────
 
@@ -4401,6 +4384,7 @@ def T():
         return _PLAIN_THEME
     theme = Config.THEME
     if theme not in _T_CACHE:
+        _register_extended_themes()
         data = dict(THEME_REGISTRY.get(theme, THEME_REGISTRY.get("phosphor", {})))
         data.setdefault("ok", data.get("bright", ""))
         for key, default in _PLAIN_THEME.items():
@@ -6295,14 +6279,15 @@ _SUBAGENTS = {}  # id -> SubAgent instance
 _subagent_lock = threading.Lock()
 _next_sa_id = 0
 
-SUBAGENT_SYSTEM_PROMPT = """You are a Prism32 subagent. You have FULL bash access via:
+def _get_subagent_system_prompt():
+    return """You are a Prism32 subagent. You have FULL bash access via:
 ```execute
 command here
 ```
 
 You are working on a subtask delegated by the main agent. Work autonomously step by step.
 
-CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_calls_section_begin|>, function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks.
+CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use  <|tool_calls_section_begin|> , function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks.
 
 You can chain multiple commands in a single execute block using && or ; or pipes.
 
@@ -6367,7 +6352,7 @@ class SubAgent:
         extra = ""
         if qctx != "(empty)":
             extra = f"\nShared quantum context:\n{qctx}\n"
-        sys = SUBAGENT_SYSTEM_PROMPT + "\n" + ctx + extra
+        sys = _get_subagent_system_prompt() + "\n" + ctx + extra
         return [{"role": "system", "content": sys},
                 {"role": "user", "content": f"Task: {self.task}\nWork autonomously. Use execute blocks."}]
 
@@ -7031,7 +7016,8 @@ def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_a
 
 # ── Goal Mode ────────────────────────────────────────────────
 
-GOAL_PROMPT_TEMPLATE = """GOAL: {goal}
+def _get_goal_prompt(goal, max_steps):
+    return f"""GOAL: {goal}
 
 You are in GOAL MODE. You MUST run commands to accomplish this goal.
 DO NOT claim completion without evidence. DO NOT hallucinate results.
@@ -7058,7 +7044,7 @@ def cmd_goal(goal_text, history, cmd_log):
 
     max_steps = Config.GOAL_MAX_STEPS
     set_active_goal(goal_text)
-    goal_msg = GOAL_PROMPT_TEMPLATE.format(goal=goal_text, max_steps=max_steps)
+    goal_msg = _get_goal_prompt(goal_text, max_steps)
 
     print(f"\n{t['bright']}{'='*62}{RST}")
     print(f" {t['bright']}GOAL MODE ACTIVATED{RST}")
@@ -7235,12 +7221,10 @@ def cmd_goal(goal_text, history, cmd_log):
 # ── Built-in Commands ────────────────────────────────────────
 
 # ── Dynamic command names ──────────────────────────────────
-_ALL_CMDS = registry.names() | {
-    'agentname', 'api', 'apikey', 'arch', 'autosave', 'bash', 'cat', 'clear', 'collect', 'config', 'cost', 'debug', 'delegate', 'delete', 'edit', 'evolve', 'extend', 'exit', 'export', 'find', 'forget', 'git', 'goal', 'grep', 'harness', 'help', 'history', 'key', 'load', 'loadcfg', 'log', 'ls', 'maxhistory', 'maxsteps', 'maxtokens', 'memories', 'memory', 'model', 'net', 'ports', 'procs', 'provider', 'providers', 'q', 'quantum', 'quit', 'recall', 'remember', 'resume', 'rootpass', 'sam', 'save', 'savecfg', 'session', 'sessions', 'skill-create', 'skill-delete', 'skill-list', 'skill-load', 'spawn', 'stream', 'subagent-model', 'subagents', 'sysinfo', 'temperature', 'theme', 'thinking', 'timeout', 'update', 'usage', 'plugins'
-, 'memctx', 'memory'
-}
-
-CMD_HELP = """{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
+def get_cmd_help():
+    bold = "\x1b[1m"
+    reset = "\x1b[0m"
+    return f"""{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
  All commands require the / prefix.
 
  {bold}AI Interaction{reset}
@@ -8028,7 +8012,7 @@ def main():
             learn_command(cmd, success=True, duration=0)
             _PluginHooks.fire_command(cmd, args_str, None)
         if cmd == 'help':
-            print(f"\n{CMD_HELP.format(bold=BOLD, reset=RST)}\n")
+            print(f"\n{get_cmd_help()}\n")
             continue
 
         if cmd == 'clear':

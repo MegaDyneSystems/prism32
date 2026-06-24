@@ -205,12 +205,18 @@ else
     fi
 fi
 
-# Verify it's valid Python
-if ! "$PY3" -c "import py_compile; py_compile.compile('$RUNTIME_DIR/prism32.py', doraise=True)" 2>/dev/null; then
-    fail "prism32.py syntax validation failed"
-    exit 1
+# Verify it's valid Python (skip on very low RAM to avoid OOM)
+_RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+if [ "$_RAM_KB" -gt 0 ] && [ "$_RAM_KB" -lt 65536 ]; then
+    warn "Low RAM (~$((_RAM_KB / 1024)) MB). Skipping py_compile to avoid OOM."
+    warn "Compile .pyc on a host with more RAM if first run fails."
+else
+    if ! "$PY3" -c "import py_compile; py_compile.compile('$RUNTIME_DIR/prism32.py', doraise=True)" 2>/dev/null; then
+        fail "prism32.py syntax validation failed"
+        exit 1
+    fi
+    ok "prism32.py syntax valid"
 fi
-ok "prism32.py syntax valid"
 
 # Download plugins if not present
 if [ ! -f "$PLUGINS_DIR/web_scraper.py" ]; then
