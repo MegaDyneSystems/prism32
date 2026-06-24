@@ -5702,6 +5702,26 @@ def get_mem():
         ram = Platform.get_ram()
         return ram if ram > 0 else 0
 
+def _check_stale_pyc():
+    """Warn if running from a .pyc that is older than the matching .py source.
+    Prevents confusion when .py is updated but .pyc is stale."""
+    try:
+        pyc_path = os.path.abspath(__file__)
+        if not pyc_path.endswith('.pyc'):
+            return
+        py_path = pyc_path[:-1]  # .pyc -> .py
+        if not os.path.isfile(py_path):
+            return  # no source to compare against
+        pyc_mtime = os.path.getmtime(pyc_path)
+        py_mtime = os.path.getmtime(py_path)
+        if py_mtime > pyc_mtime:
+            with stdout_lock:
+                print(f"{WARN} Stale .pyc detected: {os.path.basename(py_path)} is newer than {os.path.basename(pyc_path)}{RST}")
+                print(f"  Re-compile: python3 -m py_compile {py_path}")
+                print()
+    except Exception:
+        pass
+
 # ── System Info ──────────────────────────────────────────────
 
 _SYS_INFO_CACHE = None
@@ -7926,6 +7946,7 @@ def main():
     ensure_startup_memory(refresh=False)
     refresh_memory_profile(save=True)
     ensure_harness_scan(force=False)
+    _check_stale_pyc()
     if not args.no_boot:
         boot_sequence()
 
