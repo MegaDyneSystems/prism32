@@ -1,0 +1,69 @@
+name: Release Python Bytecode Artifacts
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach artifacts to'
+        required: true
+
+jobs:
+  build-pyc:
+    name: Build .pyc for Python ${{ matrix.python-version }}
+    runs-on: ubuntu-22.04  # ubuntu-latest (24.04) dropped 3.7 support
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.7"
+          - "3.8"
+          - "3.9"
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile prism32.py to bytecode
+        run: |
+          python -m py_compile -b prism32.py
+          # Rename to include Python version for clarity
+          mv prism32.pyc prism32.cpython-${{ matrix.python-version }}.pyc
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: prism32-cpython-${{ matrix.python-version }}.pyc
+          path: prism32.cpython-${{ matrix.python-version }}.pyc
+
+  attach-to-release:
+    name: Attach artifacts to GitHub Release
+    needs: build-pyc
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    if: github.event_name == 'release' || inputs.tag != ''
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Attach to release
+        run: |
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          echo "Attaching .pyc artifacts to release: $TAG"
+          gh release upload "$TAG" artifacts/**/*.pyc --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
