@@ -4714,22 +4714,21 @@ def read_footer_input(status_bar):
         _term_size = shutil.get_terminal_size()
     except Exception:
         pass
-    # Position cursor at the footer line, clear it, and ensure cursor is visible
-    with stdout_lock:
-        if ansi_enabled() and _term_size:
-            sys.stdout.write(f"\x1b[{_term_size.lines};1H{CLR_LINE}{SHOW}")
-            sys.stdout.flush()
+    # Release the scroll region so input() can wrap naturally across the full screen
+    release_footer_for_output()
+    # Ensure cursor is visible
+    if ansi_enabled() and SHOW:
+        sys.stdout.write(SHOW)
+        sys.stdout.flush()
     try:
         line = input(rl_prompt(f" {status_bar}{prompt_prefix}"))
     except (EOFError, KeyboardInterrupt):
-        with stdout_lock:
-            draw_footer(build_status_bar())
+        set_scroll_region()
         raise
-    # Clear the footer line after input
+    # Restore the footer after input
+    set_scroll_region()
     with stdout_lock:
-        if ansi_enabled() and _term_size:
-            sys.stdout.write(f"\x1b[{_term_size.lines};1H{CLR_LINE}")
-            sys.stdout.flush()
+        _render_footer()
     return line.strip()
 
 # ── Interjection (type while AI streams) ─────────────────────
