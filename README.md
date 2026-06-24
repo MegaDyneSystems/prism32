@@ -1568,4 +1568,4 @@ Project metadata declares Python `>=3.7`. CI currently checks syntax on Ubuntu a
 
 ## License
 
-See the repository license. Project metadata currently declares MIT.
+See the repository license. Project metadata currently declares APACHE 2.0
