@@ -176,6 +176,14 @@ if [ -f "/etc/openwrt_release" ]; then
         curl -fsSL "$RAW/prism32.py" > "$RUNTIME_DIR/prism32.py"
       wget -qO- "$RAW/openwrt-install.sh" > "/tmp/prism32-install.sh" 2>/dev/null || \
         curl -fsSL "$RAW/openwrt-install.sh" > "/tmp/prism32-install.sh"
+      # Low-RAM embedded check: compile .pyc if possible, else warn
+      _RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+      if [ "$_RAM_KB" -gt 0 ] && [ "$_RAM_KB" -lt 65536 ]; then
+        warn "Low RAM detected (~$((_RAM_KB / 1024)) MB). Parser may OOM on first run."
+        warn "Compile .pyc on a host with more RAM, then copy prism32.pyc to this device."
+      else
+        "$PY3" -c "import py_compile, sys; py_compile.compile(sys.argv[1], doraise=True)" "$RUNTIME_DIR/prism32.py" 2>/dev/null || true
+      fi
       sh /tmp/prism32-install.sh -y
       exit 0
     }

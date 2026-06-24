@@ -138,11 +138,15 @@ fi
 ok "Source file: $SRC_FILE"
 chmod +x "$SRC_FILE" && ok "Made executable"
 
-py_err="$("$PY3" -c "
+if [ "$LOW_RAM" = "1" ]; then
+  warn "Skipping py_compile syntax check to avoid OOM on low-RAM system."
+else
+  py_err="$("$PY3" -c "
 import py_compile, sys
 py_compile.compile(sys.argv[1], doraise=True)
 " "$SRC_FILE" 2>&1)" && ok "Python syntax valid" \
-  || { fail "Python syntax error"; echo -e "  ${R}$py_err${RST}"; exit 1; }
+    || { fail "Python syntax error"; echo -e "  ${R}$py_err${RST}"; exit 1; }
+fi
 
 # ═══════════════════════════════════════════════════════════════
 #  2. Platform check
@@ -152,6 +156,20 @@ header "Step 2/9 - Platform Check"
 echo -e "  ${DIM}OS:${RST}     $(uname -s)  $(uname -m)"
 echo -e "  ${DIM}Python:${RST}  $("$PY3" --version 2>&1)"
 echo -e "  ${DIM}User:${RST}    $(whoami)"
+
+# Detect RAM (Linux/BSD /proc fallback; Darwin sysctl)
+_RAM_KB=0
+if [ -r /proc/meminfo ]; then
+  _RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+elif command -v sysctl >/dev/null 2>&1; then
+  _RAM_KB=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}' || echo 0)
+fi
+LOW_RAM=0
+if [ "$_RAM_KB" -gt 0 ] && [ "$_RAM_KB" -lt 65536 ]; then
+  LOW_RAM=1
+  warn "Low RAM detected (~$((_RAM_KB / 1024)) MB). Parser may OOM on first run."
+  sub "Tip: compile to .pyc on a host with more RAM and copy prism32.pyc here."
+fi
 
 if [ ! -w "${PREFIX:-/usr/local}/bin" ]; then
   NEED_ROOT=1
@@ -208,6 +226,10 @@ _install_wrapper() {
   mkdir -p "$RUNTIME_DIR"
   local local_py="$RUNTIME_DIR/prism32.py"
   cp "$SRC_FILE" "$local_py" && ok "Copied prism32.py to $RUNTIME_DIR"
+  if [ "$LOW_RAM" != "1" ]; then
+    # Generate .pyc for faster startup and lower memory on embedded targets
+    "$PY3" -c "import py_compile, sys; py_compile.compile(sys.argv[1], doraise=True)" "$local_py" 2>/dev/null && ok "Generated .pyc bytecode" || true
+  fi
   cat > "$target" << WRAP
 #!/bin/sh
 exec "$PY3" "$local_py" "\$@"
@@ -547,6 +569,15 @@ echo ""
 
 if [ -n "${api_key+x}" ]; then
   echo -e "  ${Y}w${RST} API key set in shell only. Use /provider key inside Prism32 to persist."
+  echo ""
+fi
+
+if [ "$LOW_RAM" = "1" ]; then
+  echo -e "  ${Y}w${RST} Low-RAM device detected."
+  echo -e "     Compile .pyc on a machine with more RAM:"
+  echo -e "     ${CY}python3.7 -m py_compile prism32.py${RST}"
+  echo -e "     Then copy ${CY}prism32.pyc${RST} to this device and run:"
+  echo -e "     ${CY}python3 prism32.pyc${RST}"
   echo ""
 fi
 
