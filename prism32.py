@@ -3577,6 +3577,9 @@ class Platform:
                         m = re.search(r'up\s+(\d+):(\d+)', out)
                         if m:
                             return f"0d {m.group(1)}h"
+                        m = re.search(r'up\s+(\d+)\s*min', out)
+                        if m:
+                            return f"0d 0h"
                     return "N/A"
             elif Platform.MACOS or Platform.BSD:
                 import re, time
