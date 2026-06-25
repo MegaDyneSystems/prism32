@@ -4478,6 +4478,7 @@ apply_ansi_compat()
 # ── Persistent footer / scroll region ───────────────────────
 _term_size = os.terminal_size((80, 24))
 _footer_reserved = False
+_LAST_RENDERED_FOOTER = None  # cache to skip redundant redraws
 
 def update_terminal_size():
     """Update cached terminal dimensions."""
@@ -4489,7 +4490,7 @@ def update_terminal_size():
 
 def set_scroll_region():
     """Reserve bottom line for the footer; everything else scrolls above."""
-    global _footer_reserved
+    global _footer_reserved, _LAST_RENDERED_FOOTER
     if not ansi_enabled() or not sys.stdout.isatty():
         _footer_reserved = False
         return
@@ -4505,6 +4506,8 @@ def set_scroll_region():
         sys.stdout.flush()
     else:
         _footer_reserved = False
+    # Invalidate cache — scroll region change means footer position changed
+    _LAST_RENDERED_FOOTER = None
 
 def reset_scroll_region():
     """Reset scrolling region to full screen."""
@@ -4586,39 +4589,51 @@ def draw_footer(status_bar, spin_char=None):
 # ── Footer Animator (background animated indicator) ──────────
 
 def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=None):
-    """Render footer content directly (caller must hold stdout_lock)."""
+    """Render footer content directly (caller must hold stdout_lock).
+    Skips redraw if content is identical to last frame to avoid cursor
+    flicker and viewport snap on touchscreens."""
+    global _LAST_RENDERED_FOOTER
     if not _footer_reserved or not ansi_enabled():
         return
     t = T()
     if busy is None:
         busy = _AGENT_BUSY
     cols = _term_size.columns if _term_size else 80
+
+    # Build content string (without ANSI save/restore wrappers)
+    if _INTERJECTION_HAS_TYPED:
+        buf = _INTERJECTION_BUF
+        cur = _INTERJECTION_CURSOR
+        prefix = f" {t['bright']}interject>{RST} "
+        prefix_len = len(strip_ansi(prefix))
+        max_text = max(0, cols - prefix_len - 1)
+        display_buf = buf if len(buf) <= max_text else buf[:max_text-1] + "\u2026"
+        if len(buf) <= max_text:
+            display_cur = cur
+        else:
+            display_cur = min(cur, max_text - 1)
+        content = prefix + display_buf + CLR_LINE + SHOW
+        move_back = max(0, len(display_buf) - display_cur)
+        cursor_adjust = f"\x1b[{move_back}D" if move_back > 0 else ""
+        content += cursor_adjust
+    else:
+        if busy:
+            f = frame if frame is not None else _FOOTER_FRAME
+            indicator = activity_vector(history=history or _FOOTER_HISTORY_REF, frame=f, busy=True)
+        else:
+            indicator = activity_vector(history=history)
+        bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
+        content = f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} {CLR_LINE}"
+
+    # Skip redundant redraws (avoids cursor flicker and scroll snap)
+    if content == _LAST_RENDERED_FOOTER:
+        return
+    _LAST_RENDERED_FOOTER = content
+
     sys.stdout.write("\x1b7")
     try:
         move_to_footer()
-        if _INTERJECTION_HAS_TYPED:
-            buf = _INTERJECTION_BUF
-            cur = _INTERJECTION_CURSOR
-            prefix = f" {t['bright']}interject>{RST} "
-            prefix_len = len(strip_ansi(prefix))
-            max_text = max(0, cols - prefix_len - 1)
-            display_buf = buf if len(buf) <= max_text else buf[:max_text-1] + "\u2026"
-            if len(buf) <= max_text:
-                display_cur = cur
-            else:
-                display_cur = min(cur, max_text - 1)
-            sys.stdout.write(prefix + display_buf + CLR_LINE + SHOW)
-            move_back = max(0, len(display_buf) - display_cur)
-            if move_back > 0:
-                sys.stdout.write(f"\x1b[{move_back}D")
-        else:
-            if busy:
-                f = frame if frame is not None else _FOOTER_FRAME
-                indicator = activity_vector(history=history or _FOOTER_HISTORY_REF, frame=f, busy=True)
-            else:
-                indicator = activity_vector(history=history)
-            bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
-            sys.stdout.write(f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} {CLR_LINE}{SHOW}")
+        sys.stdout.write(content)
     finally:
         sys.stdout.write("\x1b8")
         sys.stdout.flush()
@@ -4637,7 +4652,7 @@ def _footer_animator_loop():
                         _render_footer()
                     except Exception:
                         pass
-            time.sleep(0.15)
+            time.sleep(0.5)
     except Exception:
         pass
     finally:
@@ -4714,6 +4729,12 @@ def read_footer_input(status_bar):
         # Don't set_scroll_region() here either — same repaint risk.
         # Let the next loop iteration handle footer restoration.
         raise
+    finally:
+        # Hide cursor again after input — it should only be visible
+        # while the user is actively typing, not during AI work.
+        if ansi_enabled() and HIDE:
+            sys.stdout.write(HIDE)
+            sys.stdout.flush()
     return line.strip()
 
 # ── Interjection (type while AI streams) ─────────────────────
