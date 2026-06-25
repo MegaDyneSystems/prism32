@@ -4698,7 +4698,11 @@ def read_footer_input(status_bar):
         _term_size = shutil.get_terminal_size()
     except Exception:
         pass
-    # Release the scroll region so input() can wrap naturally across the full screen
+    # Release the scroll region so input() can wrap naturally across the full screen.
+    # Don't re-set it here — that triggers a terminal repaint which makes readline
+    # redraw the last portion of typed text, causing a subtle duplication glitch.
+    # The main loop (line ~7981) and AI streaming code (lines ~9331/9339)
+    # re-set the region when they need it.
     release_footer_for_output()
     # Ensure cursor is visible
     if ansi_enabled() and SHOW:
@@ -4707,12 +4711,9 @@ def read_footer_input(status_bar):
     try:
         line = input(rl_prompt(f" {status_bar}{prompt_prefix}"))
     except (EOFError, KeyboardInterrupt):
-        set_scroll_region()
+        # Don't set_scroll_region() here either — same repaint risk.
+        # Let the next loop iteration handle footer restoration.
         raise
-    # Restore the footer after input
-    set_scroll_region()
-    with stdout_lock:
-        _render_footer()
     return line.strip()
 
 # ── Interjection (type while AI streams) ─────────────────────
