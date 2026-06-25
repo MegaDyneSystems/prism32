@@ -7478,7 +7478,11 @@ def cmd_net():
         routes = run_cmd("route print")
     elif Platform.LINUX:
         out = run_cmd("ip -br addr 2>/dev/null")
+        if not out.strip():
+            out = run_cmd("ifconfig -a 2>/dev/null | head -30")
         routes = run_cmd("ip route 2>/dev/null | head -5")
+        if not routes.strip():
+            routes = run_cmd("route -n 2>/dev/null | head -5")
     elif Platform.MACOS or Platform.BSD:
         out = run_cmd("ifconfig -a 2>/dev/null | head -30")
         routes = run_cmd("netstat -rn -f inet 2>/dev/null | head -5")
