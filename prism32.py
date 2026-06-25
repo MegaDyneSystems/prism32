@@ -9011,10 +9011,8 @@ def main():
                     for sid, sa in list(_SUBAGENTS.items()):
                         lines.append(f"  {sa.status_str()}")
                     box("SUBAGENTS", "\n".join(lines), "primary" if any(not s.done for s in _SUBAGENTS.values()) else "bright")
-                    # Clean up done agents
-                    for sid in list(_SUBAGENTS.keys()):
-                        if _SUBAGENTS[sid].done and _SUBAGENTS[sid]._thread and not _SUBAGENTS[sid]._thread.is_alive():
-                            del _SUBAGENTS[sid]
+                    # NOTE: Don't delete done agents here — /collect needs them.
+                    # Cleanup happens in /collect after results are retrieved.
             print()
             continue
 
