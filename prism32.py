@@ -480,9 +480,13 @@ def _fetch_api_pricing():
             "Authorization": f"Bearer {Config.API_KEY}",
             **PRISM32_DEFAULT_HEADERS,
         })
-        ctx = _ssl_context()
-        with urlopen_with_ssl(req, timeout=10, context=ctx) as r:
-            data = json.loads(r.read())
+        ctx = create_ssl_context()
+        if ctx is not None:
+            with urlopen_with_ssl(req, timeout=10, context=ctx) as r:
+                data = json.loads(r.read())
+        else:
+            with urlopen_with_ssl(req, timeout=10) as r:
+                data = json.loads(r.read())
         models = data.get("data", [])
         for m in models:
             mid = (m.get("id") or "").lower()
