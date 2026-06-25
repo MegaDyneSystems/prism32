@@ -7902,6 +7902,7 @@ def main():
     if hasattr(signal, 'SIGWINCH'):
         signal.signal(signal.SIGWINCH, _on_resize)
     
+    _register_extended_themes()
     parser = argparse.ArgumentParser(description="Prism32 - Retro AI Terminal Agent")
     parser.add_argument("--model", "-m", help="Override model name")
     parser.add_argument("--api", "-a", help="Override API base URL")
