@@ -4630,13 +4630,14 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
         return
     _LAST_RENDERED_FOOTER = content
 
-    sys.stdout.write("\x1b7")
-    try:
-        move_to_footer()
-        sys.stdout.write(content)
-    finally:
-        sys.stdout.write("\x1b8")
-        sys.stdout.flush()
+    # Write directly to the footer line without save/restore cursor.
+    # The old \x1b7/\x1b8 save/restore dance caused the cursor to rapidly
+    # teleport between the user's scroll position and the footer on every
+    # animation frame, producing white cursor flicker and forcing touch
+    # terminals to snap the viewport back to bottom.
+    move_to_footer()
+    sys.stdout.write(content)
+    sys.stdout.flush()
 
 def _footer_animator_loop():
     """Background thread: animates the footer while agent is busy."""
@@ -5045,9 +5046,9 @@ def run_cancelable_blocking(fn, history=None, message="thinking", cancel_event=N
             if inj is _INTERJECTION_CANCEL or agent_cancel_requested(cancel_event):
                 request_agent_cancel(cancel_event=cancel_event)
                 return AGENT_CANCELLED_RESPONSE
-            if inj is not None:
-                request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
-                return None
+            # Don't cancel on typed interjection — only Escape/Ctrl-C should cancel.
+            # If the user typed something, the interjection loop already stored
+            # it in _INTERJECTION_RESULT. The caller will handle it after fn() completes.
             now = time.monotonic()
             if not _footer_reserved and now - last_draw >= 0.15:
                 with stdout_lock:
@@ -6194,12 +6195,10 @@ def run_cmd(cmd, timeout=None):
                         output = _tail_cmd_output(out)
                         suffix = ("\n" + output) if output else ""
                         return f"[CANCELLED] Command stopped by Escape{suffix}"
-                    if inj is not None:
-                        request_agent_cancel("Command interrupted by user input")
-                        _terminate_process(proc)
-                        output = _tail_cmd_output(out)
-                        suffix = ("\n" + output) if output else ""
-                        return f"[CANCELLED] Command interrupted by user input{suffix}"
+                    # Don't cancel command on regular typed interjection.
+                    # Only Escape (or Ctrl-C / agent_cancel_requested()) should abort.
+                    # Typed text during command execution is discarded — the user
+                    # cannot reasonably redirect it while the shell runs.
 
                     if proc.stdout is not None:
                         readable, _, _ = select.select([proc.stdout], [], [], 0.05)
@@ -6874,14 +6873,9 @@ def stream_response(resp, cancel_event=None):
                 with stdout_lock:
                     sys.stdout.write(RST + SHOW)
                 return AGENT_CANCELLED_RESPONSE
-            if inj is not None:
-                request_agent_cancel("Agent interrupted by user input", cancel_event=cancel_event)
-                clear_agent_cancel()
-                _queue_display(_filter_visible_content("", final=True), "content")
-                _flush_display(force=True)
-                with stdout_lock:
-                    sys.stdout.write(RST + SHOW)
-                return full
+            # Don't cancel on typed interjection — only Escape should abort streaming.
+            # If user typed a message during streaming, _INTERJECTION_RESULT captures
+            # it. The caller (main loop ~line 9375) appends it to history and continues.
         
         if agent_cancel_requested(cancel_event):
             _queue_display(_filter_visible_content("", final=True), "content")
