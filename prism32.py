@@ -427,6 +427,8 @@ _SESSION_OUTPUT_TOKENS = 0
 _SESSION_COST = 0.0
 
 # Pricing: per 1K tokens (input, output). 0 = free/unknown.
+# These are hardcoded fallbacks — overridden at runtime by _API_PRICING_CACHE
+# which is populated from the provider's /models endpoint.
 _MODEL_PRICING = {
     # OpenAI
     "gpt-4o": (0.0025, 0.01), "gpt-4o-mini": (0.00015, 0.0006),
@@ -446,28 +448,91 @@ _MODEL_PRICING = {
     "meta-llama/Llama-3.3-70b": (0.00088, 0.00088),
     "meta-llama/Llama-3-70b-chat-hf": (0.00088, 0.00088),
     "meta-llama/Llama-3-70b": (0.00088, 0.00088),
-    # Neuralwatt
-    "glm-5.2": (0.0014, 0.0045), "glm-5.2-fast": (0.0014, 0.0045),
-    "glm-5": (0.0014, 0.0045), "glm-5-fast": (0.0007, 0.0022),
-    "devstral": (0.0002, 0.0005), "devstral small": (0.0001, 0.0002),
-    "moonshotai/Kimi-K2.5": (0.0005, 0.0026), "kimi-k2.5-fast": (0.0005, 0.0026),
+    # Neuralwatt (fallbacks — actual pricing fetched from API at startup)
+    "glm-5.2": (0.00145, 0.0045), "glm-5.2-fast": (0.00145, 0.0045),
+    "kimi-k2.6": (0.00069, 0.00322), "kimi-k2.6-fast": (0.00069, 0.00322),
+    "kimi-k2.7-code": (0.00095, 0.004),
+    "qwen3.5-397b": (0.00069, 0.00414), "qwen3.5-397b-fast": (0.00069, 0.00414),
+    "qwen3.6-35b": (0.00029, 0.00115), "qwen3.6-35b-fast": (0.00029, 0.00115),
     # OpenRouter fallback
     "deepseek/deepseek-v4-flash": (0.00014, 0.00028),
     "openai/gpt-4o": (0.0025, 0.01),
 }
 
+# Runtime cache: model_id -> (input_per_1k, output_per_1k)
+# Populated by _fetch_api_pricing() from the provider's /models endpoint.
+_API_PRICING_CACHE = {}
+
+def _fetch_api_pricing():
+    """Fetch real pricing from provider's /models endpoint.
+    Many OpenAI-compatible providers (Neuralwatt, OpenRouter) embed
+    per-million-token pricing in model metadata. Cache it for lookups."""
+    global _API_PRICING_CACHE
+    if _API_PRICING_CACHE:
+        return  # already fetched
+    if not Config.API_KEY or not Config.API_BASE:
+        return
+    if any(k in (Config.PROVIDER or "").lower() for k in ("local", "ollama")):
+        return
+    try:
+        url = Config.API_BASE.rstrip("/") + "/models"
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {Config.API_KEY}",
+            **PRISM32_DEFAULT_HEADERS,
+        })
+        ctx = _ssl_context()
+        with urlopen_with_ssl(req, timeout=10, context=ctx) as r:
+            data = json.loads(r.read())
+        models = data.get("data", [])
+        for m in models:
+            mid = (m.get("id") or "").lower()
+            if not mid:
+                continue
+            meta = m.get("metadata") or {}
+            pricing = meta.get("pricing") or {}
+            p_in = pricing.get("input_per_million")
+            p_out = pricing.get("output_per_million")
+            if p_in is not None and p_out is not None:
+                # Convert per-million to per-1K
+                _API_PRICING_CACHE[mid] = (float(p_in) / 1000.0, float(p_out) / 1000.0)
+        # Also try OpenRouter-style pricing (prompt/completion as strings per token)
+        if not _API_PRICING_CACHE:
+            for m in models:
+                mid = (m.get("id") or "").lower()
+                if not mid:
+                    continue
+                pricing = m.get("pricing") or {}
+                p_in = pricing.get("prompt")
+                p_out = pricing.get("completion")
+                if p_in is not None and p_out is not None:
+                    try:
+                        # OpenRouter returns price per-token as string
+                        _API_PRICING_CACHE[mid] = (float(p_in) * 1000, float(p_out) * 1000)
+                    except (ValueError, TypeError):
+                        pass
+        if _API_PRICING_CACHE:
+            with stdout_lock:
+                t = T()
+                print(f"  {t['dim']}Cached {len(_API_PRICING_CACHE)} model prices from API{RST}")
+    except Exception:
+        pass  # silently fall back to hardcoded pricing
+
 def _get_model_pricing():
     """Return (input_per_1k, output_per_1k) for current model.
-    Uses pricing table for known models, then heuristic estimation for unknowns."""
+    Priority: API-fetched pricing > hardcoded table > heuristic estimate."""
     model_lower = (Config.MODEL or "").lower()
+    # 1. API-fetched real pricing (most accurate)
+    if model_lower in _API_PRICING_CACHE:
+        return _API_PRICING_CACHE[model_lower]
+    # 2. Hardcoded pricing table
     if model_lower in _MODEL_PRICING:
         return _MODEL_PRICING[model_lower]
     for key, val in _MODEL_PRICING.items():
         if key.lower() in model_lower or model_lower in key.lower():
             return val
-    # Heuristic fallback for unknown models
+    # 3. Heuristic fallback for unknown models
     # Free/local models (llama.cpp, ollama, local)
-    if not Config.API_KEY or "local" in Config.PROVIDER.lower() or "ollama" in Config.PROVIDER.lower():
+    if not Config.API_KEY or "local" in (Config.PROVIDER or "").lower() or "ollama" in (Config.PROVIDER or "").lower():
         return (0.0, 0.0)
     # Estimate based on model name patterns
     if any(k in model_lower for k in ["70b", "72b", "104b", "120b"]):
@@ -478,7 +543,7 @@ def _get_model_pricing():
         return (0.0003, 0.001)  # Fast/cheap tier
     if any(k in model_lower for k in ["opus", "gpt-4", "claude-3", "o1", "o3"]):
         return (0.015, 0.06)  # Premium tier
-    if any(k in model_lower for k in ["sonnet", "gpt-4o", "kimi", "glm"]):
+    if any(k in model_lower for k in ["sonnet", "gpt-4o"]):
         return (0.003, 0.015)  # Mid tier
     # Generic fallback for unknown cloud models
     return (0.001, 0.003)
@@ -7983,6 +8048,7 @@ def main():
     ensure_startup_memory(refresh=False)
     refresh_memory_profile(save=True)
     ensure_harness_scan(force=False)
+    _fetch_api_pricing()
     _check_stale_pyc()
     if not args.no_boot:
         boot_sequence()
