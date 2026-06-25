@@ -2418,7 +2418,7 @@ _legacy_plat = sys.platform.lower()
 class Platform:
     """Cross-platform detection and compatibility."""
 
-    LINUX = _legacy_plat.startswith("linux")
+    LINUX = _legacy_plat.startswith("linux") or _legacy_plat == "android"
     MACOS = _legacy_plat == 'darwin'
     WINDOWS = _legacy_plat == 'win32'
     BSD = 'bsd' in _legacy_plat or _legacy_plat.startswith('netbsd') or _legacy_plat.startswith('dragonfly')
@@ -3563,8 +3563,21 @@ class Platform:
         try:
             secs = 0
             if Platform.LINUX:
-                with open('/proc/uptime') as f:
-                    secs = float(f.read().split()[0])
+                try:
+                    with open('/proc/uptime') as f:
+                        secs = float(f.read().split()[0])
+                except (PermissionError, OSError):
+                    # /proc/uptime not readable (Android/Termux, some containers)
+                    out = Platform._run_cmd(['uptime'])
+                    if out:
+                        import re
+                        m = re.search(r'up\s+(\d+)\s+days?,\s+(\d+):(\d+)', out)
+                        if m:
+                            return f"{m.group(1)}d {m.group(2)}h"
+                        m = re.search(r'up\s+(\d+):(\d+)', out)
+                        if m:
+                            return f"0d {m.group(1)}h"
+                    return "N/A"
             elif Platform.MACOS or Platform.BSD:
                 import re, time
                 result = Platform._run_cmd(['sysctl', '-n', 'kern.boottime'])
