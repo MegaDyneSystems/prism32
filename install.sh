@@ -5,6 +5,9 @@
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# ── Defaults (must be set before any code references them) ─────
+LOW_RAM=0
+
 # Trap for cleanup on interrupt
 _INSTALL_TMPFILES=""
 trap 'rm -f $_INSTALL_TMPFILES 2>/dev/null || true' EXIT INT TERM HUP
@@ -159,12 +162,13 @@ echo -e "  ${DIM}User:${RST}    $(whoami)"
 
 # Detect RAM (Linux/BSD /proc fallback; Darwin sysctl)
 _RAM_KB=0
+# Detect RAM (Linux /proc; BSD/macOS sysctl; unknown = 0)
+_RAM_KB=0
 if [ -r /proc/meminfo ]; then
   _RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
 elif command -v sysctl >/dev/null 2>&1; then
   _RAM_KB=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}' || echo 0)
 fi
-LOW_RAM=0
 if [ "$_RAM_KB" -gt 0 ] && [ "$_RAM_KB" -lt 65536 ]; then
   LOW_RAM=1
   warn "Low RAM detected (~$((_RAM_KB / 1024)) MB). Parser may OOM on first run."
