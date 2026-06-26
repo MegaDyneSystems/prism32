@@ -304,7 +304,7 @@ Phones and tablets: Android phones and tablets via Termux, PinePhone, Librem 5, 
 
 Automotive: Tesla MCU and infotainment, Comma.ai Openpilot devices, Automotive Grade Linux head units.
 
-TV and streaming: NVIDIA Shield, Fire TV and Cube, Chromecast with Google TV, Kodi boxes running LibreELEC or OSMC.
+TV and streaming: NVIDIA Shield, Fire TV Stick and Cube, Chromecast with Google TV, Kodi boxes running LibreELEC or OSMC.
 
 Drones and robotics: DJI companion computers, ArduPilot and PX4 companion boards, ROS robots, Boston Dynamics Spot payload computers, Unitree robots.
 
@@ -355,11 +355,32 @@ Use `/arch` to inspect the detected label. Use `PRISM32_ARCH=<label>` or `/arch 
 
 Prism32's local overhead is intentionally small:
 
-- The main program is a single `prism32.py` file of about 304 KB in this working copy.
+- The main program is a single `prism32.py` file of about 410 KB in this working copy.
 - The core uses only Python standard-library modules.
 - There is no browser, Electron shell, Node.js dependency tree, local vector database, or background service required.
 - Default live streaming is off in the Python runtime (`Config.STREAM = False`), which avoids token-by-token redraw work on slow terminals.
 - Runtime memory files are small JSON/Markdown files and are consolidated automatically, for example top 30 command stats and top 15 error patterns in `memory.json`.
+- Large constants (themes, help text, harness candidates, tool scan groups, subagent prompts, memory cache) are lazy-loaded on first access, reducing import-time memory usage.
+
+### Embedded and Ultra-Low-RAM Devices
+
+Prism32 runs on devices with as little as 27 MB RAM (OpenWrt routers). On extremely memory-constrained systems where CPython's parser cannot compile the source in RAM, ship a pre-compiled `.pyc` instead of the `.py` source:
+
+```sh
+# On a machine with matching Python version (e.g. 3.7):
+python3.7 -m py_compile prism32.py
+
+# Copy only the .pyc to the embedded device:
+scp prism32.pyc root@router:/root/
+ssh root@router 'python3 /root/prism32.pyc'
+```
+
+GitHub Releases include pre-built `.pyc` artifacts for Python 3.7 through 3.13 — download the one matching your device's Python version. The `.pyc` is architecture-agnostic (runs on x86, ARM, MIPS, RISC-V) but Python-version-specific.
+
+Verified on:
+- **OpenWrt router** (Atheros AR9132 MIPS, 27 MB RAM) — runs via `.pyc`, detects `OpenWrt on tl-wr1043nd`
+- **Amazon Fire TV Stick** (MT8127 ARMv7, 874 MB RAM) — runs via `.py` directly, detects `Amazon Fire TV (AFTT)`
+- **Amazon Kindle Fire tablet** (MT8186 ARM64, 2.8 GB RAM) — runs via `.py`, detects `Android/Termux on Amazon Kindle (KFTUWI)`
 
 The slow parts are outside Prism32: the model provider latency, local model inference speed, shell commands, package installs, compilers, network scans, or disk IO. On old hardware, Prism32 still stays usable because it is just a task coordinator.
 
@@ -412,11 +433,11 @@ Prism32 runs those commands, captures the results, and asks the model to continu
 
 ## Escape, Interjection, And Control
 
-During streaming responses, you can type at any time. The footer changes to `INTERJECT>`. Press Enter to interrupt the AI and send your interjection as the next message.
+During streaming responses, you can type at any time. The footer changes to `INTERJECT>`. Press Enter to send your interjection as the next message after the AI finishes its current response.
 
 Useful controls:
 
-- Escape: stop current agent work. This covers streaming, non-streaming API waits, foreground commands, and goal mode.
+- Escape: **the only key that cancels** agent work. This covers streaming, non-streaming API waits, foreground commands, and goal mode. Typed interjections do NOT cancel — they are queued for after the current response completes.
 - Up/Down while interjecting: cycle previous interjections.
 - Left/Right, Home, End: edit the interjection buffer.
 - Delete (forward): delete the character after the cursor.
@@ -435,7 +456,9 @@ Arrow keys are handled as escape sequences, so normal arrow-key editing does not
 
 `install.sh` performs a Unix/macOS/BSD-style install:
 
-- Validates `prism32.py` syntax.
+- Validates `prism32.py` syntax (skipped on low-RAM devices <64 MB to avoid OOM).
+- Detects total system RAM and warns if below 64 MB with embedded deployment instructions.
+- Generates `.pyc` bytecode after install for faster startup (on capable systems).
 - Creates a wrapper command named `prism32` in `${PREFIX:-/usr/local}/bin` when writable.
 - Falls back to `~/.local/bin/prism32` during `-y` user-local installs without root.
 - Creates `~/.prism32/`, `sessions`, `plugins`, `skills`, and `evolve` directories.
@@ -452,6 +475,7 @@ Arrow keys are handled as escape sequences, so normal arrow-key editing does not
 - Bootstraps HTTPS support (`libustream-mbedtls` + `ca-bundle`).
 - Installs `python3-light` + `python3-openssl`.
 - Low-flash detection: suggests USB install below 8 MB free.
+- Low-RAM detection: skips `py_compile` syntax check on devices <64 MB to avoid OOM during install.
 - USB/SD install support: `sh openwrt-install.sh /mnt/usb`.
 - Downloads `prism32.py` from GitHub if not present locally.
 - Router-tuned config: lower `max_history` (500), `stream: false`.
@@ -1304,7 +1328,7 @@ mount /dev/sdX /mnt/floppy
 cd /mnt/floppy && sh AUTORUN.SH
 ```
 
-The installer copies `prism32.py` to `~/.prism32/` locally, so the media can be ejected after install. Your configuration, plugins, and memory are all preserved. Total image size: ~400 KB, fits easily on 1.44 MB floppy with 68% free.
+The installer copies `prism32.py` to `~/.prism32/` locally, so the media can be ejected after install. Your configuration, plugins, and memory are all preserved. Total image size: ~410 KB, fits easily on 1.44 MB floppy with 71% free.
 
 ## OpenWrt Router Install
 
@@ -1550,6 +1574,18 @@ Need to stop a runaway command or model wait:
 Press Escape.
 ```
 
+"Process killed" or OOM on an embedded device (router, IoT):
+
+The single-file `prism32.py` is ~410 KB. On devices with less than ~64 MB RAM, CPython's parser may not have enough memory to compile it. Use a pre-compiled `.pyc` instead (see "Embedded and Ultra-Low-RAM Devices" above), or compile on a host with the same Python version and copy the `.pyc` to the device.
+
+Cost tracking shows wrong amount:
+
+Prism32 fetches real per-model pricing from the provider's API at startup (for providers that expose it, like Neuralwatt and OpenRouter). If the model is not in the provider's model list, hardcoded prices from `_MODEL_PRICING` are used. If those are also missing, a heuristic estimate is used. To verify pricing for the current model, run `/config` and check the model name.
+
+"Low RAM detected" warning during install:
+
+This is expected on embedded devices (<64 MB RAM). The installer skips `py_compile` syntax checking to avoid OOM during installation. Compile a `.pyc` on a host with more RAM and copy it to the device.
+
 ## Development
 
 Run syntax check:
@@ -1565,6 +1601,14 @@ python3 -m pytest
 ```
 
 Project metadata declares Python `>=3.7`. CI currently checks syntax on Ubuntu and macOS for Python 3.9 through 3.13 and runs unit tests on Ubuntu for Python 3.9 through 3.13.
+
+GitHub Releases automatically include pre-compiled `.pyc` bytecode artifacts for Python 3.7 through 3.13, for deployment on embedded devices that cannot compile the source in RAM.
+
+Deployed and tested on:
+- Amazon Fire TV Stick (AFTT, ARMv7, 874 MB RAM, Python 3.8)
+- Amazon Kindle Fire tablet (KFTUWI, ARM64, 2.8 GB RAM, Python 3.13)
+- OpenWrt router (TL-WR1043ND, MIPS, 27 MB RAM, Python 3.7 via `.pyc`)
+- Arch Linux desktop (x86_64, Python 3.14)
 
 ## License
 
