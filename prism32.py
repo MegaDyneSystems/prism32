@@ -9053,7 +9053,10 @@ def main():
 
         if cmd == 'update':
             project_dir = args_str.strip() if args_str else ""
+            Config.save_config()
+            save_current_session(history, cmd_log)
             _do_git_update(project_dir if project_dir else None)
+            Config.load_config()
             print()
             continue
 
