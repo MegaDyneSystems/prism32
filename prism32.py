@@ -465,8 +465,8 @@ _API_PRICING_CACHE = {}
 
 def _fetch_api_pricing():
     """Fetch real pricing from provider's /models endpoint.
-    Many OpenAI-compatible providers (Neuralwatt, OpenRouter) embed
-    per-million-token pricing in model metadata. Cache it for lookups."""
+    Only fetches if the current model isn't in the hardcoded table,
+    so boot isn't slowed down for known models."""
     global _API_PRICING_CACHE
     if _API_PRICING_CACHE:
         return  # already fetched
@@ -474,6 +474,10 @@ def _fetch_api_pricing():
         return
     if any(k in (Config.PROVIDER or "").lower() for k in ("local", "ollama")):
         return
+    # Skip API fetch if the current model is already in the hardcoded table
+    model_lower = (Config.MODEL or "").lower()
+    if model_lower in _MODEL_PRICING:
+        return  # hardcoded price is accurate, no need to hit the API
     try:
         url = Config.API_BASE.rstrip("/") + "/models"
         req = urllib.request.Request(url, headers={
