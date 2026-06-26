@@ -1331,7 +1331,7 @@ The OpenWrt installer:
 - Downloads `prism32.py` from GitHub if not present locally
 - Router-tuned config: lower `max_history` (500), `max_tokens` (4096), `stream: false`
 - Creates `/etc/profile.d/prism32.sh` for USB PATH setup
-- Works on 4 MB+ flash (with USB), 32 MB+ RAM
+- Works on 4 MB+ flash (with USB), 24 MB+ RAM
 
 ## ChromeOS Install
 
