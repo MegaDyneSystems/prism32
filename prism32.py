@@ -5634,6 +5634,61 @@ def cmd_session_load(session_id):
     print(f"   {t['dim']}Messages: {stats.get('total_messages', 0)}, Commands: {stats.get('total_commands', 0)}{RST}")
     return history, cmd_log
 
+def replay_session(history):
+    """Re-render saved session history so /resume feels like the session never closed."""
+    t = T()
+    non_sys = [m for m in history if m.get("role") != "system"]
+    if not non_sys:
+        return
+    w = min(62, _terminal_width() - 2)
+    print(f"\n {t['dim']}{'─' * w}{RST}")
+    print(f" {t['bright']}SESSION REPLAY{RST}  {t['dim']}({len(non_sys)} messages){RST}")
+    print(f" {t['dim']}{'─' * w}{RST}")
+    for i, msg in enumerate(history):
+        role = msg.get("role", "")
+        content = msg.get("content", "") or ""
+        if role == "system":
+            continue
+        if isinstance(content, list):
+            content = " ".join(p.get("text", "") for p in content if isinstance(p, dict))
+        if not content.strip():
+            continue
+        if role == "user":
+            if content.startswith("Executed:"):
+                continue
+            print(f" {t['primary']}You:{RST} {content}\n")
+        elif role == "assistant":
+            commands = extract_blocks(content, 'execute')
+            asks = extract_blocks(content, 'ask')
+            clean = clean_response(content)
+            if commands:
+                if clean:
+                    box("AI ANALYSIS", clean, "accent")
+                for c in commands:
+                    c = c.strip()
+                    viz.tool_call("execute", c)
+                    result = ""
+                    if i + 1 < len(history):
+                        nc = history[i + 1].get("content", "") or ""
+                        if isinstance(nc, str) and nc.startswith("Executed:"):
+                            rstart = nc.find("Result:\n")
+                            if rstart >= 0:
+                                result = nc[rstart + 8:].split("\n\nCommand output above.")[0]
+                    success = _cmd_succeeded(result)
+                    viz.tool_result(success, result[:100])
+                    cmd_result(c, result, success)
+            elif asks:
+                if clean:
+                    print(f" {t['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
+                for q in asks:
+                    print(f"\n{t['warn']}+ QUESTION FROM AI:{RST}")
+                    box("AI NEEDS INPUT", q, "warn")
+            else:
+                if clean:
+                    print(f" {t['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
+            print()
+    print(f" {t['dim']}{'─' * w}{RST}\n")
+
 def cmd_session_list():
     t = T()
     sessions = list_sessions()
@@ -8295,6 +8350,8 @@ def main():
                 cmd_log = data.get("cmd_log", [])
                 _reset_session_cost()
                 _CURRENT_SESSION_ID = data.get("id")
+                release_footer_for_output()
+                replay_session(history)
             print()
             continue
 
@@ -8309,6 +8366,8 @@ def main():
                     _reset_session_cost()
                     _CURRENT_SESSION_ID = args_str.strip()
                     viz.status("Session restored", "success")
+                    release_footer_for_output()
+                    replay_session(history)
             else:
                 print(f"  Usage: load <session_id>")
             print()
