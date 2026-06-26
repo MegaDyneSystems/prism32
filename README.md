@@ -1607,15 +1607,16 @@ GitHub Releases automatically include pre-compiled `.pyc` bytecode artifacts for
 Deployed and tested on:
 - Amazon Fire TV Stick (AFTT, ARMv7, 874 MB RAM, Python 3.8)
 - Amazon Kindle Fire tablet (KFTUWI, ARM64, 2.8 GB RAM, Python 3.13)
-- OpenWrt router (TL-WR1043ND, MIPS, 27 MB RAM, Python 3.7 via `.pyc`)
+- OpenWrt router (TL-WR1043ND, MIPS , 27 MB RAM, Python 3.7 via `.pyc`)
 - Arch Linux desktop (x86_64, Python 3.14)
 - Ubuntu desktop (x86_64)
 - Raspberry pi 3b+ pi os
-- Android phone Termux
-- Compaq Pentium III 800Mhz NetBSD 10.1 x86 512mb ram
-- MacOS high Sierra
-- Windows 11 powershell (x86 n100)
-- pentium M 2005 durabook
+- Android phone Termux ARM64
+- Compaq Pentium III 800Mhz Unix NetBSD 10.1 x86 512mb ram
+- 2012 Imac MacOS high Sierra 
+- Windows 11 powershell HP notebook (x86 n100)
+- Pentium M 2005 durabook 2GB DDR2
+- Synology Nas DS414 ARM64 1GB ram
 
 ## License
 
