@@ -5858,9 +5858,15 @@ def get_system_info(force=False):
     try:
         root_path = os.environ.get('SystemDrive', '/') + os.sep if Platform.WINDOWS else '/'
         du = shutil.disk_usage(root_path)
+        if du.total == 0:
+            raise OSError("root reports 0 bytes")
         info['disk'] = f"{du.free / 1024**3:.1f}/{du.total / 1024**3:.1f} GB"
     except Exception:
-        info['disk'] = "Unknown"
+        try:
+            du = shutil.disk_usage(os.path.expanduser('~'))
+            info['disk'] = f"{du.free / 1024**3:.1f}/{du.total / 1024**3:.1f} GB"
+        except Exception:
+            info['disk'] = "Unknown"
     
     # Architecture
     info['arch'] = Platform.get_arch()
