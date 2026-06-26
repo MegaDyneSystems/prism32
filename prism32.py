@@ -6550,30 +6550,28 @@ class SubAgent:
     def _run_loop(self):
         t = T()
         self._history = self._build_history()
-        old_model = Config.MODEL
-        old_stream = Config.STREAM
-        old_provider = Config.PROVIDER
-        old_api_base = Config.API_BASE
-        old_api_key = Config.API_KEY
+        # Resolve provider credentials once; pass explicitly to ask_ai so
+        # parallel subagents never mutate Config globals (race condition fix).
+        _api_base = Config.API_BASE
+        _api_key = Config.API_KEY
+        _model = self.model
         if self.provider and self.provider in PROVIDER_REGISTRY:
             prov = PROVIDER_REGISTRY[self.provider]
-            Config.PROVIDER = self.provider
-            Config.API_BASE = prov["api_base"]
+            _api_base = prov["api_base"]
             if prov.get("default_key"):
-                Config.API_KEY = prov["default_key"]
-        Config.MODEL = self.model
-        Config.STREAM = False
+                _api_key = prov["default_key"]
         try:
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
-                # Context management: trim if approaching limit
+                # Context management, trim if approaching limit
                 _ctx = context_pct(self._history)
                 if _ctx >= 75:
                     self._history[:] = trim_history(self._history, Config.resolve_context_window())
                 with stdout_lock:
                     t2 = T()
                     print(f"  {t2['dim']}[{self.id}] Step {self._step}/{self.max_steps}{RST}")
-                resp = ask_ai(self._history, stream=False)
+                resp = ask_ai(self._history, stream=False,
+                              api_base=_api_base, api_key=_api_key, model=_model)
                 if not resp or resp.startswith('['):
                     self.error = resp or "No response"
                     self.result = f"[SUBAGENT ERROR] {self.error}"
@@ -6629,11 +6627,6 @@ class SubAgent:
             self.result = self.result or "[SUBAGENT] Max steps reached without completion."
             self.done = True
         finally:
-            Config.MODEL = old_model
-            Config.STREAM = old_stream
-            Config.PROVIDER = old_provider
-            Config.API_BASE = old_api_base
-            Config.API_KEY = old_api_key
             self._cleanup_time = time.time()
 
     def run(self):
@@ -6799,8 +6792,12 @@ GENERAL RULES:
 9. The operator can press Escape to stop you mid-execution. If interrupted, assess the interjection and continue.
 10. Sessions auto-save. You can /remember key findings so future sessions can /recall them."""
 
-def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
+def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
+            api_base=None, api_key=None, model=None):
     '''Resilient AI query with retry, backoff, and history trimming.'''
+    _api_base = api_base if api_base is not None else Config.API_BASE
+    _api_key = api_key if api_key is not None else Config.API_KEY
+    _model = model if model is not None else Config.MODEL
     # Filter empty messages
     clean_messages = []
     for m in messages:
@@ -6816,10 +6813,10 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
     # Trim history if too large (use model's actual context window)
     clean_messages = trim_history(clean_messages, Config.resolve_context_window())
     
-    _base = normalize_api_base(Config.API_BASE)
+    _base = normalize_api_base(_api_base)
     url = f"{_base}/v1/chat/completions"
     payload = {
-        "model": Config.MODEL,
+        "model": _model,
         "messages": clean_messages,
         "stream": stream if stream is not None else Config.STREAM,
         "max_tokens": Config.MAX_RESPONSE_TOKENS,
@@ -6836,7 +6833,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None):
             req = urllib.request.Request(
                 url,
                 data=json.dumps(payload).encode(),
-                headers=build_headers(),
+                headers=build_headers(api_key=_api_key, api_base=_api_base),
             )
             with urlopen_with_ssl(req, timeout=600) as resp:
                 if stream if stream is not None else Config.STREAM:
@@ -9706,15 +9703,13 @@ def normalize_api_base(base):
 
 # ── Model Selector ──────────────────────────────────────────
 
-_IS_OPENROUTER = None
-def build_headers(extra=None):
-    global _IS_OPENROUTER
-    _IS_OPENROUTER = "openrouter" in Config.API_BASE.lower()
+def build_headers(extra=None, api_key=None, api_base=None):
     h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.8"}
-    if Config.API_KEY:
-        h["Authorization"] = f"Bearer {Config.API_KEY}"
-    # OpenRouter-specific headers for rankings
-    if _IS_OPENROUTER:
+    _key = api_key if api_key is not None else Config.API_KEY
+    if _key:
+        h["Authorization"] = f"Bearer {_key}"
+    _base = (api_base if api_base is not None else Config.API_BASE).lower()
+    if "openrouter" in _base:
         h["HTTP-Referer"] = "https://github.com/MegaDyneSystems/prism32"
         h["X-Title"] = "Prism32"
     if extra:
