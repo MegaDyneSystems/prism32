@@ -7,7 +7,7 @@ name = "prism32"
 version = "6.7.0"
 description = "Retro AI Terminal Agent — MegaDyne Systems"
 readme = "README.md"
-license = {text = "MIT"}
+license = {text = "Apache 2.0"}
 authors = [
     {name = "MegaDyne Systems"},
 ]
