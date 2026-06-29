@@ -2484,6 +2484,8 @@ def _handle_sigterm(sig, frame):
 if hasattr(signal, 'SIGTERM'):
     signal.signal(signal.SIGTERM, _handle_sigterm)
 signal.signal(signal.SIGINT, _handle_sigterm)
+if hasattr(signal, 'SIGHUP'):
+    signal.signal(signal.SIGHUP, _handle_sigterm)
 
 # ── Platform Detection ──────────────────────────────────────────
 
@@ -6283,9 +6285,9 @@ def _tail_cmd_output(out):
     text = bytes(out).decode(errors="replace") if isinstance(out, bytearray) else str(out)
     return text[-4000:] if len(text) > 4000 else text
 
-def _terminate_process(proc):
+def _terminate_process(proc, use_killpg=True):
     try:
-        if os.name == 'posix' and hasattr(os, 'killpg'):
+        if use_killpg and os.name == 'posix' and hasattr(os, 'killpg'):
             os.killpg(proc.pid, signal.SIGTERM)
         else:
             proc.terminate()
@@ -6298,7 +6300,7 @@ def _terminate_process(proc):
         proc.wait(timeout=1)
     except Exception:
         try:
-            if os.name == 'posix' and hasattr(os, 'killpg'):
+            if use_killpg and os.name == 'posix' and hasattr(os, 'killpg'):
                 os.killpg(proc.pid, signal.SIGKILL)
             else:
                 proc.kill()
@@ -6322,7 +6324,14 @@ def run_cmd(cmd, timeout=None):
     try:
         if Config.ROOT_PASS and re.match(r'\s*(sudo|su)\b', cmd) and not Platform.WINDOWS:
             return _pty_su_root(cmd, timeout)
-        if _can_cancel_foreground_input():
+
+        is_main = threading.current_thread() is threading.main_thread()
+        use_interjection = _can_cancel_foreground_input()
+        # Enable Popen-based cancellation for main thread with tty, and for
+        # any non-main POSIX thread so subagents can be cancelled mid-command.
+        can_poll_cancel = use_interjection or (not is_main and os.name == 'posix' and select is not None)
+
+        if can_poll_cancel:
             clear_agent_cancel()
             out = bytearray()
             popen_kwargs = {
@@ -6330,25 +6339,34 @@ def run_cmd(cmd, timeout=None):
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.STDOUT,
             }
-            if os.name == 'posix':
+            # Only use start_new_session in main thread so that killpg
+            # works for group termination during cancellation. Subagent
+            # threads do not need process-group cleanup on their own.
+            if os.name == 'posix' and is_main:
                 popen_kwargs["start_new_session"] = True
             proc = subprocess.Popen(cmd, **popen_kwargs)
             deadline = time.time() + timeout
-            _interjection_start()
-            _footer_animate_start(state="executing", tool_name=cmd[:40])
+            if use_interjection:
+                _interjection_start()
+            if is_main:
+                _footer_animate_start(state="executing", tool_name=cmd[:40])
             try:
                 while True:
-                    inj = _interjection_poll()
-                    if inj is _INTERJECTION_CANCEL or agent_cancel_requested():
-                        request_agent_cancel()
-                        _terminate_process(proc)
-                        output = _tail_cmd_output(out)
-                        suffix = ("\n" + output) if output else ""
-                        return f"[CANCELLED] Command stopped by Escape{suffix}"
-                    # Don't cancel command on regular typed interjection.
-                    # Only Escape (or Ctrl-C / agent_cancel_requested()) should abort.
-                    # Typed text during command execution is discarded — the user
-                    # cannot reasonably redirect it while the shell runs.
+                    if use_interjection:
+                        inj = _interjection_poll()
+                        if inj is _INTERJECTION_CANCEL or agent_cancel_requested():
+                            request_agent_cancel()
+                            _terminate_process(proc)
+                            output = _tail_cmd_output(out)
+                            suffix = ("\n" + output) if output else ""
+                            return f"[CANCELLED] Command stopped by Escape{suffix}"
+                    else:
+                        if agent_cancel_requested():
+                            request_agent_cancel()
+                            _terminate_process(proc, use_killpg=False)
+                            output = _tail_cmd_output(out)
+                            suffix = ("\n" + output) if output else ""
+                            return f"[CANCELLED] Command stopped by Escape{suffix}"
 
                     if proc.stdout is not None:
                         readable, _, _ = select.select([proc.stdout], [], [], 0.05)
@@ -6368,16 +6386,18 @@ def run_cmd(cmd, timeout=None):
                                 out.extend(data)
                         break
                     if time.time() > deadline:
-                        _terminate_process(proc)
+                        _terminate_process(proc, use_killpg=is_main)
                         output = _tail_cmd_output(out)
                         suffix = ("\n" + output) if output else ""
                         return f"[TIMEOUT] Command exceeded {timeout}s{suffix}"
             finally:
-                _footer_animate_stop()
-                _interjection_stop()
+                if is_main:
+                    _footer_animate_stop()
+                if use_interjection:
+                    _interjection_stop()
                 try:
                     if proc.poll() is None:
-                        _terminate_process(proc)
+                        _terminate_process(proc, use_killpg=is_main)
                 except Exception:
                     pass
                 if proc.stdout is not None:
@@ -6576,6 +6596,11 @@ class SubAgent:
                     self.error = resp or "No response"
                     self.result = f"[SUBAGENT ERROR] {self.error}"
                     break
+                if agent_cancel_requested():
+                    self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
+                    self.error = agent_cancel_message()
+                    self.done = True
+                    return
                 resp, _asked = handle_ask_blocks(resp, self._history, allow_input=False, return_asked=True)
                 commands = extract_blocks(resp, 'execute')
                 was_healed = False
@@ -6594,6 +6619,11 @@ class SubAgent:
                         self._history.append({"role": "assistant", "content": resp})
                     command_cancelled = False
                     for c in commands:
+                        if agent_cancel_requested():
+                            self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
+                            self.error = agent_cancel_message()
+                            self.done = True
+                            return
                         c = c.strip()
                         plugin_result = _try_plugin_cmd(c, history=self._history)
                         if plugin_result is not None:
@@ -6607,7 +6637,7 @@ class SubAgent:
                         if was_healed:
                             continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
                         self._history.append({"role": "user", "content": f"{msg}\n\n{continuation}"})
-                        if (result or "").startswith("[CANCELLED]"):
+                        if agent_cancel_requested() or (result or "").startswith("[CANCELLED]"):
                             command_cancelled = True
                             break
                     if command_cancelled:
