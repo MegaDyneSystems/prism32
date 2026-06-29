@@ -1618,6 +1618,10 @@ Deployed and tested on:
 - Pentium M 2005 durabook 2GB DDR2
 - Synology Nas DS414 ARM64 1GB ram
 
+## Developer Notes
+This is a solo developer project so it's just me funded by donations and the free hardware I find, Dono's are appreciated as I am trying to get a new ISP or internet as my current one is run by crooks with broken unreliable service and bandwidth not enough for my devices
+buymeacoffee.com/sebastianflynn
+
 ## License
 
 See the repository license. Project metadata currently declares APACHE 2.0
