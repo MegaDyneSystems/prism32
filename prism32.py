@@ -4660,12 +4660,12 @@ def _register_extended_themes():
         glow="\x1b[5;38;5;208m", bar="\x1b[48;5;236m")
     register_theme("cyberspace",
         primary="\x1b[38;5;51m",       # electric cyan
-        bright="\x1b[1;4;38;5;213m",   # hot pink BOLD + UNDERLINE
-        dim="\x1b[2;3;38;5;240m",      # dark gray + ITALIC
+        bright="\x1b[1;38;5;213m",     # hot pink BOLD
+        dim="\x1b[2;38;5;240m",        # dark gray
         accent="\x1b[38;5;141m",       # purple
         warn="\x1b[38;5;226m",         # yellow
-        err="\x1b[1;9;38;5;196m",      # red BOLD + STRIKETHROUGH
-        glow="\x1b[6;38;5;51m",        # fast blinking cyan
+        err="\x1b[1;38;5;196m",        # red BOLD
+        glow="\x1b[5;38;5;51m",        # blinking cyan (busy only)
         bar="\x1b[48;5;201;38;5;51m",  # magenta background + electric cyan text
         neon="\x1b[38;5;199m",         # true magenta
         inverse="\x1b[7;1;38;5;51m")   # reversed bold cyan
@@ -5439,20 +5439,28 @@ def _wrap_line(line, cw):
 def box(title, content, color_key="primary", width=None):
     t = T()
     c = t[color_key]
+    sep_c = t.get('accent', c)
+    dim_c = t.get('dim', "")
     # Adapt width to terminal size
     if width is None:
         tw = _terminal_width()
         width = max(20, min(tw - 2, 120))
     raw_lines = content.split('\n')
-    iw = width - 2
-    cw = width - 4
-    print(f"{c}{'┌' + '─'*iw + '┐'}{RST}")
+    iw = width - 2       # inner fill width for top/bottom/separator
+    cw = width - 4       # content width
+    # Top border: rounded block corners
+    top_fill = '▀' * iw
+    print(f"{c}▛{top_fill}▜{RST}")
+    # Title line with decorative prefix
     title_clean = strip_ansi(str(title))
     title_disp = f"▸ {title_clean}"
     if len(title_disp) > cw:
         title_disp = title_disp[:max(0, cw - 1)] + "…"
-    print(f"{c}│{RST} {c}{BOLD}{title_disp:<{cw}}{RST} {c}│{RST}")
-    print(f"{c}├{'─'*iw}┤{RST}")
+    pad = cw - len(title_disp)
+    print(f"{c}▌{RST} {c}{BOLD}{title_disp}{RST}{' '*pad} {c}▐{RST}")
+    # Inner separator in accent color
+    print(f"{c}▌{RST}{sep_c}{'─'*iw}{RST}{c}▐{RST}")
+    # Content lines
     for raw_line in raw_lines:
         wrapped = _wrap_line(raw_line, cw)
         for chunk in wrapped:
@@ -5461,8 +5469,10 @@ def box(title, content, color_key="primary", width=None):
             if pad < 0:
                 chunk = chunk[:cw]
                 pad = 0
-            print(f"{c}│{RST} {chunk}{' '*pad} {c}│{RST}")
-    print(f"{c}{'└' + '─'*iw + '┘'}{RST}")
+            print(f"{c}▌{RST} {chunk}{' '*pad} {c}▐{RST}")
+    # Bottom border
+    bot_fill = '▄' * iw
+    print(f"{c}▙{bot_fill}▟{RST}")
 
 def progress_bar(current, total, label="", width=40, color_key="primary"):
     if not sys.stdout.isatty():
