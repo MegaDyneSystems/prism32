@@ -46,6 +46,20 @@ try:
 except ImportError:
     pass
 
+# ── Low-RAM Detection ───────────────────────────────────────
+_LOW_RAM = False
+try:
+    with open('/proc/meminfo', 'r') as f:
+        for line in f:
+            if line.startswith('MemTotal:'):
+                total_kb = int(line.split()[1])
+                _LOW_RAM = total_kb < 65536  # < 64MB
+                break
+except Exception:
+    pass
+
+_CMD_RESULT_CAP = 500 if _LOW_RAM else 1500
+
 # ── Plugin & Extension System ──────────────────────────────
 
 class Command:
@@ -384,6 +398,8 @@ def _load_plugin_file(mod_path, mod_name=None, quiet=False):
 def load_plugins():
     """Load external command plugins from ~/.prism32/plugins/.
     Uses importlib.util to load from file path (no sys.path manipulation needed)."""
+    if _LOW_RAM:
+        return
     global PLUGIN_DIR
     if not os.path.isdir(PLUGIN_DIR):
         try:
@@ -960,6 +976,8 @@ def ensure_startup_memory(refresh=False):
     return STARTUP_MEMORY_FILE
 
 def read_startup_memory():
+    if _LOW_RAM:
+        return ""
     ensure_startup_memory(refresh=False)
     return _safe_read(STARTUP_MEMORY_FILE).strip()
 
@@ -1578,6 +1596,8 @@ def extend_with_plugin(args_str, history=None):
 
 def read_soul():
     """Read the soul.md file. Returns empty string if not found."""
+    if _LOW_RAM:
+        return ""
     try:
         with open(SOUL_FILE, 'r', encoding='utf-8') as f:
             return f.read().strip()
@@ -4199,6 +4219,9 @@ class Config:
         except Exception as e:
             print(f"  Config load failed ({cls.CONFIG_FILE}): {e}")
 
+if _LOW_RAM:
+    Config.MAX_CONTEXT_TOKENS = 4000
+
 # ── Resilient helpers ──
 def estimate_tokens(text):
     '''Rough token count (4 chars per token average). Handles str / list / None / other.'''
@@ -4513,6 +4536,8 @@ def _register_extended_themes():
     if _EXTENDED_THEMES_REGISTERED:
         return
     _EXTENDED_THEMES_REGISTERED = True
+    if _LOW_RAM:
+        return
     # ── Community Themes ─────────────────────────────────────────
     register_theme("vapor",
         primary="\033[38;5;219m", bright="\033[1;95m", dim="\033[2;38;5;245m",
@@ -6006,6 +6031,9 @@ def banner():
     t = T()
     c = t['bright']
     d = t['dim']
+    if _LOW_RAM:
+        print(f"\n{c}Prism32 v6.9 — MegaDyne Systems{RST}")
+        return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
         "|  _ \\|  _ \\|_ _/ ___||  \\/  |___ /___ \\ ",
@@ -6019,6 +6047,9 @@ def banner():
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
+    if _LOW_RAM:
+        print(f"\n {t['dim']}Prism32 v6.9 — MegaDyne Systems (low-RAM mode){RST}")
+        return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
     steps = [
@@ -6446,7 +6477,7 @@ def _try_plugin_cmd(c, history=None):
                 return f"Subagent {sid} still running. Check /subagents."
             result = sa.result or ""
             _SUBAGENTS.pop(sid, None)
-        return f"[Subagent {sid} result]\n{result[:2000]}"
+        return f"[Subagent {sid} result]\n{result[:800 if _LOW_RAM else 2000]}"
     if cmd_name in ('/subagents', 'subagents'):
         with _subagent_lock:
             if not _SUBAGENTS:
@@ -6822,7 +6853,7 @@ class SubAgent:
                             result = run_cmd(c)
                         success = _cmd_succeeded(result)
                         cmd_result(c, result, success)
-                        msg = f"Executed: {c}\nResult:\n{result[:1500]}"
+                        msg = f"Executed: {c}\nResult:\n{result[:_CMD_RESULT_CAP]}"
                         continuation = f"Command succeeded={success}. Continue with task or give final answer."
                         if was_healed:
                             continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
@@ -7840,7 +7871,7 @@ def cmd_goal(goal_text, history, cmd_log):
                 cmd_log.append(("goal", c))
                 viz.progress(step, max_steps, f"step {step}/{max_steps}")
 
-                exec_msg = f"Executed: {c}\nResult:\n{result[:1500]}"
+                exec_msg = f"Executed: {c}\nResult:\n{result[:_CMD_RESULT_CAP]}"
                 continuation = f"Command succeeded={success}. Continue toward goal or report completion."
                 if exec_msg.strip():
                     history.append({"role": "user", "content": f"{exec_msg}\n\n{continuation}"})
@@ -8599,7 +8630,8 @@ def main():
     banner()
 
     load_plugins()
-    ensure_startup_memory(refresh=False)
+    if not _LOW_RAM:
+        ensure_startup_memory(refresh=False)
     refresh_memory_profile(save=True)
     ensure_harness_scan(force=False)
     _fetch_api_pricing()
@@ -10231,7 +10263,7 @@ def main():
                     cmd_result(c, result, success)
                     cmd_log.append(("ai", c))
 
-                    exec_msg = f"Executed: {c}\nResult:\n{result[:1500]}"
+                    exec_msg = f"Executed: {c}\nResult:\n{result[:_CMD_RESULT_CAP]}"
                     continuation = "Command output above. Continue with your task or give final answer."
                     if was_healed:
                         continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
