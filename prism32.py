@@ -4658,6 +4658,17 @@ def _register_extended_themes():
         primary="\x1b[38;5;208m", bright="\x1b[1;38;5;214m", dim="\x1b[38;5;240m",
         accent="\x1b[38;5;226m", warn="\x1b[38;5;220m", err="\x1b[38;5;196m",
         glow="\x1b[5;38;5;208m", bar="\x1b[48;5;236m")
+    register_theme("cyberspace",
+        primary="\x1b[38;5;51m",       # electric cyan
+        bright="\x1b[1;4;38;5;213m",   # hot pink BOLD + UNDERLINE
+        dim="\x1b[2;3;38;5;240m",      # dark gray + ITALIC
+        accent="\x1b[38;5;141m",       # purple
+        warn="\x1b[38;5;226m",         # yellow
+        err="\x1b[1;9;38;5;196m",      # red BOLD + STRIKETHROUGH
+        glow="\x1b[6;38;5;51m",        # fast blinking cyan
+        bar="\x1b[48;5;201;38;5;51m",  # magenta background + electric cyan text
+        neon="\x1b[38;5;199m",         # true magenta
+        inverse="\x1b[7;1;38;5;51m")   # reversed bold cyan
     register_theme("cyber",
         primary="\033[38;5;51m", bright="\033[1;38;5;213m", dim="\033[2;38;5;240m",
         accent="\033[38;5;141m", warn="\033[38;5;226m", err="\033[38;5;196m",
@@ -8010,7 +8021,7 @@ def get_cmd_help():
    /loadcfg             Load config from disk
    /cost               Show session token usage and cost
    /usage               Show API usage (OpenRouter)
-   /theme               Cycle theme (31 built-in themes)
+   /theme               Cycle theme (32 built-in themes)
     /plugins             List loaded plugins
     /soul [show|set|...]  Manage persistent custom rules (soul.md)
     /harness [scan]      Detect external AI agent harness CLIs
