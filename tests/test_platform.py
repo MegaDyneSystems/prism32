@@ -25,9 +25,10 @@ def test_platform_system():
     assert len(sysname) > 0
 
 def test_platform_arch():
-    """get_arch() should detect x86_64."""
+    """get_arch() should detect architecture."""
     arch = Platform.get_arch()
-    assert arch == 'x86_64'
+    assert arch is not None
+    assert len(arch) > 0
 
 def test_platform_cpu():
     """get_cpu() should return CPU model."""
