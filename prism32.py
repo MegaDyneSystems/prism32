@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.8 - MegaDyne Systems Terminal Agent
+Prism32 v6.9 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -4744,7 +4744,7 @@ def _footer_animator_loop():
                         _render_footer()
                     except Exception:
                         pass
-            time.sleep(0.5)
+            time.sleep(0.3)
     except Exception:
         pass
     finally:
@@ -4898,9 +4898,8 @@ def _interjection_stop():
         _SAVED_TERMIOS = None
     with stdout_lock:
         if _footer_reserved:
-            sys.stdout.write("\x1b[s")
             clear_footer()
-            sys.stdout.write("\x1b[u")
+            move_to_scroll_bottom()
             sys.stdout.flush()
 
 def _interjection_poll():
@@ -5836,7 +5835,7 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.8 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.9 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
@@ -6994,6 +6993,7 @@ def stream_response(resp, cancel_event=None):
             return
         color = t['dim'] if display_color == "reasoning" else t['primary']
         with stdout_lock:
+            move_to_scroll_bottom()
             if not agent_prefix_printed:
                 prefix_color = t['accent'] if display_color == "reasoning" else t['primary']
                 sys.stdout.write(f" {prefix_color}<{Config.AGENT_NAME}>:{RST} ")
@@ -8083,7 +8083,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.8 — MegaDyne Systems")
+        print("Prism32 v6.9 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9674,7 +9674,7 @@ def main():
 
 # ── HTTP Helpers ────────────────────────────────────────────
 
-PRISM32_USER_AGENT = "Prism32/6.8"
+PRISM32_USER_AGENT = "Prism32/6.9"
 PRISM32_DEFAULT_HEADERS = {
     "User-Agent": PRISM32_USER_AGENT,
     "Accept": "application/json, text/plain, text/html, */*",
@@ -9737,7 +9737,7 @@ def normalize_api_base(base):
 # ── Model Selector ──────────────────────────────────────────
 
 def build_headers(extra=None, api_key=None, api_base=None):
-    h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.8"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.9"}
     _key = api_key if api_key is not None else Config.API_KEY
     if _key:
         h["Authorization"] = f"Bearer {_key}"
