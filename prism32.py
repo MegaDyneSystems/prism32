@@ -4674,6 +4674,7 @@ register_provider("groq", display_name="Groq", api_base="https://api.groq.com/op
 register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", cheap_model="meta-llama/Llama-3-8b-chat-hf", description="Together AI inference", cache_support=None)
 register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", cheap_model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)", cache_support=None)
 register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
+register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-chat", cheap_model="deepseek-chat", description="DeepSeek V3 / R1 (requires API key)", cache_support="deepseek_auto")
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
 
 
@@ -6974,7 +6975,7 @@ You can delegate work to subagents. Subagents run autonomously with their own ex
 - /collect <id> — retrieve async subagent results.
 - /subagents — list running/completed subagents.
 Add --provider <name> to use a different provider for a subagent (e.g. /delegate scan ports --provider groq).
-Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt.
+Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, deepseek.
 Use /spawn + /collect for parallel work: spawn multiple subagents for independent subtasks, then collect results.
 Subagents can spawn their own subagents — use this for recursive decomposition of complex tasks.
 
