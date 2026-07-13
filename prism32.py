@@ -4658,6 +4658,10 @@ def _register_extended_themes():
         primary="\x1b[38;5;208m", bright="\x1b[1;38;5;214m", dim="\x1b[38;5;240m",
         accent="\x1b[38;5;226m", warn="\x1b[38;5;220m", err="\x1b[38;5;196m",
         glow="\x1b[5;38;5;208m", bar="\x1b[48;5;236m")
+    register_theme("cyber",
+        primary="\033[38;5;51m", bright="\033[1;38;5;213m", dim="\033[2;38;5;240m",
+        accent="\033[38;5;141m", warn="\033[38;5;226m", err="\033[38;5;196m",
+        glow="\033[5;38;5;51m", bar="\033[48;5;201m")
 
 # ── Model Providers ────────────────────────────────────────────
 
@@ -4918,7 +4922,7 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
         else:
             indicator = activity_vector(history=history)
         bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
-        content = f"{bar} {indicator} {t['primary'] if not busy else t['dim']}▶{RST} {CLR_LINE}"
+        content = f"{bar} {indicator} {t['primary'] if not busy else t['accent']}▶{RST} {CLR_LINE}"
 
     # Skip redundant redraws (avoids cursor flicker and scroll snap)
     if content == _LAST_RENDERED_FOOTER:
@@ -5426,13 +5430,16 @@ def box(title, content, color_key="primary", width=None):
     # Adapt width to terminal size
     if width is None:
         tw = _terminal_width()
-        width = min(62, max(4, tw - 2))
+        width = max(20, min(tw - 2, 120))
     raw_lines = content.split('\n')
     iw = width - 2
     cw = width - 4
     print(f"{c}{'┌' + '─'*iw + '┐'}{RST}")
     title_clean = strip_ansi(str(title))
-    print(f"{c}│{RST} {c}{BOLD}{title_clean:<{cw}}{RST} {c}│{RST}")
+    title_disp = f"▸ {title_clean}"
+    if len(title_disp) > cw:
+        title_disp = title_disp[:max(0, cw - 1)] + "…"
+    print(f"{c}│{RST} {c}{BOLD}{title_disp:<{cw}}{RST} {c}│{RST}")
     print(f"{c}├{'─'*iw}┤{RST}")
     for raw_line in raw_lines:
         wrapped = _wrap_line(raw_line, cw)
@@ -5457,11 +5464,12 @@ def progress_bar(current, total, label="", width=40, color_key="primary"):
 
 def step_header(step, total, goal_text):
     t = T()
-    w = min(62, _terminal_width() - 2)
+    w = max(30, _terminal_width() - 4)
     safe_goal = strip_ansi(goal_text)
-    print(f"\n{t['bright']}{'▬'*w}{RST}")
-    print(f" {t['bright']}◢ STEP {step}/{total} ◣{RST}  {t['dim']}{safe_goal[:max(10, w-15)]}{RST}")
-    print(f"{t['bright']}{'▬'*w}{RST}")
+    goal_trunc = safe_goal[:max(20, w - 20)]
+    print(f"\n{t['primary']}{'─'*w}{RST}")
+    print(f" {t['bright']}[{step}/{total}]{RST}  {t['dim']}{goal_trunc}{RST}")
+    print(f"{t['primary']}{'─'*w}{RST}")
 
 # ── Spinner ──────────────────────────────────────────────────
 
@@ -5646,11 +5654,11 @@ class ToolVisualizer:
     def tool_call(self, tool_name, args=""):
         t = self.t
         args_preview = args[:50] + "..." if len(args) > 50 else args
-        print(f"\n {t['accent']}\u26a1 {t['bright']}{tool_name}{RST} {t['dim']}{args_preview}{RST}")
+        print(f"\n {t['accent']}\U0001f527 {t['bright']}{tool_name}{RST} {t['dim']}{args_preview}{RST}")
     
     def tool_result(self, success=True, preview=""):
         t = self.t
-        icon = f"{t['bright']}\u2713{RST}" if success else f"{t['err']}\u2717{RST}"
+        icon = f"{t.get('ok', t['bright'])}\u2713{RST}" if success else f"{t['err']}\u2717{RST}"
         preview_trunc = preview[:80] + "..." if len(preview) > 80 else preview
         print(f"   {icon} {t['dim']}{preview_trunc}{RST}")
     
@@ -5677,7 +5685,7 @@ class ToolVisualizer:
             "warning": f"{t['warn']}\u26a0{RST}",
             "error": f"{t['err']}\u2717{RST}",
             "thinking": f"{t['dim']}\U0001f4ad{RST}",
-            "tool": f"{t['accent']}\u26a1{RST}",
+            "tool": f"{t['accent']}\U0001f527{RST}",
             "save": f"{t['primary']}\U0001f4be{RST}",
             "load": f"{t['primary']}\U0001f4c2{RST}"
         }
@@ -6562,28 +6570,39 @@ def run_cmd(cmd, timeout=None):
                 _footer_animate_start(state="executing", tool_name=cmd[:40])
             try:
                 while True:
+                    # Unified select: poll both stdout and stdin simultaneously
+                    fds = []
+                    if proc.stdout is not None:
+                        fds.append(proc.stdout)
                     if use_interjection:
+                        fds.append(sys.stdin)
+
+                    readable, _, _ = select.select(fds, [], [], 0.05)
+
+                    # Handle interjection FIRST (user input takes priority)
+                    if use_interjection and sys.stdin in readable:
                         inj = _interjection_poll()
-                        if inj is _INTERJECTION_CANCEL or agent_cancel_requested():
+                        if inj is _INTERJECTION_CANCEL:
                             request_agent_cancel()
-                            _terminate_process(proc)
-                            output = _tail_cmd_output(out)
-                            suffix = ("\n" + output) if output else ""
-                            return f"[CANCELLED] Command stopped by Escape{suffix}"
-                    else:
-                        if agent_cancel_requested():
-                            request_agent_cancel()
-                            _terminate_process(proc, use_killpg=False)
+                            _terminate_process(proc, use_killpg=is_main)
                             output = _tail_cmd_output(out)
                             suffix = ("\n" + output) if output else ""
                             return f"[CANCELLED] Command stopped by Escape{suffix}"
 
-                    if proc.stdout is not None:
-                        readable, _, _ = select.select([proc.stdout], [], [], 0.05)
-                        if readable:
-                            data = os.read(proc.stdout.fileno(), 4096)
-                            if data:
-                                out.extend(data)
+                    # Check for cancel request (works for both main and subagent)
+                    if agent_cancel_requested():
+                        request_agent_cancel()
+                        _terminate_process(proc, use_killpg=is_main)
+                        output = _tail_cmd_output(out)
+                        suffix = ("\n" + output) if output else ""
+                        return f"[CANCELLED] Command stopped by Escape{suffix}"
+
+                    # Handle command output
+                    if proc.stdout in readable:
+                        data = os.read(proc.stdout.fileno(), 4096)
+                        if data:
+                            out.extend(data)
+
                     if proc.poll() is not None:
                         if proc.stdout is not None:
                             while True:
@@ -8542,7 +8561,7 @@ def main():
                         try:
                             bar = build_status_bar(include_indicator=not _AGENT_BUSY)
                             ind = activity_vector(frame=_FOOTER_FRAME, busy=_AGENT_BUSY)
-                            sys.stdout.write(f"{bar} {ind} {T()['primary'] if not _AGENT_BUSY else T()['dim']}▶{RST} ")
+                            sys.stdout.write(f"{bar} {ind} {T()['primary'] if not _AGENT_BUSY else T()['accent']}▶{RST} ")
                         except Exception:
                             pass
                         sys.stdout.flush()
