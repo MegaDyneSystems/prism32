@@ -1,4 +1,4 @@
-# Prism32 v6.8
+# Prism32 v6.9
 
 Prism32 is a self-extending, self-repairing, self-evolving program with a AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do. it can turn any PC or low end hardware SBC or laptop etc into a robotic assistant that can control external peripherals and can also run on robots and IOT devices with shell and python on bare metal. Prism32 is the first polymorphic AI assistant and coding harness
 
@@ -193,6 +193,10 @@ Prism32 combines several systems in one terminal harness:
 - Harness absorption: Prism32 can detect external AI CLIs such as OpenCode, Codex CLI, Claude Code, Aider, Gemini CLI, Goose, and Cursor Agent, then include their availability in context.
 - Terminal interjection while streaming: type while the AI is responding, press Enter, and your message interrupts the model.
 - Bare Escape cancellation: press Escape to stop active AI streaming, non-streaming API waits, foreground shell commands, and goal-mode work.
+- Low-RAM mode: auto-detects <64MB systems, skips heavy startup paths, and caps output to stay usable on 27MB OpenWrt routers.
+- Prompt caching: Anthropic native cache_control, OpenAI automatic cached_tokens billing, and DeepSeek prompt_cache_hit_tokens — toggle with `/prompt_caching on|off`.
+- Cheaper inference: non-destructive compression of older verbose tool results (~85% token reduction), condensed system prompt, and per-provider `cheap_model` suggestions in `/model`.
+- Provider URL protection: custom `api_base` survives provider switches; set with `/set api_base <url>` or `reset` to revert.
 
 ## The Emergent Agent
 
@@ -364,7 +368,17 @@ Prism32's local overhead is intentionally small:
 
 ### Embedded and Ultra-Low-RAM Devices
 
-Prism32 runs on devices with as little as 27 MB RAM (OpenWrt routers). On extremely memory-constrained systems where CPython's parser cannot compile the source in RAM, ship a pre-compiled `.pyc` instead of the `.py` source:
+Prism32 runs on devices with as little as 27 MB RAM (OpenWrt routers). On devices with <64MB RAM, low-RAM mode activates automatically at startup via `/proc/meminfo` detection:
+
+- Only 3 base themes are loaded; extended themes and plugins are skipped.
+- `startup_memory.md` and `soul.md` reads are deferred.
+- Command output cap drops from 1500 to 500 chars; subagent result cap drops from 2000 to 800 chars.
+- `MAX_CONTEXT_TOKENS` defaults to 4000.
+- The banner shows `(low-RAM mode)` and the full POST sequence is skipped.
+
+Tested on an OpenWrt TL-WR1043ND (27MB RAM, MIPS 24Kc, Python 3.7.13).
+
+On extremely memory-constrained systems where CPython's parser cannot compile the source in RAM, cross-compile a `.pyc` locally for the target Python version and copy only the bytecode — no on-device compilation, no OOM risk:
 
 ```sh
 # On a machine with matching Python version (e.g. 3.7):
@@ -378,7 +392,7 @@ ssh root@router 'python3 /root/prism32.pyc'
 GitHub Releases include pre-built `.pyc` artifacts for Python 3.7 through 3.13 — download the one matching your device's Python version. The `.pyc` is architecture-agnostic (runs on x86, ARM, MIPS, RISC-V) but Python-version-specific.
 
 Verified on:
-- **OpenWrt router** (Atheros AR9132 MIPS, 27 MB RAM) — runs via `.pyc`, detects `OpenWrt on tl-wr1043nd`
+- **OpenWrt router** (Atheros AR9132 MIPS, 27 MB RAM) — runs via `.pyc` in low-RAM mode, detects `OpenWrt on tl-wr1043nd`
 - **Amazon Fire TV Stick** (MT8127 ARMv7, 874 MB RAM) — runs via `.py` directly, detects `Amazon Fire TV (AFTT)`
 - **Amazon Kindle Fire tablet** (MT8186 ARM64, 2.8 GB RAM) — runs via `.py`, detects `Android/Termux on Amazon Kindle (KFTUWI)`
 
@@ -437,7 +451,7 @@ During streaming responses, you can type at any time. The footer changes to `INT
 
 Useful controls:
 
-- Escape: **the only key that cancels** agent work. This covers streaming, non-streaming API waits, foreground commands, and goal mode. Typed interjections do NOT cancel — they are queued for after the current response completes.
+- Escape: **the only key that cancels** agent work. This covers streaming, non-streaming API waits, foreground commands, and goal mode. Escape is detected through a unified `select()` that polls stdin and stdout simultaneously, so there is no blind spot during tool execution. Typed interjections do NOT cancel — they are queued for after the current response completes.
 - Up/Down while interjecting: cycle previous interjections.
 - Left/Right, Home, End: edit the interjection buffer.
 - Delete (forward): delete the character after the cursor.
@@ -546,6 +560,21 @@ Track session cost:
 ```
 
 Prism32 captures token usage from both streaming and non-streaming API responses. Cost is calculated using per-model pricing for 20+ models (OpenAI, Anthropic, Groq, Together, Neuralwatt, OpenRouter). Local models show $0.0000. The running cost is shown live in the status bar as `$X.XXXX`.
+
+**Prompt caching** reduces repeated token costs:
+
+- Anthropic native API: `cache_control` markers on the system prompt + oldest user message (ephemeral cache).
+- OpenAI automatic caching: parses `cached_tokens` and bills at 0.5x.
+- DeepSeek caching: parses `prompt_cache_hit_tokens` and bills at 0.1x.
+- Toggle with `/prompt_caching on|off`. Only money saved is shown in `/cost`; no misleading cache hit token counts.
+
+**Cheaper inference** tools:
+
+- `compress_tool_turns()`: non-destructive compression of older verbose tool results, keeping the most recent 6 turns verbatim. Saves ~85% tokens on long sessions.
+- System prompt is condensed (~190 tokens saved per request).
+- `/set subagent_model` routes subagents to a cheaper model.
+- `CONTEXT_RECENT_FLOOR` and `CONTEXT_COMPRESS_KEEP` are configurable.
+- The `/model` browser shows each provider's `cheap_model` field with cost-saving suggestions.
 
 Browse/select models for the current provider:
 
@@ -894,7 +923,7 @@ Prism32 is useful for tasks that need conversation plus terminal feedback:
 
 ## Subagents
 
-Subagents are independent task runners with their own mini history. They use the same model as the main agent by default, or `Config.SUBAGENT_MODEL` if set.
+Subagents are independent task runners with their own mini history. They use the same model as the main agent by default, or `Config.SUBAGENT_MODEL` if set. Change at runtime with `/set subagent_model <model>`.
 
 Run synchronously:
 
@@ -921,7 +950,7 @@ Subagent results are stored into the in-memory quantum context and important res
 
 ## Quantum Context
 
-Quantum context is a thread-safe in-memory key-value store for the current Prism32 process. It is used by the main session and subagents to share short facts, task results, and handoff data.
+Quantum context is a purely in-memory thread-safe key-value store shared by the main session and all subagents. It is used to share short facts, task results, and handoff data. Nothing is written to disk.
 
 ```text
 /quantum target:https://example.com
@@ -1286,9 +1315,18 @@ Important settings:
 
 Use `/config`, `/savecfg`, and `/loadcfg` rather than editing JSON while Prism32 is running.
 
+Set or reset a custom API base URL without it being clobbered by provider switches:
+
+```text
+/set api_base <url>      # persist a custom endpoint
+/set api_base reset      # revert to the provider's default
+```
+
+The `custom_api_base` flag is saved in config across sessions.
+
 ## Themes
 
-Prism32 registers 32 themes, including phosphor, amber, cyan, vapor, nord, solarized, neon, retro, ice, ocean, sunset, forest, plasma, clear, glass, ghost, smoke, paper, ink, daylight, slate, synthcity, outrun, laserdisc, vapordark, chromecrt, sgi, dec, monoamber, iris, hpterm, and ember.
+Prism32 registers 33 themes, including phosphor, amber, cyan, vapor, nord, solarized, neon, retro, ice, ocean, sunset, forest, plasma, clear, glass, ghost, smoke, paper, ink, daylight, slate, synthcity, outrun, laserdisc, vapordark, chromecrt, sgi, dec, monoamber, iris, hpterm, ember, and cyber.
 
 Cycle themes:
 
@@ -1303,6 +1341,8 @@ prism32 --theme amber
 ```
 
 For old terminals, prefer the 16-color compatible themes such as `sgi`, `dec`, `monoamber`, `iris`, and `hpterm` through runtime theme cycling or configuration.
+
+The default visual style uses box-drawing borders (`┌─┐`), `◈` diamond separators, `▶` prompt arrows, and `🔧` wrench tool icons. Step headers use thin `─` lines, and content boxes expand to the full terminal width (up to 120 chars).
 
 ## Floppy And Removable Media
 
