@@ -5256,8 +5256,6 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     if _SESSION_COST > 0:
         cost_color = t['warn'] if _SESSION_COST >= 1.0 else t['dim']
         parts.append(f" {cost_color}${_SESSION_COST:.4f}{RST}")
-    if _SESSION_CACHE_HIT_TOKENS > 0:
-        parts.append(f" {t['accent']}cache:{_SESSION_CACHE_HIT_TOKENS:,}{RST}")
     sa_count = sum(1 for s in _SUBAGENTS.values() if not s.done)
     if sa_count > 0:
         parts.append(f" {t['warn']}SA:{sa_count}{RST}")
@@ -9532,7 +9530,7 @@ def main():
                 print(f"  Prompt caching: {state}{RST}")
                 print(f"  {t['dim']}Provider cache mode: {mode}{RST}")
                 if _SESSION_CACHE_HIT_TOKENS > 0:
-                    print(f"  {t['dim']}Session cache reads: {_SESSION_CACHE_HIT_TOKENS:,}  saved ${_SESSION_CACHE_SAVINGS:.4f}{RST}")
+                    print(f"  {t['dim']}Saved ${_SESSION_CACHE_SAVINGS:.4f}{RST}")
                 print(f"  {t['dim']}Usage: /prompt_caching on|off{RST}")
             print()
             continue
@@ -9675,13 +9673,8 @@ def main():
                          "openai_auto": "OpenAI auto-cache",
                          "deepseek_auto": "DeepSeek auto-cache"}.get(cache_mode, cache_mode)
                 lines.append(f"  Cache mode:   {t['dim']}{label}{' (on)' if Config.PROMPT_CACHING else ' (off)'}{RST}")
-            if _SESSION_CACHE_HIT_TOKENS > 0 or _SESSION_CACHE_CREATION_TOKENS > 0:
-                lines.append(f"  Cache reads:  {t['accent']}{_SESSION_CACHE_HIT_TOKENS:,}{RST}")
-                if _SESSION_CACHE_CREATION_TOKENS > 0:
-                    lines.append(f"  Cache writes: {t['dim']}{_SESSION_CACHE_CREATION_TOKENS:,}{RST}")
+            if _SESSION_CACHE_SAVINGS > 0:
                 lines.append(f"  Saved:        {t['ok']}${_SESSION_CACHE_SAVINGS:.4f}{RST}")
-            elif cache_mode:
-                lines.append(f"  {t['dim']}(no cache hits yet this session){RST}")
             if in_rate == 0 and out_rate == 0:
                 lines.append(f"  {t['dim']}(local/free model — no cost){RST}")
             box("SESSION COST", "\n".join(lines), "accent")
