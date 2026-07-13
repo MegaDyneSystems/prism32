@@ -375,7 +375,6 @@ def load_plugins():
 
 MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "memory.json")
 STARTUP_MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "startup_memory.md")
-QUANTUM_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "quantum.json")
 SOUL_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "soul.md")
 PROMPTSHARD_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "promptshard.md")
 HARNESS_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "harnesses.json")
@@ -425,6 +424,11 @@ _FOOTER_TOOL_NAME = ""
 _SESSION_INPUT_TOKENS = 0
 _SESSION_OUTPUT_TOKENS = 0
 _SESSION_COST = 0.0
+# Prompt-cache tracking (across providers: OpenAI auto-cache, DeepSeek cache
+# hits, Anthropic cache reads/creation). These let /cost show cache savings.
+_SESSION_CACHE_HIT_TOKENS = 0        # tokens served from cache (cache reads)
+_SESSION_CACHE_CREATION_TOKENS = 0    # tokens written to cache (Anthropic only)
+_SESSION_CACHE_SAVINGS = 0.0          # money saved vs. full-price input billing
 
 # Pricing: per 1K tokens (input, output). 0 = free/unknown.
 # These are hardcoded fallbacks — overridden at runtime by _API_PRICING_CACHE
@@ -557,22 +561,87 @@ def _get_model_pricing():
     return (0.001, 0.003)
 
 def _track_usage(usage_dict):
-    """Track token usage and compute cost for the session."""
+    """Track token usage and compute cost for the session, including prompt-cache
+    savings reported by providers.
+
+    Supported cache schemes (all parsed automatically from the response usage):
+      * OpenAI auto-cache:    usage.prompt_tokens_details.cached_tokens (or cached_tokens)
+      * DeepSeek cache:       usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens
+      * Anthropic (native):   usage.cache_read_input_tokens / cache_creation_input_tokens
+
+    Billing multipliers (relative to the base input token rate):
+      * OpenAI:    cached reads billed at 0.5x
+      * DeepSeek:  cache reads billed at ~0.1x
+      * Anthropic: cache reads billed at 0.1x, cache writes (creation) at 1.25x
+    """
     global _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, _SESSION_COST
+    global _SESSION_CACHE_HIT_TOKENS, _SESSION_CACHE_CREATION_TOKENS, _SESSION_CACHE_SAVINGS
     if not usage_dict or not isinstance(usage_dict, dict):
         return
-    inp = usage_dict.get("prompt_tokens", 0)
-    out = usage_dict.get("completion_tokens", 0)
+    inp = usage_dict.get("prompt_tokens") or usage_dict.get("input_tokens") or 0
+    out = usage_dict.get("completion_tokens") or usage_dict.get("output_tokens") or 0
+    # Collect cache-hit tokens across all provider schemas
+    ptd = usage_dict.get("prompt_tokens_details")
+    cache_hit = 0
+    if isinstance(ptd, dict):
+        cache_hit += ptd.get("cached_tokens", 0) or 0
+    cache_hit += usage_dict.get("cached_tokens", 0) or 0
+    cache_hit += usage_dict.get("prompt_cache_hit_tokens", 0) or 0
+    cache_hit += usage_dict.get("cache_read_input_tokens", 0) or 0
+    cache_create = usage_dict.get("cache_creation_input_tokens", 0) or 0
+
+    in_rate, out_rate = _get_model_pricing()
+
+    # Detect which caching scheme the response reports so we can bill correctly.
+    is_anthropic = ("cache_read_input_tokens" in usage_dict) or ("cache_creation_input_tokens" in usage_dict)
+    is_openai = bool(isinstance(ptd, dict) and ptd.get("cached_tokens")) or bool(usage_dict.get("cached_tokens"))
+    is_deepseek = "prompt_cache_hit_tokens" in usage_dict
+
+    if is_anthropic:
+        read_mult, create_mult = 0.1, 1.25
+        # Anthropic's input_tokens EXCLUDES cache tokens; uncached is just the base.
+        uncached_input = inp
+    elif is_deepseek:
+        read_mult, create_mult = 0.1, 1.0
+        # DeepSeek prompt_tokens already include the cached subset.
+        uncached_input = max(0, inp - cache_hit)
+    elif is_openai:
+        read_mult, create_mult = 0.5, 1.0
+        # OpenAI prompt_tokens already include the cached subset.
+        uncached_input = max(0, inp - cache_hit)
+    else:
+        read_mult, create_mult = 1.0, 1.0
+        uncached_input = inp
+
+    input_cost = (uncached_input / 1000.0) * in_rate
+    if cache_hit:
+        input_cost += (cache_hit / 1000.0) * in_rate * read_mult
+    if is_anthropic and cache_create:
+        input_cost += (cache_create / 1000.0) * in_rate * create_mult
+    output_cost = (out / 1000.0) * out_rate
+
     _SESSION_INPUT_TOKENS += inp
     _SESSION_OUTPUT_TOKENS += out
-    in_rate, out_rate = _get_model_pricing()
-    _SESSION_COST += (inp / 1000.0 * in_rate) + (out / 1000.0 * out_rate)
+    _SESSION_CACHE_HIT_TOKENS += cache_hit
+    _SESSION_CACHE_CREATION_TOKENS += cache_create
+    _SESSION_COST += input_cost + output_cost
+
+    # Savings = what these input tokens would have cost at full price minus what they cost now
+    if is_anthropic:
+        full_input_cost = ((inp + cache_hit + cache_create) / 1000.0) * in_rate
+    else:
+        full_input_cost = (inp / 1000.0) * in_rate
+    _SESSION_CACHE_SAVINGS += max(0.0, full_input_cost - input_cost)
 
 def _reset_session_cost():
     global _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, _SESSION_COST
+    global _SESSION_CACHE_HIT_TOKENS, _SESSION_CACHE_CREATION_TOKENS, _SESSION_CACHE_SAVINGS
     _SESSION_INPUT_TOKENS = 0
     _SESSION_OUTPUT_TOKENS = 0
     _SESSION_COST = 0.0
+    _SESSION_CACHE_HIT_TOKENS = 0
+    _SESSION_CACHE_CREATION_TOKENS = 0
+    _SESSION_CACHE_SAVINGS = 0.0
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -3928,6 +3997,9 @@ class Platform:
 
 class Config:
     API_BASE = "http://127.0.0.1:8080"
+    CUSTOM_API_BASE = False  # True when the user explicitly overrode the provider's API base URL.
+                            # Prevents provider defaults from clobbering a custom endpoint when
+                            # switching providers. Cleared via '/provider api reset' or '/set api_base reset'.
     MODEL = "deepseek/deepseek-v4-flash"
     API_KEY = ""
     MAX_HISTORY = 2000
@@ -3948,6 +4020,7 @@ class Config:
     STREAM = False
     MAX_MEMORY_CTX = 1024  # max chars for memory context in system prompt (0 = disable)
     AGENT_NAME = "MDS"     # name displayed before assistant responses
+    PROMPT_CACHING = True  # Enable provider prompt caching (Anthropic native / OpenAI auto / DeepSeek auto)
     MODEL_CONTEXT_MAP = {
         # Pattern -> context window in tokens (used for history trimming)
         "deepseek/deepseek-v4": 262144,
@@ -3968,6 +4041,12 @@ class Config:
 
     # Computed: context budget = min(model_window, MAX_CONTEXT_TOKENS)
     MAX_CONTEXT_TOKENS = 0  # 0 = auto-detect from model (no hard cap)
+    # Cost controls: how aggressively older context is compressed before
+    # sending to the API. These cut token spend on every request without
+    # sacrificing fidelity of the most recent turns. See compress_tool_turns()
+    # and trim_history().
+    CONTEXT_RECENT_FLOOR = 8000   # min tokens kept verbatim as recent context when trimming
+    CONTEXT_COMPRESS_KEEP = 6     # recent turns kept fully verbatim; older tool output is collapsed
 
     @staticmethod
     def resolve_context_window(model_name=None):
@@ -3999,6 +4078,7 @@ class Config:
         try:
             data = {
                 "api_base": cls.API_BASE,
+                "custom_api_base": cls.CUSTOM_API_BASE,
                 "model": cls.MODEL,
                 "subagent_model": cls.SUBAGENT_MODEL,
                 "root_pass": cls.ROOT_PASS,
@@ -4014,9 +4094,12 @@ class Config:
                 "thinking_effort": cls.THINKING_EFFORT,
                 "max_memory_ctx": cls.MAX_MEMORY_CTX,
                 "max_context_tokens": cls.MAX_CONTEXT_TOKENS,
+                "context_recent_floor": cls.CONTEXT_RECENT_FLOOR,
+                "context_compress_keep": cls.CONTEXT_COMPRESS_KEEP,
                 "agent_name": cls.AGENT_NAME,
                 "custom_arch_map": cls.CUSTOM_ARCH_MAP,
                 "verify_ssl": cls.VERIFY_SSL,
+                "prompt_caching": cls.PROMPT_CACHING,
             }
             _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
         except Exception as e:
@@ -4031,6 +4114,7 @@ class Config:
             with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             if "api_base" in data: cls.API_BASE = data["api_base"]
+            if "custom_api_base" in data: cls.CUSTOM_API_BASE = bool(data["custom_api_base"])
             if "model" in data: cls.MODEL = data["model"]
             if "api_key" in data: cls.API_KEY = data["api_key"]
             if "temperature" in data: cls.TEMPERATURE = data["temperature"]
@@ -4056,11 +4140,15 @@ class Config:
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
             if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = int(data["max_memory_ctx"])
             if "max_context_tokens" in data: cls.MAX_CONTEXT_TOKENS = int(data["max_context_tokens"])
+            if "context_recent_floor" in data: cls.CONTEXT_RECENT_FLOOR = int(data["context_recent_floor"])
+            if "context_compress_keep" in data: cls.CONTEXT_COMPRESS_KEEP = int(data["context_compress_keep"])
             if "slow_cpu" in data: cls.SLOW_CPU = data["slow_cpu"]
             if "verify_ssl" in data:
                 cls.VERIFY_SSL = bool(data["verify_ssl"])
             else:
                 cls.VERIFY_SSL = os.environ.get("PRISM32_VERIFY_SSL", "1").lower() not in ("0", "false", "no", "off")
+            if "prompt_caching" in data:
+                cls.PROMPT_CACHING = bool(data["prompt_caching"])
             if "subagent_model" in data: cls.SUBAGENT_MODEL = data["subagent_model"]
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
@@ -4261,14 +4349,14 @@ def trim_history(history, max_tokens=None):
     system_prompt = history[0]
     system_tokens = _msg_tokens(system_prompt)
     
-    # Fixed recent floor: 8K tokens or 30% of window, whichever is larger
+    # Fixed recent floor: configurable (default 8K) or 30% of window, whichever is larger
     # This ensures the agent always has enough recent context to continue
-    recent_floor = max(8000, int(max_tokens * 0.30))
+    recent_floor = max(Config.CONTEXT_RECENT_FLOOR, int(max_tokens * 0.30))
     summary_budget = max_tokens - system_tokens - recent_floor
     
     if summary_budget < 2000:
         # Very tight context — reduce recent floor
-        recent_floor = max(4000, int(max_tokens * 0.50))
+        recent_floor = max(Config.CONTEXT_RECENT_FLOOR // 2, int(max_tokens * 0.50))
         summary_budget = max(1000, max_tokens - system_tokens - recent_floor)
     
     # Keep the newest messages up to recent_floor tokens
@@ -4322,6 +4410,67 @@ def trim_history(history, max_tokens=None):
     
     result.extend(kept)
     return result
+
+def _collapse_text_middle(text, head_lines=5, tail_lines=3, max_chars=400):
+    """Collapse the middle of long text, keeping the first/last lines intact.
+
+    Lossy for the elided middle but preserves the head (command/facts) and
+    tail (final status) that an agent most needs for continuity.
+    """
+    if not isinstance(text, str) or len(text) <= max_chars:
+        return text
+    lines = text.split('\n')
+    if len(lines) <= head_lines + tail_lines:
+        return text
+    head = lines[:head_lines]
+    tail = lines[-tail_lines:]
+    skipped = len(lines) - head_lines - tail_lines
+    return '\n'.join(head) + f'\n[... {skipped} lines trimmed ...]\n' + '\n'.join(tail)
+
+def compress_tool_turns(messages, recent_keep=None, head_lines=4, tail_lines=3,
+                        result_max=400, asst_max=3000):
+    """Compress verbose tool-result content in OLDER conversation turns.
+
+    Runs on every API call (in ask_ai) to cut token spend without waiting for
+    the 75% context threshold that triggers full trim_history. Non-destructive:
+    returns a NEW list and never mutates the caller's history.
+
+    - The system prompt (index 0) is never touched.
+    - The most recent ``recent_keep`` messages are preserved VERBATIM (lossless
+      for recent context — never sacrifices current-turn fidelity).
+    - Older ``user`` messages shaped like 'Executed: ...\\nResult:\\n...' have
+      their Result body collapsed to head/tail lines.
+    - Older very long ``assistant`` messages are head/tail collapsed.
+    """
+    if not messages or len(messages) <= 2:
+        return messages
+    if recent_keep is None:
+        recent_keep = Config.CONTEXT_COMPRESS_KEEP
+    out = list(messages)
+    cutoff = len(out) - recent_keep
+    if cutoff <= 1:
+        return out  # only the system prompt would be in range — leave alone
+    for i in range(1, cutoff):
+        m = out[i]
+        if not isinstance(m, dict):
+            continue
+        role = m.get("role")
+        content = m.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        if role == "user" and ("Executed:" in content or "Result:" in content):
+            # Tool-result message. Collapse as a whole: the head keeps the
+            # "Executed: <cmd>" header + first result lines; the tail keeps the
+            # trailing continuation ("Command output above. Continue...").
+            # Operating on the whole string is robust to blank lines WITHIN the
+            # command output (no fragile "\n\n" boundary split).
+            if len(content) > result_max:
+                out[i] = dict(m, content=_collapse_text_middle(content, head_lines + 2,
+                                                                tail_lines + 1, result_max))
+        elif role == "assistant" and len(content) > asst_max:
+            out[i] = dict(m, content=_collapse_text_middle(content, head_lines + 2,
+                                                            tail_lines, asst_max // 6))
+    return out
 
 # ── Theme Registry (built-ins) ────────────────────────────
 register_theme("phosphor", primary="\x1b[92m", bright="\x1b[1;92m", dim="\x1b[2;32m", accent="\x1b[96m", warn="\x1b[93m", err="\x1b[91m", glow="\x1b[5;92m", bar="\x1b[42m")
@@ -4458,15 +4607,15 @@ def _register_extended_themes():
 # ── Model Providers ────────────────────────────────────────────
 
 # ── Provider Registry (built-ins) ──────────────────────
-register_provider("local", display_name="Local (llama.cpp)", api_base="http://127.0.0.1:8080", model="deepseek-v4-flash", description="Local llama.cpp server")
-register_provider("ollama", display_name="Ollama (localhost)", api_base="http://localhost:11434/v1", model="deepseek-v4-flash", description="Local Ollama server")
-register_provider("openai", display_name="OpenAI", api_base="https://api.openai.com/v1", model="gpt-4o", description="OpenAI GPT-4o (requires API key)")
-register_provider("anthropic", display_name="Anthropic", api_base="https://api.anthropic.com/v1", model="claude-sonnet-4-20250514", description="Anthropic Claude (requires API key)")
-register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", description="Groq fast inference")
-register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", description="Together AI inference")
-register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)")
-register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)")
-register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)")
+register_provider("local", display_name="Local (llama.cpp)", api_base="http://127.0.0.1:8080", model="deepseek-v4-flash", description="Local llama.cpp server", cache_support=None)
+register_provider("ollama", display_name="Ollama (localhost)", api_base="http://localhost:11434/v1", model="deepseek-v4-flash", description="Local Ollama server", cache_support=None)
+register_provider("openai", display_name="OpenAI", api_base="https://api.openai.com/v1", model="gpt-4o", cheap_model="gpt-4o-mini", description="OpenAI GPT-4o (requires API key)", cache_support="openai_auto")
+register_provider("anthropic", display_name="Anthropic", api_base="https://api.anthropic.com/v1", model="claude-sonnet-4-20250514", cheap_model="claude-3-haiku-20240307", description="Anthropic Claude (requires API key)", cache_support="anthropic")
+register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", cheap_model="llama-3.3-70b-versatile", description="Groq fast inference (free tier available)", cache_support=None)
+register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", cheap_model="meta-llama/Llama-3-8b-chat-hf", description="Together AI inference", cache_support=None)
+register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", cheap_model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)", cache_support=None)
+register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
+register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
 
 
 _T_CACHE = {}
@@ -5077,6 +5226,8 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     if _SESSION_COST > 0:
         cost_color = t['warn'] if _SESSION_COST >= 1.0 else t['dim']
         parts.append(f" {cost_color}${_SESSION_COST:.4f}{RST}")
+    if _SESSION_CACHE_HIT_TOKENS > 0:
+        parts.append(f" {t['accent']}cache:{_SESSION_CACHE_HIT_TOKENS:,}{RST}")
     sa_count = sum(1 for s in _SUBAGENTS.values() if not s.done)
     if sa_count > 0:
         parts.append(f" {t['warn']}SA:{sa_count}{RST}")
@@ -6435,7 +6586,18 @@ def cmd_result(cmd, output, success=True):
         print(f"  {DIM}... ({output.count(chr(10)) + 1} lines){RST}")
 
 # ── Quantum Entanglement Shared Context ─────────────────────
+# Purely in-memory, thread-safe shared KV cache for cross-agent state.
+# NOT persisted to disk: the main agent and all subagents share the single
+# module-level _quantum instance below via a threading.Lock. Charging this
+# to a file would introduce disk I/O latency and cross-thread races, which
+# defeats the "shared brain" design (see README: quantum context is in-memory).
 class QuantumContext:
+    """In-memory shared key-value context for all agents (main + subagents).
+
+    Thread-safe: all reads/writes are guarded by ``self._lock``. Holds no
+    reference to any on-disk file; state lives only for the process lifetime
+    and is intentionally not persisted across restarts.
+    """
     def __init__(self):
         self._data = {}
         self._lock = threading.Lock()
@@ -6802,12 +6964,12 @@ When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
 
 CROSS-PLATFORM RULES:
-1. Detect the OS first: uname -s when available, plus /sysinfo context. Targets include Linux, Android/Termux, ChromeOS/Crostini, WSL/WSL2, Docker/Podman/Kubernetes/CI containers, Proxmox, TrueNAS, pfSense, OPNsense, Unraid, SteamOS, macOS, BSD, Windows, SunOS/Solaris/illumos, AIX, HP-UX, IRIX, Tru64, Haiku, QNX/MINIX, Cygwin/MSYS2, IBM z/OS, IBM i PASE, OpenVMS, and embedded BusyBox systems. Also: Chromecast, Fire TV, Android TV, Wear OS smartwatches, AsteroidOS watches, Samsung Tizen/webOS TVs, Kindle, Kobo, reMarkable, Onyx Boox e-readers, Nintendo Switch/Wii/PS3 (Linux), Steam Deck, Tesla MCU, NAS (Synology/QNAP/WD), routers (OpenWrt/Turris/Fritz!Box/Mikrotik/GL.iNet), SBCs (Raspberry Pi/BeagleBone/Pine64/Odroid/Orange Pi/Radxa/Khadas/Libre Computer), MiSTer FPGA, WAGO PLC, and disposable IoT devices with embedded Linux.
-2. Use the system's actual package manager: apt/apt-get, dnf/microdnf/tdnf/yum, pacman, zypper, apk, rpm-ostree, swupd, opkg/ipkg, emerge, xbps-install, eopkg, slackpkg, guix, nix, brew/port, pkgin/pkg_add/pkg, Solaris pkg/pkgadd/pkgutil, swinstall, inst, setld, installp, pkgman, winget/choco/scoop. Prefer OS-native over universal ones.
-3. Use appropriate network command: ip/ss (modern Linux), busybox/ip/ifconfig/netstat (embedded), ifconfig/netstat (macOS/BSD/Solaris/old Unix), ipconfig/route/netstat/Get-NetAdapter (Windows). In containers/CI, check namespace and mounted filesystem limits before changing networking.
+1. Detect the OS first: uname -s (plus the /sysinfo context). Targets span Linux, Android/Termux, ChromeOS/Crostini, WSL, containers, macOS, BSD, Windows, classic Unix (Solaris/AIX/HP-UX/IRIX/QNX), Haiku, and embedded BusyBox/IoT/appliance/SBC/router/e-reader/console systems. The exact target is identified at runtime from /sysinfo — rely on that, not on a fixed list.
+2. Use the system's actual package manager — Debian/RPM (apt/dnf/yum), pacman, zypper, apk, opkg, emerge, xbps, nix, brew, Solaris/BSD pkg tools, or winget/choco/scoop on Windows. Detect which is present; prefer OS-native.
+3. Use appropriate network command: ip/ss (modern Linux), busybox/ifconfig/netstat (embedded), ifconfig/netstat (macOS/BSD/Solaris/old Unix), ipconfig/route/netstat/Get-NetAdapter (Windows). In containers/CI, check namespace and mounted filesystem limits before changing networking.
 4. Prefer POSIX sh syntax on unknown Unix, embedded systems, containers, Solaris, AIX, HP-UX, IRIX, Tru64, QNX, and appliance/NAS platforms. Avoid GNU-only flags unless GNU tools are detected.
 5. On appliances and immutable systems (Proxmox, TrueNAS, pfSense, OPNsense, Unraid, SteamOS, Fedora CoreOS/Silverblue/Kinoite, Clear Linux), inspect documentation/tooling first and avoid host storage/network changes unless explicitly requested.
-6. For root access on Linux: echo "$ROOT_PASS" | su -c "command" or use sudo. For BSD/old Unix: su root -c "command". For macOS: sudo command. On Windows, use PowerShell or cmd; avoid Unix-only utilities unless in Cygwin/MSYS/WSL.
+6. For root access: Linux — echo "$ROOT_PASS" | su -c "command" or sudo; BSD/old Unix — su root -c "command"; macOS — sudo; Windows — PowerShell or cmd (avoid Unix-only utils unless in Cygwin/MSYS/WSL).
 
 GENERAL RULES:
 1. ALWAYS run commands to investigate — don't just suggest them. You have full shell access.
@@ -6820,6 +6982,253 @@ GENERAL RULES:
 8. For complex tasks, decompose: use /spawn for independent subtasks, /delegate for sequential ones.
 9. The operator can press Escape to stop you mid-execution. If interrupted, assess the interjection and continue.
 10. Sessions auto-save. You can /remember key findings so future sessions can /recall them."""
+
+def _resolve_cache_support(provider=None, api_base=None):
+    """Return the prompt-cache mode for the current (or given) provider.
+
+    Modes:
+      "anthropic"    — native Anthropic Messages API (cache_control on content blocks)
+      "openai_auto"  — OpenAI automatic prefix caching (response-only; no request changes)
+      "deepseek_auto"— DeepSeek automatic context caching (response-only)
+      None           — provider has no prompt caching
+    """
+    prov = provider if provider is not None else Config.PROVIDER
+    reg = PROVIDER_REGISTRY.get(prov, {})
+    mode = reg.get("cache_support")
+    if mode:
+        return mode
+    # Infer from API base for custom providers that point at a known host
+    base = (api_base if api_base is not None else Config.API_BASE or "").lower()
+    if "api.anthropic.com" in base:
+        return "anthropic"
+    if "api.openai.com" in base:
+        return "openai_auto"
+    if "api.deepseek.com" in base:
+        return "deepseek_auto"
+    return None
+
+# ── Anthropic native Messages API (with prompt caching) ──────────────────
+# Anthropic's native API (/v1/messages) differs from the OpenAI-compatible
+# /v1/chat/completions endpoint used by every other provider: it uses an
+# x-api-key header, a top-level "system" field, content blocks, and explicit
+# cache_control markers for prompt caching. When the provider's cache_support
+# is "anthropic" we route requests here so caching actually applies. For all
+# other providers we keep the OpenAI-compatible path unchanged.
+
+ANTHROPIC_API_VERSION = "2023-06-01"
+
+def _build_anthropic_headers(api_key):
+    """Headers for the native Anthropic Messages API (x-api-key auth)."""
+    h = {
+        "Content-Type": "application/json",
+        "User-Agent": PRISM32_USER_AGENT,
+        "Accept": "application/json",
+        "anthropic-version": ANTHROPIC_API_VERSION,
+    }
+    if api_key:
+        h["x-api-key"] = api_key
+    return h
+
+def _flatten_content(content):
+    """Normalize a message content field to a plain string."""
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", ""))
+            else:
+                parts.append(str(block))
+        return "".join(parts)
+    return "" if content is None else str(content)
+
+def _build_anthropic_payload(messages, model, stream):
+    """Convert OpenAI-style messages into an Anthropic /v1/messages payload,
+    adding ephemeral prompt-cache markers on the system prompt and the oldest
+    user turn (which anchors the cached conversation prefix)."""
+    system_parts = []
+    conv = []
+    for m in messages:
+        role = m.get("role", "user")
+        if role == "system":
+            text = _flatten_content(m.get("content", ""))
+            if text.strip():
+                system_parts.append(text)
+        else:
+            text = _flatten_content(m.get("content", ""))
+            # Anthropic only accepts user/assistant roles
+            if role not in ("user", "assistant"):
+                role = "user"
+            conv.append({"role": role, "content": text})
+    system_text = "\n\n".join(system_parts)
+
+    payload = {
+        "model": model,
+        "max_tokens": Config.MAX_RESPONSE_TOKENS,
+        "temperature": Config.TEMPERATURE,
+        "messages": conv,
+        "stream": bool(stream if stream is not None else Config.STREAM),
+    }
+    if Config.PROMPT_CACHING:
+        if system_text:
+            # Cache the system prompt as a content block with an ephemeral cache marker
+            payload["system"] = [
+                {"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}
+            ]
+        # Anchor the cached prefix at the oldest user message so subsequent turns
+        # reuse the conversation history without re-billing the full context.
+        for m in payload["messages"]:
+            if m.get("role") == "user" and isinstance(m.get("content"), str) and m["content"].strip():
+                m["content"] = [
+                    {"type": "text", "text": m["content"], "cache_control": {"type": "ephemeral"}}
+                ]
+                break
+    else:
+        if system_text:
+            payload["system"] = system_text
+    return payload
+
+def _normalize_anthropic_usage(usage):
+    """Normalize Anthropic usage into the OpenAI-style shape that _track_usage
+    understands, while preserving Anthropic cache fields."""
+    if not usage:
+        return {}
+    return {
+        "prompt_tokens": usage.get("input_tokens", 0) or 0,
+        "completion_tokens": usage.get("output_tokens", 0) or 0,
+        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0) or 0,
+        "cache_creation_input_tokens": usage.get("cache_creation_input_tokens", 0) or 0,
+    }
+
+class _AnthropicToOpenAIStream:
+    """Adapt an Anthropic SSE response into OpenAI-style 'data: ' SSE lines so
+    stream_response() can render it unchanged (including reasoning/thinking deltas)."""
+
+    def __init__(self, resp):
+        self._resp = resp
+
+    def __iter__(self):
+        in_tok = cache_read = cache_create = 0
+        out_tok = 0
+        done_sent = False
+        for line in self._resp:
+            line = line.decode('utf-8', errors='ignore').strip() if isinstance(line, (bytes, bytearray)) else str(line).strip()
+            if not line or not line.startswith('data:'):
+                continue
+            data = line[5:].strip() if line.startswith('data: ') else line[4:].strip()
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            etype = chunk.get('type', '')
+            if etype == 'message_start':
+                u = chunk.get('message', {}).get('usage', {})
+                in_tok = u.get('input_tokens', 0) or 0
+                cache_read = u.get('cache_read_input_tokens', 0) or 0
+                cache_create = u.get('cache_creation_input_tokens', 0) or 0
+            elif etype == 'content_block_delta':
+                delta = chunk.get('delta', {})
+                dtype = delta.get('type', '')
+                if dtype == 'text_delta':
+                    text = delta.get('text', '')
+                    if text:
+                        yield ('data: ' + json.dumps({"choices": [{"delta": {"content": text}, "index": 0}]}) + '\n\n').encode('utf-8')
+                elif dtype == 'thinking_delta':
+                    th = delta.get('thinking', '')
+                    if th:
+                        yield ('data: ' + json.dumps({"choices": [{"delta": {"reasoning_content": th}, "index": 0}]}) + '\n\n').encode('utf-8')
+            elif etype == 'message_delta':
+                u = chunk.get('usage', {})
+                out_tok = u.get('output_tokens', out_tok) or out_tok
+            elif etype == 'message_stop':
+                norm = _normalize_anthropic_usage({
+                    "input_tokens": in_tok,
+                    "output_tokens": out_tok,
+                    "cache_read_input_tokens": cache_read,
+                    "cache_creation_input_tokens": cache_create,
+                })
+                yield ('data: ' + json.dumps({"choices": [{"delta": {}, "index": 0}], "usage": norm}) + '\n\n').encode('utf-8')
+                yield b'data: [DONE]\n\n'
+                done_sent = True
+                return
+        if not done_sent:
+            norm = _normalize_anthropic_usage({
+                "input_tokens": in_tok,
+                "output_tokens": out_tok,
+                "cache_read_input_tokens": cache_read,
+                "cache_creation_input_tokens": cache_create,
+            })
+            yield ('data: ' + json.dumps({"choices": [{"delta": {}, "index": 0}], "usage": norm}) + '\n\n').encode('utf-8')
+            yield b'data: [DONE]\n\n'
+
+def _stream_anthropic_native(resp, cancel_event=None):
+    """Stream a native Anthropic response, reusing the OpenAI stream renderer."""
+    return stream_response(_AnthropicToOpenAIStream(resp), cancel_event=cancel_event)
+
+def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event, _api_base, _api_key, _model):
+    """Send a request to Anthropic's native /v1/messages endpoint with prompt
+    caching markers applied. Handles both streaming and non-streaming responses
+    and normalizes usage into the shared _track_usage() format."""
+    _base = normalize_api_base(_api_base)
+    url = f"{_base}/v1/messages"
+    payload = _build_anthropic_payload(message_list, _model, stream)
+    last_error = ""
+    for attempt in range(retry + 1):
+        if agent_cancel_requested(cancel_event):
+            return AGENT_CANCELLED_RESPONSE
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode(),
+                headers=_build_anthropic_headers(_api_key),
+            )
+            with urlopen_with_ssl(req, timeout=600) as resp:
+                if stream if stream is not None else Config.STREAM:
+                    return _stream_anthropic_native(resp, cancel_event=cancel_event)
+                data = json.loads(resp.read().decode())
+                if agent_cancel_requested(cancel_event):
+                    return AGENT_CANCELLED_RESPONSE
+                _track_usage(_normalize_anthropic_usage(data.get('usage', {})))
+                content = data.get('content', [])
+                if isinstance(content, list) and content:
+                    parts = []
+                    for block in content:
+                        if isinstance(block, dict) and block.get('type') == 'text':
+                            parts.append(block.get('text', ''))
+                    return ''.join(parts)
+                return ''
+        except urllib.error.HTTPError as e:
+            if agent_cancel_requested(cancel_event):
+                return AGENT_CANCELLED_RESPONSE
+            body = e.read().decode('utf-8', errors='replace')[:500]
+            if e.code == 401:
+                last_error = "[HTTP ERROR 401] Anthropic auth failed. Set a valid API key via /provider key or --api-key"
+                learn_error(last_error, f"HTTP 401: {body[:100]}")
+            else:
+                last_error = f"[HTTP ERROR {e.code}] {body}"
+            if e.code in (400, 413, 429, 503) and attempt < retry:
+                delay = base_delay * (2 ** attempt)
+                viz.status(f"API error {e.code}, retrying in {delay}s...", "warning")
+                time.sleep(delay)
+                continue
+            break
+        except (urllib.error.URLError, ConnectionError, TimeoutError) as e:
+            if agent_cancel_requested(cancel_event):
+                return AGENT_CANCELLED_RESPONSE
+            last_error = f"[NETWORK ERROR] {e}"
+            learn_error(str(e), "network")
+            if attempt < retry:
+                delay = base_delay * (2 ** attempt)
+                viz.status(f"Network error, retrying in {delay}s...", "warning")
+                time.sleep(delay)
+                continue
+            break
+        except Exception as e:
+            if agent_cancel_requested(cancel_event):
+                return AGENT_CANCELLED_RESPONSE
+            last_error = f"[ERROR] {e}"
+            learn_error(str(e), "ask_ai (anthropic) exception")
+            break
+    return last_error
 
 def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             api_base=None, api_key=None, model=None):
@@ -6841,7 +7250,20 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
     
     # Trim history if too large (use model's actual context window)
     clean_messages = trim_history(clean_messages, Config.resolve_context_window())
-    
+    # Compress verbose tool results in older turns on EVERY call (not just at
+    # the 75% trim threshold). Cuts re-sent token volume — biggest per-request
+    # cost saver. Non-destructive: builds a fresh list, recent turns untouched.
+    clean_messages = compress_tool_turns(clean_messages)
+    # Native Anthropic Messages API path: enables real prompt caching via
+    # cache_control markers on the system prompt + oldest user turn. Used
+    # whenever the active provider is Anthropic-native (its API only exposes
+    # /v1/messages, not OpenAI's /v1/chat/completions). PROMPT_CACHING only
+    # toggles the cache_control markers (handled in _build_anthropic_payload),
+    # not the endpoint routing, so Anthropic stays correct even when disabled.
+    if _resolve_cache_support(api_base=_api_base) == "anthropic":
+        return _ask_anthropic_native(clean_messages, stream, retry, base_delay,
+                                     cancel_event, _api_base, _api_key, _model)
+
     _base = normalize_api_base(_api_base)
     url = f"{_base}/v1/chat/completions"
     payload = {
@@ -7449,6 +7871,11 @@ def get_cmd_help():
  {bold}Configuration{reset}
    /agentname <name>    Set the name shown before assistant responses
    /provider [name]    Switch provider (add|rm|api|key|list subcommands)
+    /set api_base <url>  Set a custom API base URL (preserved when switching providers)
+    /set api_base reset  Revert API base to the current provider's default
+    /set subagent_model <m>  Use a cheaper/faster model for subagents (clear = main)
+    /set max_context_tokens <n>  Cap context budget (auto = model window)
+    /set context_compress_keep <n>  Recent turns kept verbatim before compressing
    /stream [on|off]     Toggle streaming AI responses
    /temperature <0-2>   Set AI temperature (default 0.7)
    /thinking <off|l|m|h> Set reasoning effort (off/low/medium/high)
@@ -7460,6 +7887,7 @@ def get_cmd_help():
     /subagent-model [m]  Show/set default subagent model (/sam <m>)
     /rootpass <pw>       Set root password ($ROOT_PASS env for su/sudo)
     /verify-ssl [on|off] Toggle HTTPS certificate verification
+    /prompt_caching [on|off] Toggle provider prompt caching (Anthropic/OpenAI/DeepSeek)
     /json <file>          Read/pretty-print JSON files (smart summary for large)
                           Use: /json file.json --key data.users --compact
 
@@ -8092,6 +8520,7 @@ def main():
         Config.MODEL = args.model
     if args.api:
         Config.API_BASE = args.api
+        Config.CUSTOM_API_BASE = True  # explicit CLI override; protect from provider defaults
     if args.turbo:
         Config.SLOW_CPU = False
         Config.STREAM = True
@@ -8444,14 +8873,14 @@ def main():
                     else:
                         print(f"  Usage: provider rm <name>")
                 elif subcmd == 'api':
-                    url = parts[1].split()[0] if len(parts) > 1 and parts[1].split() else ""
-                    if url:
-                        Config.API_BASE = url
-                        Config.save_config()
-                        print(f"  {t['bright']}+ API set to: {url}{RST}")
+                    arg = parts[1].strip() if len(parts) > 1 else ""
+                    if arg.lower() in ('reset', 'clear', 'default'):
+                        reset_api_base()
+                    elif arg:
+                        set_custom_api_base(arg)
                     else:
-                        print(f"  Current API: {t['bright']}{Config.API_BASE}{RST}")
-                        print(f"  Usage: provider api <url>")
+                        show_api_base()
+                        print(f"  {t['dim']}Subcommands: {t['bright']}/provider api <url>{RST}{t['dim']} | {t['bright']}/provider api reset{RST}")
                 elif subcmd == 'key':
                     key = parts[1].strip() if len(parts) > 1 else ""
                     if key:
@@ -8539,6 +8968,115 @@ def main():
                 Config.save_config()
             else:
                 cmd_model_list(history, cmd_log)
+            continue
+
+        if cmd == 'set':
+            # /set <key> [value]  — adjust runtime config without long commands.
+            set_parts = args_str.split(None, 1) if args_str else []
+            set_key = set_parts[0].lower() if set_parts else ""
+            set_val = set_parts[1].strip() if len(set_parts) > 1 else ""
+            _set_usage = (f"  {t['dim']}Settings: api_base, model, subagent_model,"
+                          f" max_context_tokens, context_recent_floor,"
+                          f" context_compress_keep, temperature, prompt_caching{RST}")
+            if set_key in ('api_base', 'apibase', 'api', 'base', 'url'):
+                if set_val.lower() in ('reset', 'clear', 'default'):
+                    reset_api_base()
+                elif set_val:
+                    set_custom_api_base(set_val)
+                else:
+                    show_api_base()
+            elif set_key in ('subagent_model', 'subagent', 'sam_model', 'sa_model'):
+                # /set subagent_model <name> | /set subagent_model clear  (uses main model)
+                if not set_val or set_val.lower() in ('clear', 'none', 'reset', 'default'):
+                    Config.SUBAGENT_MODEL = ""
+                    print(f"  {t['bright']}+ Subagent model cleared (uses main model: {Config.MODEL}){RST}")
+                    Config.save_config()
+                else:
+                    Config.SUBAGENT_MODEL = set_val
+                    print(f"  {t['bright']}+ Subagent model set to: {set_val}{RST}")
+                    print(f"  {t['dim']}Subagents will use this cheaper/faster model instead of the main model.{RST}")
+                    Config.save_config()
+            elif set_key == 'model':
+                if set_val:
+                    Config.MODEL = set_val
+                    print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
+                    Config.save_config()
+                else:
+                    print(f"  {t['dim']}Model: {Config.MODEL}{RST}")
+            elif set_key in ('max_context_tokens', 'max_context', 'context_tokens'):
+                if not set_val:
+                    cur = Config.MAX_CONTEXT_TOKENS
+                    print(f"  {t['dim']}max_context_tokens: {cur}{' (auto-detect)' if cur == 0 else ''}{RST}")
+                elif set_val.lower() in ('auto', 'reset', '0'):
+                    Config.MAX_CONTEXT_TOKENS = 0
+                    print(f"  {t['bright']}+ max_context_tokens: auto-detect ({Config.resolve_context_window()}){RST}")
+                    Config.save_config()
+                else:
+                    try:
+                        v = int(set_val)
+                        if v > 0:
+                            Config.MAX_CONTEXT_TOKENS = v
+                            print(f"  {t['bright']}+ max_context_tokens: {v} (budget {Config.resolve_context_window()}){RST}")
+                            Config.save_config()
+                        else:
+                            print(f"  {t['err']}Value must be > 0 (or 'auto'){RST}")
+                    except ValueError:
+                        print(f"  {t['err']}Not a number: {set_val}{RST}")
+            elif set_key in ('context_recent_floor', 'recent_floor'):
+                if not set_val:
+                    print(f"  {t['dim']}context_recent_floor: {Config.CONTEXT_RECENT_FLOOR}{RST}")
+                else:
+                    try:
+                        Config.CONTEXT_RECENT_FLOOR = max(1000, int(set_val))
+                        print(f"  {t['bright']}+ context_recent_floor: {Config.CONTEXT_RECENT_FLOOR}{RST}")
+                        Config.save_config()
+                    except ValueError:
+                        print(f"  {t['err']}Not a number: {set_val}{RST}")
+            elif set_key in ('context_compress_keep', 'compress_keep'):
+                if not set_val:
+                    print(f"  {t['dim']}context_compress_keep: {Config.CONTEXT_COMPRESS_KEEP}{RST}")
+                else:
+                    try:
+                        Config.CONTEXT_COMPRESS_KEEP = max(0, int(set_val))
+                        print(f"  {t['bright']}+ context_compress_keep: {Config.CONTEXT_COMPRESS_KEEP}{RST}")
+                        Config.save_config()
+                    except ValueError:
+                        print(f"  {t['err']}Not a number: {set_val}{RST}")
+            elif set_key in ('temperature', 'temp'):
+                if not set_val:
+                    print(f"  {t['dim']}temperature: {Config.TEMPERATURE}{RST}")
+                else:
+                    try:
+                        Config.TEMPERATURE = max(0.0, min(2.0, float(set_val)))
+                        print(f"  {t['bright']}+ temperature: {Config.TEMPERATURE}{RST}")
+                        Config.save_config()
+                    except ValueError:
+                        print(f"  {t['err']}Not a number: {set_val}{RST}")
+            elif set_key in ('prompt_caching', 'cache', 'caching'):
+                # /set prompt_caching on|off  — toggles provider prompt caching
+                if not set_val:
+                    mode = _resolve_cache_support() or "none"
+                    state = 'on' if Config.PROMPT_CACHING else 'off'
+                    print(f"  Prompt caching: {t['bright']}{state}{RST}  {t['dim']}(provider mode: {mode}){RST}")
+                elif set_val.lower() in ('on', 'true', '1', 'yes'):
+                    Config.PROMPT_CACHING = True
+                    Config.save_config()
+                    print(f"  {t['bright']}+ Prompt caching: ON{RST}")
+                elif set_val.lower() in ('off', 'false', '0', 'no'):
+                    Config.PROMPT_CACHING = False
+                    Config.save_config()
+                    print(f"  {t['warn']}+ Prompt caching: OFF{RST}")
+                else:
+                    print(f"  {t['dim']}Usage: /set prompt_caching on|off{RST}")
+            elif set_key:
+                print(f"  {t['dim']}Unknown setting: {set_key}{RST}")
+                print(_set_usage)
+                print(f"  {t['dim']}Usage: /set <key> <value>{RST}")
+            else:
+                show_api_base()
+                print(_set_usage)
+                print(f"  {t['dim']}Usage: /set <key> <value>  (e.g. /set subagent_model gpt-4o-mini){RST}")
+            print()
             continue
 
         if cmd == 'plugins':
@@ -8943,6 +9481,32 @@ def main():
             print()
             continue
 
+        if cmd in ('prompt_caching', 'caching', 'cache'):
+            # /prompt_caching on|off — toggle provider prompt caching
+            # (Anthropic cache_control, OpenAI auto-cache, DeepSeek cache hits)
+            if args_str:
+                val = args_str.strip().lower()
+                if val in ('on', 'true', '1', 'yes'):
+                    Config.PROMPT_CACHING = True
+                    Config.save_config()
+                    print(f"  {t['bright']}+ Prompt caching: ON{RST}")
+                elif val in ('off', 'false', '0', 'no'):
+                    Config.PROMPT_CACHING = False
+                    Config.save_config()
+                    print(f"  {t['warn']}+ Prompt caching: OFF{RST}")
+                else:
+                    print(f"  {t['dim']}Usage: /prompt_caching on|off{RST}")
+            else:
+                mode = _resolve_cache_support() or "none"
+                state = t['bright'] + 'ON' if Config.PROMPT_CACHING else t['warn'] + 'OFF'
+                print(f"  Prompt caching: {state}{RST}")
+                print(f"  {t['dim']}Provider cache mode: {mode}{RST}")
+                if _SESSION_CACHE_HIT_TOKENS > 0:
+                    print(f"  {t['dim']}Session cache reads: {_SESSION_CACHE_HIT_TOKENS:,}  saved ${_SESSION_CACHE_SAVINGS:.4f}{RST}")
+                print(f"  {t['dim']}Usage: /prompt_caching on|off{RST}")
+            print()
+            continue
+
         if cmd in ('maxhistory', 'history-limit'):
             if args_str:
                 try:
@@ -9075,6 +9639,19 @@ def main():
                 f"  Total tokens:  {t['bright']}{total_t:,}{RST}",
                 f"  Session cost:  {t['warn']}${_SESSION_COST:.4f}{RST}",
             ]
+            cache_mode = _resolve_cache_support()
+            if cache_mode:
+                label = {"anthropic": "Anthropic cache_control",
+                         "openai_auto": "OpenAI auto-cache",
+                         "deepseek_auto": "DeepSeek auto-cache"}.get(cache_mode, cache_mode)
+                lines.append(f"  Cache mode:   {t['dim']}{label}{' (on)' if Config.PROMPT_CACHING else ' (off)'}{RST}")
+            if _SESSION_CACHE_HIT_TOKENS > 0 or _SESSION_CACHE_CREATION_TOKENS > 0:
+                lines.append(f"  Cache reads:  {t['accent']}{_SESSION_CACHE_HIT_TOKENS:,}{RST}")
+                if _SESSION_CACHE_CREATION_TOKENS > 0:
+                    lines.append(f"  Cache writes: {t['dim']}{_SESSION_CACHE_CREATION_TOKENS:,}{RST}")
+                lines.append(f"  Saved:        {t['ok']}${_SESSION_CACHE_SAVINGS:.4f}{RST}")
+            elif cache_mode:
+                lines.append(f"  {t['dim']}(no cache hits yet this session){RST}")
             if in_rate == 0 and out_rate == 0:
                 lines.append(f"  {t['dim']}(local/free model — no cost){RST}")
             box("SESSION COST", "\n".join(lines), "accent")
@@ -9423,16 +10000,24 @@ def main():
             continue
 
         if cmd == 'config':
+            _ctx_budget = Config.resolve_context_window()
+            _ctx_used = sum(_msg_tokens(m) for m in history) if history else 0
+            _ctx_pct = min(999, int(_ctx_used / _ctx_budget * 100)) if _ctx_budget > 0 else 0
+            _cheap = ""
+            _prov_reg = PROVIDER_REGISTRY.get(Config.PROVIDER, {})
+            if _prov_reg.get("cheap_model"):
+                _cheap = f"  {t['dim']}(cheap: {_prov_reg['cheap_model']}){RST}"
             lines = [
                 f" Agent name: {Config.AGENT_NAME}",
                  f" Model:      {Config.MODEL}",
-                f" API:        {Config.API_BASE}",
+                f" API:        {Config.API_BASE}{' (custom)' if Config.CUSTOM_API_BASE else ''}",
                 f" API Key:    {'<set>' if Config.API_KEY else '<not set>'}",
                 f" Theme:      {Config.THEME}",
-                f" Provider:   {Config.PROVIDER}",
+                f" Provider:   {Config.PROVIDER}{_cheap}",
                 f" Temp:       {Config.TEMPERATURE}",
                 f" Max tokens: {Config.MAX_RESPONSE_TOKENS}",
-                f" Context:     {t['dim']}{Config.resolve_context_window()}{RST}",
+                f" Context budget: {t['dim']}{_ctx_budget}{RST}   used: {t['dim']}~{_ctx_used} ({_ctx_pct}%){RST}",
+                f" Max ctx cap: {Config.MAX_CONTEXT_TOKENS or 'auto'}   recent floor: {Config.CONTEXT_RECENT_FLOOR}   compress keep: {Config.CONTEXT_COMPRESS_KEEP}",
                 f" History:    {Config.MAX_HISTORY}",
                 f" Timeout:    {Config.CMD_TIMEOUT}s",
                 f" Goal steps: {Config.GOAL_MAX_STEPS}",
@@ -9811,8 +10396,9 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
     t = T()
     _saved = {}
     if provider and provider in PROVIDER_REGISTRY:
-        _saved = {"base": Config.API_BASE, "model": Config.MODEL, "key": Config.API_KEY}
+        _saved = {"base": Config.API_BASE, "model": Config.MODEL, "key": Config.API_KEY, "custom": Config.CUSTOM_API_BASE}
         Config.API_BASE = PROVIDER_REGISTRY[provider]["api_base"]
+        Config.CUSTOM_API_BASE = False  # browsing uses the provider's real base
         if PROVIDER_REGISTRY[provider].get("default_key"):
             Config.API_KEY = PROVIDER_REGISTRY[provider]["default_key"]
     
@@ -9823,6 +10409,7 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
             Config.API_BASE = _saved["base"]
             Config.MODEL = _saved["model"]
             Config.API_KEY = _saved["key"]
+            Config.CUSTOM_API_BASE = _saved["custom"]
         viz.status(f"Failed to fetch models: {e}", "error")
         return
 
@@ -9834,6 +10421,34 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
         else:
             viz.status("No models returned by API. Check connection or API key.", "warning")
         return
+
+    # Cost-saving suggestion: surface the provider's cheap model for subagents.
+    _prov_name_for_tip = provider if provider else Config.PROVIDER
+    _reg_for_tip = PROVIDER_REGISTRY.get(_prov_name_for_tip, {})
+    _cheap_for_tip = _reg_for_tip.get("cheap_model")
+    if _cheap_for_tip and _cheap_for_tip.lower() != (Config.MODEL or "").lower():
+        _cur_in, _cur_out = _get_model_pricing()
+        _ch_in = _ch_out = None
+        _cl = _cheap_for_tip.lower()
+        if _cl in _MODEL_PRICING:
+            _ch_in, _ch_out = _MODEL_PRICING[_cl]
+        else:
+            for _k, _v in _MODEL_PRICING.items():
+                if _k in _cl or _cl in _k:
+                    _ch_in, _ch_out = _v
+                    break
+        _fmt_p = lambda v: "free" if v == 0 else f"${v:.5f}"
+        if _ch_in is not None:
+            _saving = 0.0
+            if (_cur_in + _cur_out) > 0 and (_ch_in + _ch_out) < (_cur_in + _cur_out):
+                try:
+                    _saving = (1.0 - (_ch_in + _ch_out) / (_cur_in + _cur_out)) * 100.0
+                except Exception:
+                    _saving = 0.0
+            _save_txt = f"  {t['dim']}(~{_saving:.0f}% cheaper than current model){RST}" if _saving > 1 else ""
+            print(f"\n  {t['accent']}Cost-saving tip:{RST} use {t['bright']}{_cheap_for_tip}{RST}"
+                  f" {t['dim']}({_fmt_p(_ch_in)}/{_fmt_p(_ch_out)}/1K in/out){RST}{_save_txt}")
+            print(f"  {t['dim']}Assign it to subagents: /set subagent_model {_cheap_for_tip}{RST}")
 
     models.sort(key=lambda m: m["id"].lower())
     page_size = 30
@@ -9881,6 +10496,7 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
                 Config.API_BASE = _saved["base"]
                 Config.MODEL = _saved["model"]
                 Config.API_KEY = _saved["key"]
+                Config.CUSTOM_API_BASE = _saved["custom"]
             break
         if sel == 'n':
             if page < total_pages - 1:
@@ -9926,6 +10542,49 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
 
 # ── Provider Commands ────────────────────────────────────────────
 
+def set_custom_api_base(url):
+    """Explicitly set a custom API base URL and mark it as user-overridden.
+
+    A custom URL is preserved across provider switches until cleared with
+    reset_api_base() (via '/provider api reset' or '/set api_base reset').
+    """
+    t = T()
+    url = (url or "").strip()
+    if not url:
+        viz.status("No URL provided. Usage: /set api_base <url>", "error")
+        return False
+    Config.API_BASE = url
+    Config.CUSTOM_API_BASE = True
+    Config.save_config()
+    print(f"  {t['bright']}+ API base set to: {url}{RST}")
+    print(f"  {t['dim']}This custom URL is preserved when switching providers.{RST}")
+    print(f"  {t['dim']}Reset to a provider default with: {t['bright']}/provider api reset{RST}")
+    return True
+
+def reset_api_base():
+    """Clear a user-set custom API base URL and revert to the current provider's default."""
+    t = T()
+    prov = PROVIDER_REGISTRY.get(Config.PROVIDER, {})
+    default_base = prov.get("api_base", Config.API_BASE)
+    Config.API_BASE = default_base
+    Config.CUSTOM_API_BASE = False
+    Config.save_config()
+    print(f"  {t['bright']}+ Custom API base cleared.{RST}")
+    print(f"  {t['dim']}Reverted to {Config.PROVIDER} default: {default_base}{RST}")
+    return True
+
+def show_api_base():
+    """Display the current API base URL and whether it's a custom override."""
+    t = T()
+    tag = f" {t['bright']}(custom){RST}" if Config.CUSTOM_API_BASE else ""
+    print(f"  API base: {t['bright']}{Config.API_BASE}{RST}{tag}")
+    if Config.CUSTOM_API_BASE:
+        print(f"  {t['dim']}Provider: {Config.PROVIDER} (custom URL overrides provider default){RST}")
+    else:
+        print(f"  {t['dim']}Provider: {Config.PROVIDER}{RST}")
+    print(f"  {t['dim']}Usage: /set api_base <url>  |  /set api_base reset{RST}")
+    return True
+
 def cmd_provider_list():
     """List all available providers."""
     t = T()
@@ -9953,16 +10612,26 @@ def cmd_provider_set(provider_name):
         return False
     
     prov = PROVIDER_REGISTRY[provider_name]
+    switching = provider_name != Config.PROVIDER
     Config.PROVIDER = provider_name
-    Config.API_BASE = prov.get("api_base", Config.API_BASE)
+    # Preserve a user-set custom API base URL; do NOT let provider defaults clobber it.
+    if Config.CUSTOM_API_BASE:
+        if switching:
+            label = prov.get('display_name', prov.get('name', ''))
+            viz.status(f"Switched to: {label} (custom API base preserved)", "success")
+            print(f"   {t['dim']}API: {t['bright']}{Config.API_BASE}{RST} {t['bright']}(custom){RST}")
+            print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
+            print(f"   {t['dim']}To use {label}'s default API: {t['bright']}/provider api reset{RST}")
+        # else: re-selecting current provider, custom URL stays as-is
+    else:
+        Config.API_BASE = prov.get("api_base", Config.API_BASE)
+        viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
+        print(f"   {t['dim']}API: {Config.API_BASE}{RST}")
+        print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
     # Only suggest a default model if user hasn't set one; never overwrite their choice
     if not Config.MODEL:
         Config.MODEL = prov.get("model", Config.MODEL)
     Config.save_config()
-    
-    viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
-    print(f"   {t['dim']}API: {Config.API_BASE}{RST}")
-    print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
     
     needs_key = not Config.API_KEY and not prov.get("default_key")
     if needs_key:
