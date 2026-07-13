@@ -4843,7 +4843,7 @@ def activity_vector(history=None, frame=0, busy=False):
         chars = "".join(wave[(frame + i) % len(wave)] for i in range(width))
         color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['accent'])
         return f"{color}{chars}{RST}"
-    return f"{t['dim']}{'░' * width}{RST}"
+    return f"{t['dim']}{'▪' * width}{RST}"
 
 def draw_footer(status_bar, spin_char=None):
     """Draw the footer at the bottom of the screen."""
@@ -4853,7 +4853,7 @@ def draw_footer(status_bar, spin_char=None):
     indicator = spin_char if spin_char is not None else activity_vector()
     with stdout_lock:
         clear_footer()
-        sys.stdout.write(f"{status_bar} {indicator} {t['primary']}>{RST} ")
+        sys.stdout.write(f"{status_bar} {indicator} {t['primary']}▶{RST} ")
         sys.stdout.flush()
 
 # ── Footer Animator (background animated indicator) ──────────
@@ -4874,7 +4874,7 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
     if _INTERJECTION_HAS_TYPED:
         buf = _INTERJECTION_BUF
         cur = _INTERJECTION_CURSOR
-        prefix = f" {t['bright']}interject>{RST} "
+        prefix = f" {t['bright']}interject▶{RST} "
         prefix_len = len(strip_ansi(prefix))
         max_text = max(0, cols - prefix_len - 1)
         display_buf = buf if len(buf) <= max_text else buf[:max_text-1] + "\u2026"
@@ -4893,7 +4893,7 @@ def _render_footer(state="busy", history=None, tool_name="", frame=None, busy=No
         else:
             indicator = activity_vector(history=history)
         bar = build_status_bar(history=history or _FOOTER_HISTORY_REF, include_indicator=False)
-        content = f"{bar} {indicator} {t['primary'] if not busy else t['dim']}>{RST} {CLR_LINE}"
+        content = f"{bar} {indicator} {t['primary'] if not busy else t['dim']}▶{RST} {CLR_LINE}"
 
     # Skip redundant redraws (avoids cursor flicker and scroll snap)
     if content == _LAST_RENDERED_FOOTER:
@@ -4957,7 +4957,7 @@ def read_footer_input(status_bar):
     t = T()
     tw = _terminal_width()
     # Ensure prompt leaves room for typing: cap prompt to ~60% of terminal width
-    prompt_prefix = f" {t['primary']}>{RST} "
+    prompt_prefix = f" {t['primary']}▶{RST} "
     prefix_vis = len(strip_ansi(prompt_prefix))
     max_bar_vis = max(8, tw - prefix_vis - int(tw * 0.35))
     bar_vis = len(strip_ansi(status_bar))
@@ -5244,27 +5244,28 @@ def rl_prompt(text):
     return re.sub(r'(\x1b\[[0-9;?]*[a-zA-Z])', '\x01\\1\x02', text)
 
 def build_status_bar(spin_char=None, history=None, include_indicator=False):
-    """Build the bottom status bar: Prism32 MDS: <ctx%> <cost> <thinking> <sa> <spin> > """
+    """Build the bottom status bar: Prism32 ◈ Ctx 42% ◈ $0.0042 ◈ SA:2 ◈ Q ◈ ▶"""
     t = T()
-    parts = [f" {t['bright']}Prism32{RST} {t['dim']}MDS{RST}:"]
+    parts = [f" {t['bright']}Prism32{RST}"]
     if Config.THINKING_EFFORT:
         parts.append(f"{t['dim']}{Config.THINKING_EFFORT}{RST}")
     ctx = context_pct(history) if history else 0
     if ctx > 0:
         ctx_color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['dim'])
-        parts.append(f" {ctx_color}Ctx {ctx}%{RST}")
+        parts.append(f"{ctx_color}Ctx {ctx}%{RST}")
     if _SESSION_COST > 0:
         cost_color = t['warn'] if _SESSION_COST >= 1.0 else t['dim']
-        parts.append(f" {cost_color}${_SESSION_COST:.4f}{RST}")
+        parts.append(f"{cost_color}${_SESSION_COST:.4f}{RST}")
     sa_count = sum(1 for s in _SUBAGENTS.values() if not s.done)
     if sa_count > 0:
-        parts.append(f" {t['warn']}SA:{sa_count}{RST}")
+        parts.append(f"{t['warn']}SA:{sa_count}{RST}")
     if _quantum.was_used():
-        parts.append(f" {t['accent']}Q{RST}")
+        parts.append(f"{t['accent']}Q{RST}")
     if include_indicator:
         indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
-        parts.append(f" {indicator}")
-    bar = "".join(parts)
+        parts.append(f"{indicator}")
+    sep = f" {t['dim']}◈{RST} "
+    bar = sep.join(parts)
     tw = _terminal_width()
     vis_len = len(strip_ansi(bar))
     if vis_len > tw - 2:
@@ -5404,10 +5405,10 @@ def box(title, content, color_key="primary", width=None):
     raw_lines = content.split('\n')
     iw = width - 2
     cw = width - 4
-    print(f"{c}{'+' + '='*iw + '+'}{RST}")
+    print(f"{c}{'┌' + '─'*iw + '┐'}{RST}")
     title_clean = strip_ansi(str(title))
-    print(f"{c}|{RST} {c}{BOLD}{title_clean:<{cw}}{RST} {c}|{RST}")
-    print(f"{c}|{'-'*iw}|{RST}")
+    print(f"{c}│{RST} {c}{BOLD}{title_clean:<{cw}}{RST} {c}│{RST}")
+    print(f"{c}├{'─'*iw}┤{RST}")
     for raw_line in raw_lines:
         wrapped = _wrap_line(raw_line, cw)
         for chunk in wrapped:
@@ -5416,8 +5417,8 @@ def box(title, content, color_key="primary", width=None):
             if pad < 0:
                 chunk = chunk[:cw]
                 pad = 0
-            print(f"{c}|{RST} {chunk}{' '*pad} {c}|{RST}")
-    print(f"{c}{'+' + '='*iw + '+'}{RST}")
+            print(f"{c}│{RST} {chunk}{' '*pad} {c}│{RST}")
+    print(f"{c}{'└' + '─'*iw + '┘'}{RST}")
 
 def progress_bar(current, total, label="", width=40, color_key="primary"):
     if not sys.stdout.isatty():
@@ -5433,9 +5434,9 @@ def step_header(step, total, goal_text):
     t = T()
     w = min(62, _terminal_width() - 2)
     safe_goal = strip_ansi(goal_text)
-    print(f"\n{t['bright']}{'='*w}{RST}")
-    print(f" {t['bright']}STEP {step}/{total}{RST}  {t['dim']}{safe_goal[:max(10, w-15)]}{RST}")
-    print(f"{t['bright']}{'='*w}{RST}")
+    print(f"\n{t['bright']}{'▬'*w}{RST}")
+    print(f" {t['bright']}◢ STEP {step}/{total} ◣{RST}  {t['dim']}{safe_goal[:max(10, w-15)]}{RST}")
+    print(f"{t['bright']}{'▬'*w}{RST}")
 
 # ── Spinner ──────────────────────────────────────────────────
 
@@ -5620,7 +5621,7 @@ class ToolVisualizer:
     def tool_call(self, tool_name, args=""):
         t = self.t
         args_preview = args[:50] + "..." if len(args) > 50 else args
-        print(f"\n {t['accent']}\U0001f527 {t['bright']}{tool_name}{RST} {t['dim']}{args_preview}{RST}")
+        print(f"\n {t['accent']}\u26a1 {t['bright']}{tool_name}{RST} {t['dim']}{args_preview}{RST}")
     
     def tool_result(self, success=True, preview=""):
         t = self.t
@@ -5651,7 +5652,7 @@ class ToolVisualizer:
             "warning": f"{t['warn']}\u26a0{RST}",
             "error": f"{t['err']}\u2717{RST}",
             "thinking": f"{t['dim']}\U0001f4ad{RST}",
-            "tool": f"{t['accent']}\U0001f527{RST}",
+            "tool": f"{t['accent']}\u26a1{RST}",
             "save": f"{t['primary']}\U0001f4be{RST}",
             "load": f"{t['primary']}\U0001f4c2{RST}"
         }
@@ -8510,7 +8511,7 @@ def main():
                         try:
                             bar = build_status_bar(include_indicator=not _AGENT_BUSY)
                             ind = activity_vector(frame=_FOOTER_FRAME, busy=_AGENT_BUSY)
-                            sys.stdout.write(f"{bar} {ind} {T()['primary'] if not _AGENT_BUSY else T()['dim']}>{RST} ")
+                            sys.stdout.write(f"{bar} {ind} {T()['primary'] if not _AGENT_BUSY else T()['dim']}▶{RST} ")
                         except Exception:
                             pass
                         sys.stdout.flush()
