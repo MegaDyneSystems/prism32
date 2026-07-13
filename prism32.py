@@ -127,8 +127,31 @@ def register_theme(name, **colors):
     THEME_REGISTRY[name] = dict(colors)
     return colors
 
+# ── Home Directory Resolution ───────────────────────────────
+def _resolve_prism32_home():
+    """Resolve the ~/.prism32 base directory, falling back to /tmp/prism32
+    if home is missing or unwritable (e.g. Synology DSM missing homes dir)."""
+    home = os.path.expanduser("~")
+    base = os.path.join(home, ".prism32")
+    try:
+        os.makedirs(base, exist_ok=True)
+        test_file = os.path.join(base, ".write_test")
+        with open(test_file, 'w') as f:
+            f.write("ok")
+        os.remove(test_file)
+        return base
+    except (OSError, PermissionError, FileNotFoundError):
+        fallback = os.path.join("/tmp", "prism32")
+        try:
+            os.makedirs(fallback, exist_ok=True)
+        except OSError:
+            pass
+        return fallback
+
+_PRISM32_HOME = _resolve_prism32_home()
+
 # ── Plugin Loader ──────────────────────────────────────────
-PLUGIN_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "plugins")
+PLUGIN_DIR = os.path.join(_PRISM32_HOME, "plugins")
 _PLUGINS = {}
 
 
@@ -361,24 +384,31 @@ def _load_plugin_file(mod_path, mod_name=None, quiet=False):
 def load_plugins():
     """Load external command plugins from ~/.prism32/plugins/.
     Uses importlib.util to load from file path (no sys.path manipulation needed)."""
+    global PLUGIN_DIR
     if not os.path.isdir(PLUGIN_DIR):
-        os.makedirs(PLUGIN_DIR, exist_ok=True)
-        return
-    for f in sorted(os.listdir(PLUGIN_DIR)):
-        if f.endswith(".py") and not f.startswith("_"):
-            mod_path = os.path.join(PLUGIN_DIR, f)
-            _load_plugin_file(mod_path, mod_name=f[:-3])
+        try:
+            os.makedirs(PLUGIN_DIR, exist_ok=True)
+            return
+        except OSError:
+            return
+    try:
+        for f in sorted(os.listdir(PLUGIN_DIR)):
+            if f.endswith(".py") and not f.startswith("_"):
+                mod_path = os.path.join(PLUGIN_DIR, f)
+                _load_plugin_file(mod_path, mod_name=f[:-3])
+    except OSError:
+        pass
 
 # ── Self-Evolving Memory System ─────────────────────────────
 # Small persistent file (~/.prism32/memory.json) that tracks
 # usage patterns, errors, and preferences to improve over time.
 
-MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "memory.json")
-STARTUP_MEMORY_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "startup_memory.md")
-SOUL_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "soul.md")
-PROMPTSHARD_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "promptshard.md")
-HARNESS_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "harnesses.json")
-EVOLVE_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "evolve")
+MEMORY_FILE = os.path.join(_PRISM32_HOME, "memory.json")
+STARTUP_MEMORY_FILE = os.path.join(_PRISM32_HOME, "startup_memory.md")
+SOUL_FILE = os.path.join(_PRISM32_HOME, "soul.md")
+PROMPTSHARD_FILE = os.path.join(_PRISM32_HOME, "promptshard.md")
+HARNESS_FILE = os.path.join(_PRISM32_HOME, "harnesses.json")
+EVOLVE_DIR = os.path.join(_PRISM32_HOME, "evolve")
 EVOLVE_DOC_FILE = os.path.join(EVOLVE_DIR, "evolve.md")
 EVOLVE_TOOL_FILE = os.path.join(EVOLVE_DIR, "tools.json")
 EVOLVE_BASELINE_DIR = os.path.join(EVOLVE_DIR, "baseline")
@@ -387,7 +417,7 @@ EVOLVE_BASELINE_CONFIG_FILE = os.path.join(EVOLVE_BASELINE_DIR, "config.default.
 EVOLVE_TEMP_PLUGIN_DIR = os.path.join(EVOLVE_DIR, "tmp_plugins")
 
 # Secrets vault: stored separately from promptshard to prevent injection
-SECRETS_FILE = os.path.join(os.path.expanduser("~"), ".prism32", ".secrets.json")
+SECRETS_FILE = os.path.join(_PRISM32_HOME, ".secrets.json")
 
 _MEMORY_DIRTY = False
 _MEMORY_FLUSH_COUNTER = 0
@@ -1185,7 +1215,7 @@ It is designed for self-repair, temporary tooling, permanent plugins, and safe s
 ## Runtime Paths
 
 - Main script: {_current_prism_source()}
-- Config: {Config.CONFIG_FILE if 'Config' in globals() else os.path.join(os.path.expanduser('~'), '.prism32', 'config.json')}
+- Config: {Config.CONFIG_FILE if 'Config' in globals() else os.path.join(_PRISM32_HOME, 'config.json')}
 - Startup memory: {STARTUP_MEMORY_FILE}
 - Plugins: {PLUGIN_DIR}
 - Temporary evolve plugins: {EVOLVE_TEMP_PLUGIN_DIR}
@@ -1707,7 +1737,7 @@ def shard_mark_complete(shard_id, result=""):
     _quantum.put(f"shard:{shard_id}:status", "completed")
 
 # ── File-Cabinet Long-Term Memory (6,000 files) ─────────────
-LONGTERM_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "longterm")
+LONGTERM_DIR = os.path.join(_PRISM32_HOME, "longterm")
 LONGTERM_INDEX_FILE = os.path.join(LONGTERM_DIR, "index.json")
 LONGTERM_MAX = 6000
 _ltm_lock = threading.Lock()
@@ -1841,8 +1871,8 @@ def ltm_delete(mid):
         return False
 
 # ── Skill System (repeatable workflows/automations) ──────────
-SKILLS_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "skills")
-AUTOMATIONS_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "automations")
+SKILLS_DIR = os.path.join(_PRISM32_HOME, "skills")
+AUTOMATIONS_DIR = os.path.join(_PRISM32_HOME, "automations")
 
 _AUTOMATION_SCHEDULER_RUNNING = False
 
@@ -4009,7 +4039,7 @@ class Config:
     THEME = "phosphor"
     GOAL_MAX_STEPS = 1000
     GOAL_STEP_DELAY = 1
-    SESSION_DIR = os.path.join(os.path.expanduser("~"), ".prism32", "sessions")
+    SESSION_DIR = os.path.join(_PRISM32_HOME, "sessions")
     AUTO_SAVE_INTERVAL = 0    # 0 = save-on-interaction instead of timed
     THINKING_EFFORT = ""
     SLOW_CPU = False  # "", "low", "medium", "high"
@@ -4068,7 +4098,7 @@ class Config:
 
     PROVIDER = "local"  # Current provider name
     DEBUG = False  # Debug logging enabled
-    CONFIG_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "config.json")
+    CONFIG_FILE = os.path.join(_PRISM32_HOME, "config.json")
     CUSTOM_THEME = None  # User-defined theme name
     CUSTOM_ARCH_MAP = {}  # User-defined arch pattern -> label mappings
     
@@ -5689,7 +5719,7 @@ class SpinnerThread(threading.Thread):
 viz = ToolVisualizer()
 # ── Debug / Logging ──────────────────────────────────────────────
 
-LOG_FILE = os.path.join(os.path.expanduser("~"), ".prism32", "debug.log")
+LOG_FILE = os.path.join(_PRISM32_HOME, "debug.log")
 
 def debug_log(message, level="INFO"):
     """Write debug message to log file."""
