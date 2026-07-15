@@ -5,6 +5,7 @@ import tempfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 exec(open('prism32.py').read().split('if __name__')[0])
+_register_extended_themes()  # ensure deferred themes are loaded for tests
 
 def test_config_defaults():
     """Config should have sensible defaults."""
@@ -12,7 +13,7 @@ def test_config_defaults():
     assert Config.ROOT_PASS == ""
     assert Config.CMD_TIMEOUT >= 60
     assert Config.TEMPERATURE == 0.7
-    assert Config.THEME == "phosphor"
+    assert Config.THEME == "ember"
     assert Config.MAX_HISTORY >= 1000
     assert Config.GOAL_MAX_STEPS >= 20
 
@@ -40,7 +41,6 @@ def test_config_model_context_map():
 
 def test_config_theme():
     """Config theme should be a valid theme."""
-    from prism32 import THEME_REGISTRY
     assert Config.THEME in THEME_REGISTRY
     theme = THEME_REGISTRY[Config.THEME]
     assert 'primary' in theme

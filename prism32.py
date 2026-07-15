@@ -1211,9 +1211,9 @@ def _current_prism_source():
 
 def _default_config_snapshot():
     return {
-        "theme": "phosphor",
+        "theme": "ember",
         "provider": "local",
-        "model": "deepseek-v4-flash",
+        "model": "",
         "api_base": "http://127.0.0.1:8080",
         "max_history": 2000,
         "max_response_tokens": 8192,
@@ -4050,13 +4050,13 @@ class Config:
     CUSTOM_API_BASE = False  # True when the user explicitly overrode the provider's API base URL.
                             # Prevents provider defaults from clobbering a custom endpoint when
                             # switching providers. Cleared via '/provider api reset' or '/set api_base reset'.
-    MODEL = "deepseek/deepseek-v4-flash"
+    MODEL = ""
     API_KEY = ""
     MAX_HISTORY = 2000
     CMD_TIMEOUT = 600
     MAX_RESPONSE_TOKENS = 8192
     TEMPERATURE = 0.7
-    THEME = "phosphor"
+    THEME = "ember"
     GOAL_MAX_STEPS = 1000
     GOAL_STEP_DELAY = 1
     SESSION_DIR = os.path.join(_PRISM32_HOME, "sessions")
@@ -5305,7 +5305,7 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     if include_indicator:
         indicator = spin_char if spin_char is not None else f"{t['dim']}░{RST}"
         parts.append(f"{indicator}")
-    sep = f" {t['dim']}◈{RST} "
+    sep = f"{t['dim']} |{RST} "
     bar = sep.join(parts)
     tw = _terminal_width()
     vis_len = len(strip_ansi(bar))
@@ -5444,7 +5444,7 @@ def box(title, content, color_key="primary", width=None):
     # Adapt width to terminal size
     if width is None:
         tw = _terminal_width()
-        width = max(20, min(tw - 2, 120))
+        width = max(20, min(tw - 2, 78))
     raw_lines = content.split('\n')
     iw = width - 2       # inner fill width for top/bottom/separator
     cw = width - 4       # content width
@@ -6098,9 +6098,7 @@ def boot_sequence():
         pad = 44 - len(label)
         sys.stdout.write(f" {t['primary']}>{RST} {label}{' ' * max(0, pad)}{extra_t}")
         sys.stdout.flush()
-        time.sleep(0.12)
         print()
-        time.sleep(0.04)
     print(f" {t['dim']}{'─' * 54}{RST}\n")
 
 def get_mem():
@@ -7864,9 +7862,13 @@ def cmd_goal(goal_text, history, cmd_log):
             box("STOPPED", msg, "warn")
             cancelled = True
             break
-        if not resp:
-            box("AI ERROR", "No response", "err")
+        if resp is None:
             break
+        if not resp:
+            viz.status("No response from AI — retrying step in 2s...", "warning")
+            time.sleep(2)
+            step -= 1
+            continue
         if resp.startswith('[HTTP ERROR') or resp.startswith('[NETWORK ERROR') or resp.startswith('[ERROR]'):
             box("AI ERROR", resp, "err")
             break
@@ -10252,8 +10254,10 @@ def main():
                 clear_agent_cancel()
                 box("STOPPED", msg, "warn")
                 break
+            if resp is None:
+                break
             if not resp:
-                box("AI ERROR", "No response", "err")
+                print(f"\n  {T()['warn']}No response from AI — press Enter to retry or type /quit to exit{RST}\n")
                 break
             if resp.startswith('[HTTP ERROR') or resp.startswith('[NETWORK ERROR') or resp.startswith('[ERROR]'):
                 box("AI ERROR", resp, "err")
