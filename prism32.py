@@ -7015,7 +7015,7 @@ LONG-TERM MEMORY:
 Use /remember to save important discoveries, configurations, and solutions for future sessions.
 
 SELF-EXTENSION:
-- /extend temp <goal> — generate and load a temporary plugin for a missing capability.
+- /extend temp <goal> — generate and load a temporary plugin for a missing capability or to automate a very repetitive task to be more efficient
 - /extend permanent <goal> — create a persistent plugin (only when operator asks).
 - /evolve on — enable self-repair mode with baseline diff, tool scans, and docs.
 - /harness scan — detect external AI CLIs on this system.
