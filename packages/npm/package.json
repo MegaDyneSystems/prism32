@@ -1,0 +1,34 @@
+{
+  "name": "prism32",
+  "version": "6.9.0",
+  "description": "Self-extending polymorphic AI super-agent — cross-platform terminal harness (Python, distributed via npm for convenience)",
+  "author": "MegaDyne Systems <dev@megadynesystems.com>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MegaDyneSystems/prism32.git"
+  },
+  "homepage": "https://github.com/MegaDyneSystems/prism32",
+  "keywords": [
+    "ai",
+    "agent",
+    "cli",
+    "terminal",
+    "python",
+    "assistant",
+    "llm",
+    "automation"
+  ],
+  "engines": {
+    "node": ">=14"
+  },
+  "bin": {
+    "prism32": "bin/prism32"
+  },
+  "files": [
+    "prism32.py",
+    "bin/",
+    "README.md",
+    "LICENSE"
+  ]
+}

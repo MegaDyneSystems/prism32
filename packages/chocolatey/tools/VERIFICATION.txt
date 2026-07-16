@@ -1,0 +1,19 @@
+VERIFICATION
+Verification is intended to assist the Chocolatey moderators and community
+in verifying that this package's contents are trustworthy.
+
+Package can be verified like this:
+
+1. Go to
+
+   https://raw.githubusercontent.com/MegaDyneSystems/prism32/2152bb1c78ee31a106cab6c46be613186ebfd583/prism32.py
+
+   to download the script.
+
+2. The package itself does not bundle prism32.py; it is downloaded at install time
+   from the official GitHub repository.
+
+3. The commit hash used for the pinned URL is: 2152bb1c78ee31a106cab6c46be613186ebfd583
+
+4. Alternatively, you can compare the installed file against the source in the
+   GitHub repository at https://github.com/MegaDyneSystems/prism32

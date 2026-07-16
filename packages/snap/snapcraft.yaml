@@ -1,0 +1,42 @@
+name: prism32
+base: core24
+version: '6.9.0'
+summary: Polymorphic AI CLI agent
+description: |
+  Prism32 is a self-extending, self-repairing, self-evolving polymorphic AI super-agent.
+  One Python file, stdlib-only. Cross-platform terminal harness with multi-model subagents,
+  plugin self-generation, and autonomous goal execution.
+license: Apache-2.0
+grade: stable
+confinement: strict
+
+parts:
+  prism32:
+    plugin: dump
+    source: https://github.com/MegaDyneSystems/prism32.git
+    source-type: git
+    stage-packages:
+      - python3
+    override-build: |
+      mkdir -p "$SNAPCRAFT_PART_INSTALL/bin"
+
+      # Copy the main entry-point script into the snap
+      cp "$SNAPCRAFT_PART_SRC/prism32.py" "$SNAPCRAFT_PART_INSTALL/bin/prism32.py"
+
+      # Create a wrapper so the snap command invokes the script with Python
+      cat > "$SNAPCRAFT_PART_INSTALL/bin/prism32-wrapper" << 'EOF'
+      #!/bin/bash
+      python3 "$SNAP/bin/prism32.py" "$@"
+      EOF
+
+      chmod +x "$SNAPCRAFT_PART_INSTALL/bin/prism32-wrapper"
+
+apps:
+  prism32:
+    command: bin/prism32-wrapper
+    plugs:
+      - home
+      - network
+      - network-bind
+      - removable-media
+      - desktop

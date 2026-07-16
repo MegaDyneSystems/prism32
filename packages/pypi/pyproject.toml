@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "prism32"
+version = "6.9.0"
+description = "Self-extending, self-repairing, self-evolving polymorphic AI super-agent. One Python file, stdlib-only. Cross-platform terminal harness with multi-model subagents, plugin self-generation, and autonomous goal execution."
+readme = "README.md"
+license = "Apache-2.0"
+authors = [{name = "MegaDyne Systems", email = "dev@megadynesystems.com"}]
+maintainers = [{name = "MegaDyne Systems", email = "dev@megadynesystems.com"}]
+keywords = ["ai", "agent", "cli", "terminal", "automation", "assistant", "llm", "gpt", "coding", "harness"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.7",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development",
+    "Topic :: System :: Systems Administration",
+    "Topic :: Terminals",
+]
+requires-python = ">=3.7"
+
+[project.scripts]
+prism32 = "prism32:main"
+
+[project.urls]
+Homepage = "https://github.com/MegaDyneSystems/prism32"
+Repository = "https://github.com/MegaDyneSystems/prism32"
+Issues = "https://github.com/MegaDyneSystems/prism32/issues"
+
+[tool.setuptools]
+py-modules = ["prism32"]

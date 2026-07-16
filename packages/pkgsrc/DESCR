@@ -1,0 +1,8 @@
+Prism32 is a self-extending, self-repairing, self-evolving polymorphic AI
+super-agent. One Python file, stdlib-only. Cross-platform terminal harness
+with multi-model subagents, plugin self-generation, and autonomous goal
+execution.
+
+There is no fixed feature ceiling; every task expands what the agent can do.
+It runs on modern PCs and older machines alike: no Node.js, no browser
+runtime, no pip dependencies, and no local database server.
