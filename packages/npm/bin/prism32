@@ -1,0 +1,45 @@
+#!/usr/bin/env node
+const { spawn } = require('child_process');
+const path = require('path');
+const os = require('os');
+
+const scriptPath = path.join(__dirname, '..', 'prism32.py');
+
+function findPython() {
+  const { execSync } = require('child_process');
+  for (const exe of ['python3', 'python']) {
+    try {
+      execSync(`${exe} --version`, { stdio: 'ignore' });
+      return exe;
+    } catch (_) {
+      // continue
+    }
+  }
+  return null;
+}
+
+const python = findPython();
+if (!python) {
+  console.error(
+    'Error: Python is required to run prism32, but neither "python3" nor "python" was found in PATH.\n' +
+    'Please install Python 3.7 or newer: https://www.python.org/downloads/'
+  );
+  process.exit(1);
+}
+
+const child = spawn(python, [scriptPath].concat(process.argv.slice(2)), {
+  stdio: 'inherit',
+});
+
+process.on('SIGINT', () => {
+  child.kill('SIGINT');
+});
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    const sigNum = os.constants.signals[signal];
+    process.exit(128 + (sigNum || 0));
+  } else {
+    process.exit(code !== null ? code : 1);
+  }
+});

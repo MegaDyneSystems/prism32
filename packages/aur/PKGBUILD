@@ -1,0 +1,18 @@
+# Maintainer: MegaDyne Systems <https://github.com/MegaDyneSystems/prism32>
+pkgname=prism32
+pkgver=6.9.0
+pkgrel=1
+pkgdesc="Self-extending polymorphic AI super-agent — cross-platform terminal harness"
+arch=('any')
+url="https://github.com/MegaDyneSystems/prism32"
+license=('Apache')
+depends=('python>=3.7')
+optdepends=()
+provides=('prism32')
+conflicts=()
+source=("prism32.py::$url/raw/main/prism32.py")
+sha256sums=('SKIP')
+
+package() {
+    install -Dm755 "$srcdir/prism32.py" "$pkgdir/usr/bin/prism32"
+}

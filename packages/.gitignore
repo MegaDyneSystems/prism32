@@ -1,0 +1,23 @@
+# PyPI build artifacts
+*/dist/
+*/.eggs/
+*/*.egg-info/
+*/build/
+
+# Node
+*/node_modules/
+*/package-lock.json
+
+# Snap
+*/parts/
+*/prime/
+*/stage/
+*.snap
+
+# Chocolatey
+*.nupkg
+
+# AUR
+*/pkg/
+*/src/
+*.pkg.tar*

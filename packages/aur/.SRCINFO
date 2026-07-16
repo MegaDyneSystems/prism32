@@ -1,0 +1,13 @@
+pkgbase = prism32
+	pkgdesc = Self-extending polymorphic AI super-agent — cross-platform terminal harness
+	pkgver = 6.9.0
+	pkgrel = 1
+	url = https://github.com/MegaDyneSystems/prism32
+	arch = any
+	license = Apache
+	depends = python>=3.7
+	provides = prism32
+	source = prism32.py::https://github.com/MegaDyneSystems/prism32/raw/main/prism32.py
+	sha256sums = SKIP
+
+pkgname = prism32

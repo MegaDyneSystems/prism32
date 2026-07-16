@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<package xmlns="http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd">
+  <metadata>
+    <id>prism32</id>
+    <version>6.9.0</version>
+    <title>Prism32</title>
+    <authors>MegaDyne Systems</authors>
+    <owners>MegaDyne Systems</owners>
+    <requireLicenseAcceptance>false</requireLicenseAcceptance>
+    <licenseUrl>https://github.com/MegaDyneSystems/prism32/blob/main/LICENSE</licenseUrl>
+    <projectUrl>https://github.com/MegaDyneSystems/prism32</projectUrl>
+    <packageSourceUrl>https://github.com/MegaDyneSystems/prism32/tree/main/packages/chocolatey</packageSourceUrl>
+    <summary>Self-extending polymorphic AI super-agent</summary>
+    <description>Prism32 is a self-extending, self-repairing, self-evolving polymorphic AI super-agent. One Python file, stdlib-only. Cross-platform terminal harness with multi-model subagents, plugin self-generation, and autonomous goal execution.</description>
+    <tags>ai agent cli terminal python assistant llm automation</tags>
+    <copyright>2025 MegaDyne Systems</copyright>
+    <dependencies>
+    </dependencies>
+  </metadata>
+  <files>
+    <file src="tools\**" target="tools" />
+  </files>
+</package>
