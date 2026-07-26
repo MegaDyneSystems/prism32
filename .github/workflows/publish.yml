@@ -1,0 +1,120 @@
+name: Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  pypi:
+    name: Publish to PyPI
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build package
+        run: python -m build packages/pypi/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: packages/pypi/dist/
+
+  npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Publish to npm
+        working-directory: packages/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+  homebrew:
+    name: Update Homebrew tap
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get tag info
+        id: tag
+        run: |
+          echo "ref=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Checkout tap repo
+        uses: actions/checkout@v4
+        with:
+          repository: MegaDyneSystems/homebrew-prism32
+          path: tap
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Update formula
+        run: |
+          TAG="${{ steps.tag.outputs.ref }}"
+          VERSION="${TAG#v}"
+          URL="https://github.com/MegaDyneSystems/prism32/raw/${TAG}/prism32.py"
+          SHA256=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+          sed -i "s|url \"https://github.com/MegaDyneSystems/prism32/raw/v[0-9.\]*/prism32.py\"|url \"$URL\"|" tap/prism32.rb
+          sed -i "s/sha256 \"[a-f0-9]*\"/sha256 \"$SHA256\"/" tap/prism32.rb
+          sed -i "s/version \"[0-9.]*\"/version \"$VERSION\"/" tap/prism32.rb
+          cd tap
+          git config user.name 'github-actions'
+          git config user.email 'github-actions@github.com'
+          git add .
+          git diff --cached --quiet || git commit -m "prism32 ${VERSION}"
+          git push
+
+  scoop:
+    name: Update Scoop bucket
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get tag info
+        id: tag
+        run: |
+          echo "ref=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Checkout bucket repo
+        uses: actions/checkout@v4
+        with:
+          repository: MegaDyneSystems/scoop-prism32
+          path: bucket
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Update manifest
+        run: |
+          TAG="${{ steps.tag.outputs.ref }}"
+          VERSION="${TAG#v}"
+          URL="https://github.com/MegaDyneSystems/prism32/raw/${TAG}/prism32.py"
+          SHA256=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
+          jq --arg v "$VERSION" --arg url "$URL" --arg hash "$SHA256" \
+            '.version = $v | .url = $url | .hash = $hash' \
+            bucket/prism32.json > tmp.json && mv tmp.json bucket/prism32.json
+          cd bucket
+          git config user.name 'github-actions'
+          git config user.email 'github-actions@github.com'
+          git add .
+          git diff --cached --quiet || git commit -m "prism32 ${VERSION}"
+          git push

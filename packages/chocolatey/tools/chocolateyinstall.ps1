@@ -31,8 +31,8 @@ try {
     Write-Warning "Could not verify Python version. Ensure Python 3.7+ is installed."
 }
 
-# --- Download prism32.py (commit-pinned) ---
-$url = 'https://raw.githubusercontent.com/MegaDyneSystems/prism32/2152bb1c78ee31a106cab6c46be613186ebfd583/prism32.py'
+# --- Download prism32.py (tag-pinned) ---
+$url = 'https://raw.githubusercontent.com/MegaDyneSystems/prism32/v6.9.0/prism32.py'
 
 $packageArgs = @{
     packageName  = $env:ChocolateyPackageName

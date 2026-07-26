@@ -10,7 +10,7 @@ depends=('python>=3.7')
 optdepends=()
 provides=('prism32')
 conflicts=()
-source=("prism32.py::$url/raw/main/prism32.py")
+source=("prism32.py::$url/raw/v$pkgver/prism32.py")
 sha256sums=('SKIP')
 
 package() {
