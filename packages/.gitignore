@@ -21,3 +21,4 @@
 */pkg/
 */src/
 *.pkg.tar*
+packages/npm/.npmrc

@@ -27,20 +27,14 @@ scoop install prism32
 
 ---
 
-## Packaged / Ready (Needs Credentials)
-
 ### npm (Node.js, bun, deno)
-**Status:** Packaged, NOT published  
-**Install after publish:** `npm install -g prism32` or `npx prism32` or `bunx prism32`  
-**Package Dir:** `packages/npm/`  
-**To publish:**
-```bash
-cd packages/npm
-npm login          # or npm adduser
-npm publish --access public
-```
-**Alternative:** Add `NPM_TOKEN` to GitHub repo secrets and push a `v*` tag — the
-`.github/workflows/publish.yml` workflow auto-publishes on tag push.
+**Status:** LIVE  
+**Install:** `npm install -g @megadynesystems/prism32` or `npx @megadynesystems/prism32` or `bunx @megadynesystems/prism32`
+**Note:** Published as `@megadynesystems/prism32` because unscoped `prism32` conflicts with existing packages (`prisma`, `prismjs`).
+
+---
+
+## Packaged / Ready (Needs Credentials)
 
 ### AUR (Arch Linux)
 **Status:** PKGBUILD ready, NOT published  

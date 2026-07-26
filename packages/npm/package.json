@@ -1,5 +1,5 @@
 {
-  "name": "prism32",
+  "name": "@megadynesystems/prism32",
   "version": "6.9.0",
   "description": "Self-extending polymorphic AI super-agent — cross-platform terminal harness (Python, distributed via npm for convenience)",
   "author": "MegaDyne Systems <dev@megadynesystems.com>",
@@ -23,7 +23,8 @@
     "node": ">=14"
   },
   "bin": {
-    "prism32": "bin/prism32"
+    "prism32": "bin/prism32",
+    "@megadynesystems/prism32": "bin/prism32"
   },
   "files": [
     "prism32.py",

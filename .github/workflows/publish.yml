@@ -47,7 +47,10 @@ jobs:
         working-directory: packages/npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          # Scoped package: @megadynesystems/prism32
+          # Unscoped 'prism32' is blocked by npm (similar to prisma/prismjs)
+          npm publish --access public
 
   homebrew:
     name: Update Homebrew tap
