@@ -4,9 +4,44 @@ Prism32 is a self-extending, self-repairing, self-evolving program with a AI sup
 
 It is designed for modern PC's and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
 
-This README is the full operator guide. A shorter GitHub front-page summary is in `README-GITHUB.md`.
+This README is the full operator guide. The GitHub front page shows the same document.
 
 ## Cheat Sheet: Fastest Path
+
+### Package Managers (Quickest)
+
+**PyPI** (Linux, macOS, Windows, BSD — any Python install):
+
+```sh
+pip install prism32
+prism32
+```
+
+**Homebrew** (macOS, Linux):
+
+```sh
+brew tap MegaDyneSystems/prism32
+brew install prism32
+```
+
+**Scoop** (Windows):
+
+```powershell
+scoop bucket add prism32 https://github.com/MegaDyneSystems/scoop-prism32
+scoop install prism32
+```
+
+**npm / npx / bunx** (any Node.js runtime):
+
+```sh
+npx @megadynesystems/prism32
+# or
+bunx @megadynesystems/prism32
+```
+
+---
+
+### From Source (Git clone)
 
 Install and start on Unix/Linux/macOS/BSD/Android Termux
 
@@ -114,7 +149,15 @@ Press Escape.
 
 ## Quick Start
 
-Unix, Linux, macOS, and BSD:
+Fastest way — package manager:
+
+```sh
+pip install prism32      # or: brew install prism32, scoop install prism32
+prism32 --setup-runtime
+prism32
+```
+
+From source (Unix, Linux, macOS, BSD):
 
 ```sh
 git clone https://github.com/MegaDyneSystems/prism32.git
@@ -138,9 +181,14 @@ python3 prism32.py --setup-runtime
 python3 prism32.py
 ```
 
-Windows PowerShell:
+Windows (PowerShell or Scoop):
 
 ```powershell
+# Option A: Scoop (recommended)
+scoop bucket add prism32 https://github.com/MegaDyneSystems/scoop-prism32
+scoop install prism32
+
+# Option B: PowerShell installer
 git clone https://github.com/MegaDyneSystems/prism32.git
 cd prism32
 powershell -ExecutionPolicy Bypass -File .\install.ps1
@@ -150,6 +198,11 @@ prism32
 Android Termux:
 
 ```sh
+# Option A: pip
+pip install prism32
+prism32
+
+# Option B: From source
 pkg update
 pkg install python git
 git clone https://github.com/MegaDyneSystems/prism32.git
@@ -465,6 +518,26 @@ Useful controls:
 - Ctrl-L: clear/redraw.
 
 Arrow keys are handled as escape sequences, so normal arrow-key editing does not trigger bare-Escape cancellation. Double-Escape also cancels.
+
+## Package Managers
+
+Prism32 is available through multiple package managers for easy installation:
+
+| Manager | Platform | Install Command |
+|---------|----------|-----------------|
+| **pip** | Any (Python 3.7+) | `pip install prism32` |
+| **Homebrew** | macOS, Linux | `brew tap MegaDyneSystems/prism32 && brew install prism32` |
+| **Scoop** | Windows | `scoop bucket add prism32 https://github.com/MegaDyneSystems/scoop-prism32 && scoop install prism32` |
+| **npm / npx / bunx** | Any (Node.js 14+) | `npx @megadynesystems/prism32` |
+
+All package managers install the same `prism32` command. After installation, run `prism32 --version` to verify, then `prism32 --setup-runtime` to initialize your config.
+
+**pip / PyPI:** https://pypi.org/project/prism32/  
+**Homebrew Tap:** https://github.com/MegaDyneSystems/homebrew-prism32  
+**Scoop Bucket:** https://github.com/MegaDyneSystems/scoop-prism32  
+**npm Registry:** https://www.npmjs.com/package/@megadynesystems/prism32
+
+---
 
 ## Installers
 

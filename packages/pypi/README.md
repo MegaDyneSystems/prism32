@@ -4,7 +4,7 @@ Prism32 is a self-extending, self-repairing, self-evolving program with a AI sup
 
 It is designed for modern PC's and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
 
-This README is the full operator guide. A shorter GitHub front-page summary is in `README-GITHUB.md`.
+This README is the full operator guide. The GitHub front page shows the same document.
 
 ## Cheat Sheet: Fastest Path
 
