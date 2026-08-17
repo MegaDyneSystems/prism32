@@ -7392,7 +7392,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                 if agent_cancel_requested(cancel_event):
                     return AGENT_CANCELLED_RESPONSE
                 _track_usage(data.get('usage'))
-                return data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                _choices = data.get('choices') or []
+                return _choices[0].get('message', {}).get('content', '') if _choices else ''
         except urllib.error.HTTPError as e:
             if agent_cancel_requested(cancel_event):
                 return AGENT_CANCELLED_RESPONSE
@@ -7503,14 +7504,14 @@ def stream_response(resp, cancel_event=None):
             display_color = color_key
         display_buf += text
         now = time.monotonic()
-        if "\n" in display_buf or len(display_buf) >= 240 or now - last_flush >= 0.15:
+        if "\n" in display_buf or len(display_buf) >= 64 or now - last_flush >= 0.06:
             _flush_display(force=True)
 
     def _flush_display(force=False):
         nonlocal display_buf, stream_color, agent_prefix_printed, last_flush
         if not display_buf:
             return
-        if not force and "\n" not in display_buf and len(display_buf) < 240:
+        if not force and "\n" not in display_buf and len(display_buf) < 64:
             return
         color = t['dim'] if display_color == "reasoning" else t['primary']
         with stdout_lock:
@@ -7546,7 +7547,10 @@ def stream_response(resp, cancel_event=None):
                 usage = chunk.get('usage')
                 if usage:
                     _track_usage(usage)
-                delta = chunk.get('choices', [{}])[0].get('delta', {})
+                _choices = chunk.get('choices') or []
+                if not _choices:
+                    continue
+                delta = _choices[0].get('delta', {})
                 content = delta.get('content', '')
                 reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
                 
