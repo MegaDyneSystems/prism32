@@ -6975,6 +6975,7 @@ command here
 CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_calls_section_begin|>, function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks. This is not optional. If you accidentally use a non-standard format, it will be auto-healed, but always use execute blocks directly.
 
 BLOCK ARCHITECTURE:
+- ACT, DON'T ANNOUNCE: never say "I'll check/examine/run ..." without including the actual ```execute block in the SAME response. A response with no blocks performs NO action.
 - You can chain multiple commands in a single execute block using &&, ;, |, and redirections.
 - You can put multiple ```execute blocks in a single response — each will be executed in order.
 - Commands starting with / (like /delegate, /quantum, /remember) are executed as Prism32 commands, not shell.
@@ -7443,6 +7444,7 @@ def stream_response(resp, cancel_event=None):
     display_color = None
     last_flush = time.monotonic()
     fence_state = {"pending": "", "hidden": False}
+    footer_released = False
 
     def _filter_visible_content(text, final=False):
         data = fence_state["pending"] + text
@@ -7508,11 +7510,25 @@ def stream_response(resp, cancel_event=None):
             _flush_display(force=True)
 
     def _flush_display(force=False):
-        nonlocal display_buf, stream_color, agent_prefix_printed, last_flush
+        nonlocal display_buf, stream_color, agent_prefix_printed, last_flush, footer_released
         if not display_buf:
             return
         if not force and "\n" not in display_buf and len(display_buf) < 64:
             return
+        if not footer_released:
+            footer_released = True
+            # Lines scrolled off a DECSTBM scroll region are discarded by real
+            # terminals instead of entering the scrollback buffer — release the
+            # reserved footer before streaming text so the full conversation is
+            # preserved and the user can scroll all the way to the top.
+            try:
+                _footer_animate_stop()
+            except Exception:
+                pass
+            try:
+                release_footer_for_output()
+            except Exception:
+                pass
         color = t['dim'] if display_color == "reasoning" else t['primary']
         with stdout_lock:
             move_to_scroll_bottom()
@@ -10211,6 +10227,7 @@ def main():
         if not (history and isinstance(history[-1].get("content"), list)):
             history.append({"role": "user", "content": user_input})
         max_iter = 9999
+        nudges = 0
 
         for iteration in range(max_iter):
             _ctx = context_pct(history)
@@ -10340,6 +10357,20 @@ def main():
                 if not clean:
                     box("AI ERROR", "Empty response", "err")
                     break
+                # Announced-action-without-execution: some models say
+                # "I'll examine the files..." then stop with no execute block.
+                # Nudge the agent to actually emit the block instead of
+                # silently ending the turn (max 2 nudges per user turn).
+                if nudges < 2 and re.search(
+                        r"(?i)\b(i('ll| will| shall) (now )?(first )?(check|examine|read|look at|look into|inspect|open|run|review|analy[sz]e|explore|investigate|start|begin|proceed|fetch|load|edit|update)"
+                        r"|let me (now )?(first )?(check|examine|read|look|inspect|open|run|review|analy[sz]e|explore|start|begin))\b",
+                        clean or ""):
+                    nudges += 1
+                    viz.status("Agent announced actions without an execute block — nudging it to act", "info")
+                    if resp.strip():
+                        history.append({"role": "assistant", "content": resp})
+                    history.append({"role": "user", "content": "You said you would take action, but you did not emit any ```execute block. If a command is needed, emit the actual ```execute block NOW in your response — act, don't announce. Otherwise give your final answer directly."})
+                    continue
                 if not Config.STREAM:
                     t2 = T()
                     print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
