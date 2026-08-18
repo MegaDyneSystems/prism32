@@ -4121,7 +4121,8 @@ class Config:
     CONFIG_FILE = os.path.join(_PRISM32_HOME, "config.json")
     CUSTOM_THEME = None  # User-defined theme name
     CUSTOM_ARCH_MAP = {}  # User-defined arch pattern -> label mappings
-    
+    SESSION_ONLY_KEYS = set()  # config.json keys protected from persistence (CLI overrides)
+
     @classmethod
     def save_config(cls):
         """Save current config to file with timeout-safe write."""
@@ -4151,6 +4152,17 @@ class Config:
                 "verify_ssl": cls.VERIFY_SSL,
                 "prompt_caching": cls.PROMPT_CACHING,
             }
+            # Session-only fields (set via CLI flags like --model/--api/--api-key)
+            # must not be persisted — preserve the on-disk values instead.
+            if cls.SESSION_ONLY_KEYS and os.path.exists(cls.CONFIG_FILE):
+                try:
+                    with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        old = json.load(f)
+                    for k in cls.SESSION_ONLY_KEYS:
+                        if k in old:
+                            data[k] = old[k]
+                except Exception:
+                    pass
             _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
         except Exception as e:
             print(f"  Config save failed: {e}")
@@ -8639,11 +8651,15 @@ def main():
 
     # Auto-load saved config, then CLI args override
     Config.load_config()
+    # CLI flag overrides are session-only — never persisted to config.json.
+    # (An interactive command that changes the same field clears protection.)
     if args.model:
         Config.MODEL = args.model
+        Config.SESSION_ONLY_KEYS.add("model")
     if args.api:
         Config.API_BASE = args.api
         Config.CUSTOM_API_BASE = True  # explicit CLI override; protect from provider defaults
+        Config.SESSION_ONLY_KEYS.add("api_base")
     if args.turbo:
         Config.SLOW_CPU = False
         Config.STREAM = True
@@ -8653,10 +8669,9 @@ def main():
         Config.AUTO_SAVE_INTERVAL = 0
     if args.api_key:
         Config.API_KEY = args.api_key
-        Config.save_config()
+        Config.SESSION_ONLY_KEYS.add("api_key")
     if args.theme:
         Config.THEME = args.theme
-        Config.save_config()
     if args.temperature is not None:
         Config.TEMPERATURE = args.temperature
     apply_ansi_compat()
@@ -9009,6 +9024,7 @@ def main():
                     key = parts[1].strip() if len(parts) > 1 else ""
                     if key:
                         Config.API_KEY = key
+                        Config.SESSION_ONLY_KEYS.discard("api_key")
                         Config.save_config()
                         mask = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
                         print(f"  {t['bright']}+ API key set: {mask}{RST}")
@@ -9088,6 +9104,7 @@ def main():
         if cmd == 'model':
             if args_str and args_str.lower() not in ('list', 'ls', 'browse', 'select'):
                 Config.MODEL = args_str
+                Config.SESSION_ONLY_KEYS.discard("model")
                 print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
                 Config.save_config()
             else:
@@ -9123,6 +9140,7 @@ def main():
             elif set_key == 'model':
                 if set_val:
                     Config.MODEL = set_val
+                    Config.SESSION_ONLY_KEYS.discard("model")
                     print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
                     Config.save_config()
                 else:
@@ -10691,6 +10709,7 @@ def set_custom_api_base(url):
         return False
     Config.API_BASE = url
     Config.CUSTOM_API_BASE = True
+    Config.SESSION_ONLY_KEYS.discard("api_base")
     Config.save_config()
     print(f"  {t['bright']}+ API base set to: {url}{RST}")
     print(f"  {t['dim']}This custom URL is preserved when switching providers.{RST}")
@@ -10704,6 +10723,7 @@ def reset_api_base():
     default_base = prov.get("api_base", Config.API_BASE)
     Config.API_BASE = default_base
     Config.CUSTOM_API_BASE = False
+    Config.SESSION_ONLY_KEYS.discard("api_base")
     Config.save_config()
     print(f"  {t['bright']}+ Custom API base cleared.{RST}")
     print(f"  {t['dim']}Reverted to {Config.PROVIDER} default: {default_base}{RST}")
@@ -10764,6 +10784,11 @@ def cmd_provider_set(provider_name):
         viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
         print(f"   {t['dim']}API: {Config.API_BASE}{RST}")
         print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
+    # Explicit provider switch is an intentional, persistent change — lift any
+    # session-only protection set by --api/--api-key/--model CLI flags.
+    Config.SESSION_ONLY_KEYS.discard("api_base")
+    Config.SESSION_ONLY_KEYS.discard("api_key")
+    Config.SESSION_ONLY_KEYS.discard("model")
     # Only suggest a default model if user hasn't set one; never overwrite their choice
     if not Config.MODEL:
         Config.MODEL = prov.get("model", Config.MODEL)
