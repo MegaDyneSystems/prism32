@@ -7635,6 +7635,27 @@ def stream_response(resp, cancel_event=None):
             pass
 _RE_TOOL_CALL_NATIVE = re.compile(r'<\|tool_call_begin\|>.*?<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>', re.DOTALL)
 
+def looks_like_announcement(text):
+    """True if a text-only reply reads like an announced action ('Let me verify
+    ...', 'I'll commit the fix:', trailing colon) rather than a final answer.
+    Used to auto-nudge models that announce-then-stop instead of emitting the
+    execute block."""
+    if not text:
+        return False
+    t = strip_ansi(text).strip()
+    if not t:
+        return False
+    if t.endswith(":") or t.endswith("："):
+        return True
+    # 'let me know if...' asks the user a question — not an action
+    if re.search(r"(?i)\blet me know\b", t):
+        return False
+    if re.search(r"(?i)\b(?:i|we)(?:'ll| will| shall|(?: a|' )?m going to)\s+\S", t):
+        return True
+    if re.search(r"(?i)\blet (?:me|us)\s+\S", t):
+        return True
+    return False
+
 def heal_response(text):
     """Convert non-standard tool-calling formats to proper execute blocks.
     Returns (healed_text, was_healed)."""
@@ -10376,13 +10397,11 @@ def main():
                     box("AI ERROR", "Empty response", "err")
                     break
                 # Announced-action-without-execution: some models say
-                # "I'll examine the files..." then stop with no execute block.
-                # Nudge the agent to actually emit the block instead of
-                # silently ending the turn (max 2 nudges per user turn).
-                if nudges < 2 and re.search(
-                        r"(?i)\b(i('ll| will| shall) (now )?(first )?(check|examine|read|look at|look into|inspect|open|run|review|analy[sz]e|explore|investigate|start|begin|proceed|fetch|load|edit|update)"
-                        r"|let me (now )?(first )?(check|examine|read|look|inspect|open|run|review|analy[sz]e|explore|start|begin))\b",
-                        clean or ""):
+                # "Let me verify the files..." / "...and commit the fix:" then
+                # stop with no execute block. Nudge the agent to actually emit
+                # the block instead of silently ending the turn (max 3 per
+                # user turn).
+                if nudges < 3 and looks_like_announcement(clean):
                     nudges += 1
                     viz.status("Agent announced actions without an execute block — nudging it to act", "info")
                     if resp.strip():
