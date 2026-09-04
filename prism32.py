@@ -6896,6 +6896,7 @@ class SubAgent:
                 viz.status(f"Unknown provider '{self.provider}' for {self.id} — using main provider ({Config.PROVIDER})",
                            "warning")
         try:
+            nudges = 0
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
                 # Context management, trim if approaching limit
@@ -6973,6 +6974,14 @@ class SubAgent:
                         self._history.append({"role": "user", "content": "Your last response ended with an UNCLOSED ```execute block (truncated). Re-emit the complete block, continuing exactly where you left off."})
                         continue
                     clean = clean_response(resp)
+                    # Text-only announcement ("I'll read the files now:") must not
+                    # silently complete the subagent — nudge it to act (max 3).
+                    if nudges < 3 and looks_like_announcement(clean):
+                        nudges += 1
+                        if resp.strip():
+                            self._history.append({"role": "assistant", "content": resp})
+                        self._history.append({"role": "user", "content": "STOP ANNOUNCING. Your ENTIRE next response must be exactly one ```execute block — copy this shape:\n\n```execute\n<the first command you keep describing>\n```\n\nNo preamble. The block ONLY."})
+                        continue
                     if not clean:
                         self.result = "[SUBAGENT] No actionable response."
                     else:
@@ -10535,20 +10544,34 @@ def main():
                 # the block instead of silently ending the turn (max 3 per
                 # user turn).
                 truncated_block = _unclosed_command_fence(resp)
-                if nudges < 3 and (truncated_block or looks_like_announcement(clean)):
-                    nudges += 1
-                    if truncated_block:
-                        viz.status("Response truncated mid-block — asking the agent to re-emit it", "info")
-                        nudge_text = ("Your last response ended with an UNCLOSED ```execute block — it was cut off "
-                                      "(likely at the max response length). Re-emit the complete ```execute block now, "
-                                      "continuing exactly where you left off. Keep commands short enough to finish.")
-                    else:
-                        viz.status("Agent announced actions without an execute block — nudging it to act", "info")
-                        nudge_text = "You said you would take action, but you did not emit any ```execute block. If a command is needed, emit the actual ```execute block NOW in your response — act, don't announce. Otherwise give your final answer directly."
-                    if resp.strip():
-                        history.append({"role": "assistant", "content": resp})
-                    history.append({"role": "user", "content": nudge_text})
-                    continue
+                if truncated_block or looks_like_announcement(clean):
+                    if nudges < 4:
+                        nudges += 1
+                        if truncated_block:
+                            viz.status("Response truncated mid-block — asking the agent to re-emit it", "info")
+                            nudge_text = ("Your last response ended with an UNCLOSED ```execute block — it was cut off "
+                                          "(likely at the max response length). Re-emit the complete ```execute block now, "
+                                          "continuing exactly where you left off. Keep commands short enough to finish.")
+                        elif nudges == 1:
+                            viz.status("Agent announced actions without an execute block — nudging it to act", "info")
+                            nudge_text = "You said you would take action, but you did not emit any ```execute block. If a command is needed, emit the actual ```execute block NOW in your response — act, don't announce. Otherwise give your final answer directly."
+                        else:
+                            viz.status(f"Agent announced again without a block (nudge {nudges}/4) — escalating", "warning")
+                            nudge_text = ("STOP ANNOUNCING. You have described what you will do "
+                                          f"{nudges} times without emitting a single ```execute block. "
+                                          "Your ENTIRE next response must be exactly one ```execute block — "
+                                          "no preamble, no explanation, no plan, no announcement. Copy this shape:\n\n"
+                                          "```execute\n<the first command you keep describing>\n```\n\n"
+                                          "Begin with the very first action you announced. The block ONLY.")
+                        if resp.strip():
+                            history.append({"role": "assistant", "content": resp})
+                        history.append({"role": "user", "content": nudge_text})
+                        continue
+                    box("AGENT STALLED",
+                        "The model announced actions repeatedly without emitting any execute block "
+                        "(4 nudges produced no tool call). Type > to nudge it again, /model to switch "
+                        "to a stronger model, or rephrase the task.", "warn")
+                    break
                 if not Config.STREAM:
                     t2 = T()
                     print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
