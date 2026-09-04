@@ -7562,7 +7562,11 @@ def stream_response(resp, cancel_event=None):
         # Hide non-standard tool-call modal tags during streaming
         for tag in ['<|tool_calls_section_begin|>', '<|tool_calls_section_end|>',
                      '<|tool_call_begin|>', '<|tool_call_end|>',
-                     '<|tool_call_argument_begin|>']:
+                     '<|tool_call_argument_begin|>',
+                     # fullwidth kimi/deepseek spellings
+                     '<｜tool▁calls▁section▁begin｜>', '<｜tool▁calls▁section▁end｜>',
+                     '<｜tool▁call▁begin｜>', '<｜tool▁call▁end｜>',
+                     '<｜tool▁call▁argument▁begin｜>']:
             data = data.replace(tag, '')
         data = re.sub(r'functions\.\w+:\d+\s*', '', data)
         out = []
@@ -7781,6 +7785,10 @@ def heal_response(text):
     """Convert non-standard tool-calling formats to proper execute blocks.
     Returns (healed_text, was_healed)."""
     healed = False
+    # Normalize fullwidth kimi/deepseek token spellings first
+    # (<｜tool▁calls▁section▁begin｜> uses U+FF5C pipes and U+2581 blocks) so
+    # every ASCII pattern below also matches those variants.
+    text = text.replace('\uff5c', '|').replace('\u2581', '_')
 
     def _replace_native(m):
         nonlocal healed
@@ -7802,14 +7810,50 @@ def heal_response(text):
     text = re.sub(r'functions\.\w+:\d+', '', text)
 
     if not healed and '```execute' not in text:
-        bare_re = re.compile(r'\{\s*"command"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}', re.DOTALL)
-        if bare_re.search(text):
-            def _replace_bare(m):
-                nonlocal healed
+        # Anthropic-style XML tool calls:
+        # <invoke name="execute"><parameter name="command">date</parameter></invoke>
+        def _replace_xml(m):
+            nonlocal healed
+            cmd = (m.group(1) or '').strip()
+            if cmd:
                 healed = True
-                cmd = m.group(1).replace('\\"', '"').replace('\\n', '\n')
                 return f"\n```execute\n{cmd}\n```\n"
-            text = bare_re.sub(_replace_bare, text)
+            return m.group(0)
+        text = re.sub(r'<invoke[^>]*>\s*<parameter\s+name\s*=\s*["\']?command["\']?\s*>(.*?)</parameter>.*?</invoke>',
+                      _replace_xml, text, flags=re.DOTALL)
+
+        # OpenAI-style nested tool calls:
+        # {"name": "execute", "arguments": {"command": "du -sh /var"}}
+        def _replace_nested(m):
+            nonlocal healed
+            try:
+                obj = json.loads(m.group(0))
+                args = obj.get('arguments', {})
+                cmd = args.get('command') if isinstance(args, dict) else None
+                if isinstance(cmd, str) and cmd.strip():
+                    healed = True
+                    return f"\n```execute\n{cmd}\n```"
+            except Exception:
+                pass
+            return m.group(0)
+        text = re.sub(r'\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}\s*\}',
+                      _replace_nested, text)
+
+        # Flat JSON objects containing a command key (any position, extra
+        # keys allowed): {"command": "ls -la", "explanation": "..."}
+        def _replace_flat(m):
+            nonlocal healed
+            try:
+                obj = json.loads(m.group(0))
+            except Exception:
+                return m.group(0)
+            if isinstance(obj, dict):
+                cmd = obj.get('command')
+                if isinstance(cmd, str) and cmd.strip():
+                    healed = True
+                    return f"\n```execute\n{cmd}\n```"
+            return m.group(0)
+        text = re.sub(r'\{[^{}]+\}', _replace_flat, text)
 
     return text, healed
 
@@ -7830,15 +7874,17 @@ def extract_blocks(text, tag):
 
 def clean_response(text):
     clean = text
+    # Normalize fullwidth kimi/deepseek token spellings so the ASCII strip
+    # patterns below also match them
+    clean = clean.replace('\uff5c', '|').replace('\u2581', '_')
     # Strip Prism32 execute/ask blocks
     for tag in ('execute', 'ask'):
         clean = re.sub(rf'```{tag}\r?\n.*?```', '', clean, flags=re.DOTALL)
     # Strip non-standard tool-calling formats (GLM, Qwen, etc)
     clean = re.sub(r'<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>', '', clean, flags=re.DOTALL)
     clean = re.sub(r'<\|tool_call_begin\|>.*?<\|tool_call_end\|>', '', clean, flags=re.DOTALL)
-    clean = re.sub(r'<\|tool_call_argument_begin\|>', '', clean)
-    clean = re.sub(r'<\|tool_calls_section_end\|>', '', clean)
-    clean = re.sub(r'<\|tool_call_end\|>', '', clean)
+    clean = re.sub(r'<\|tool_calls_section_begin\|>|<\|tool_call_argument_begin\|>', '', clean)
+    clean = re.sub(r'<\|tool_calls_section_end\|>|<\|tool_call_end\|>', '', clean)
     clean = re.sub(r'functions\.\w+:\d+', '', clean)
     return clean.strip()
 
