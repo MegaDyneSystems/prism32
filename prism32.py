@@ -4067,7 +4067,7 @@ class Config:
 
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
     ROOT_PASS = ""  # root password for su/sudo commands (injected as $ROOT_PASS env)
-    STREAM = False
+    STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
     MAX_MEMORY_CTX = 1024  # max chars for memory context in system prompt (0 = disable)
     AGENT_NAME = "MDS"     # name displayed before assistant responses
     PROMPT_CACHING = True  # Enable provider prompt caching (Anthropic native / OpenAI auto / DeepSeek auto)
@@ -4142,6 +4142,7 @@ class Config:
                 "cmd_timeout": cls.CMD_TIMEOUT,
                 "goal_max_steps": cls.GOAL_MAX_STEPS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
+                "stream": cls.STREAM,
                 "thinking_effort": cls.THINKING_EFFORT,
                 "max_memory_ctx": cls.MAX_MEMORY_CTX,
                 "max_context_tokens": cls.MAX_CONTEXT_TOKENS,
@@ -4199,6 +4200,7 @@ class Config:
                 loaded_steps = int(data["goal_max_steps"])
                 cls.GOAL_MAX_STEPS = max(1000, loaded_steps) if loaded_steps == 50 else loaded_steps
             if "auto_save_interval" in data: cls.AUTO_SAVE_INTERVAL = int(data["auto_save_interval"])
+            if "stream" in data: cls.STREAM = bool(data["stream"])
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
             if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = int(data["max_memory_ctx"])
             if "max_context_tokens" in data: cls.MAX_CONTEXT_TOKENS = int(data["max_context_tokens"])

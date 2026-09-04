@@ -416,7 +416,7 @@ Prism32's local overhead is intentionally small:
 - The main program is a single `prism32.py` file of about 456 KB in this working copy.
 - The core uses only Python standard-library modules.
 - There is no browser, Electron shell, Node.js dependency tree, local vector database, or background service required.
-- Default live streaming is off in the Python runtime (`Config.STREAM = False`), which avoids token-by-token redraw work on slow terminals.
+- Live streaming of AI responses is on by default (`Config.STREAM = True`) — tokens (and reasoning, dimmed) render as they arrive and flow into terminal scrollback. Turn it off with `/stream off` (persisted) or `--slow-cpu` on fragile/slow terminals.
 - Runtime memory files are small JSON/Markdown files and are consolidated automatically, for example top 30 command stats and top 15 error patterns in `memory.json`.
 - Large constants (themes, help text, harness candidates, tool scan groups, subagent prompts, memory cache) are lazy-loaded on first access, reducing import-time memory usage.
 
@@ -476,7 +476,7 @@ All flags are optional. `--model`, `--api`, and `--api-key` are **session-only o
 | `--api, -a <url>` | Override API base URL for this session |
 | `--api-key, -k <key>` | Set API key for this session |
 | `--theme, -t <name>` | Start with a specific theme (session-only) |
-| `--turbo` | Enable live streaming output for this session |
+| `--turbo` | Force-enable live streaming (already the default) for this session |
 | `--slow-cpu` | Non-streaming mode, save-on-interaction (old machines) |
 | `--no-boot` | Skip the boot sequence |
 | `--temperature <0.0-2.0>` | AI temperature (session-only) |
