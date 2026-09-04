@@ -5528,8 +5528,13 @@ def ensure_session_dir():
     os.makedirs(Config.SESSION_DIR, exist_ok=True)
 
 def get_session_path(session_id):
-    """Get the file path for a session."""
-    return os.path.join(Config.SESSION_DIR, f"{session_id}.json")
+    """Get the file path for a session. Session ids are sanitized to a
+    single path component — ../, separators, and absolute paths are
+    rejected so /load and /delete cannot escape the sessions dir."""
+    sid = str(session_id or "").strip()
+    if not sid or sid.startswith('.') or '/' in sid or '\\' in sid or '..' in sid:
+        raise ValueError(f"Invalid session id: {session_id!r}")
+    return os.path.join(Config.SESSION_DIR, f"{sid}.json")
 
 def generate_session_id(name=None):
     """Generate a unique session ID."""
@@ -5576,21 +5581,30 @@ def save_session(session_id, history, cmd_log, metadata=None):
         "api_base": Config.API_BASE,
         "theme": Config.THEME,
         "metadata": metadata or {},
-        "history": history,
-        "cmd_log": cmd_log,
+        # stats before history/cmd_log: _quick_scan_session only reads the
+        # first bytes of the file — big histories pushed counts out of the
+        # window and /sessions showed "0 msgs | 0 cmds".
         "stats": {
             "messages": len(history),
             "commands": len(cmd_log)
-        }
+        },
+        "history": history,
+        "cmd_log": cmd_log,
     }
-    path = get_session_path(session_id)
+    try:
+        path = get_session_path(session_id)
+    except ValueError:
+        path = get_session_path(generate_session_id())
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(session_data, f, indent=2)
     return path
 
 def load_session(session_id):
     """Load session from file."""
-    path = get_session_path(session_id)
+    try:
+        path = get_session_path(session_id)
+    except ValueError:
+        return None
     if not os.path.exists(path):
         return None
     try:
@@ -5604,7 +5618,7 @@ def _quick_scan_session(path, sid):
     Reads first 4KB which covers the header fields (id, title, timestamp, model, stats).'''
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            chunk = f.read(4096)
+            chunk = f.read(8192)
         import re as _re
         def _grab(key, fallback=sid):
             m = _re.search(r'\"' + key + r'\":\s*\"([^\"]+)\"', chunk)
@@ -5639,7 +5653,10 @@ def list_sessions():
 
 def delete_session(session_id):
     """Delete a session file."""
-    path = get_session_path(session_id)
+    try:
+        path = get_session_path(session_id)
+    except ValueError:
+        return False
     if os.path.exists(path):
         os.remove(path)
         return True
@@ -6277,6 +6294,30 @@ def _cmd_succeeded(result):
     low = (result or "").lower()[:4000]
     return not any(w in low for w in ["error", "blocked", "timeout", "failed", "failure", "not found", "cancelled", "denied"])
 
+def _split_task_provider(task):
+    """Split a trailing '--provider <name>' switch off a delegate/spawn task.
+    Only matches at end-of-string so quoted tasks that merely mention
+    --provider mid-sentence keep their text intact.
+    Returns (task, provider_or_None)."""
+    m = re.search(r'\s+--provider\s+(\S+)\s*$', task or '')
+    if not m:
+        return task, None
+    return (task[:m.start()] or '').rstrip(' \t'), m.group(1)
+
+def _split_plugin_block(block):
+    """A multi-line execute block where every non-empty line is a Prism32
+    /command is really a list of commands — split them so each runs
+    separately (otherwise everything after the first line is silently
+    swallowed as arguments of the first command)."""
+    lines = [ln.strip() for ln in (block or '').splitlines() if ln.strip()]
+    if len(lines) > 1 and all(ln.startswith('/') for ln in lines):
+        return lines
+    return [block] if (block or '').strip() else []
+    m = re.search(r'\s+--provider\s+(\S+)\s*$', task or '')
+    if not m:
+        return task, None
+    return (task[:m.start()] or '').rstrip(' \t'), m.group(1)
+
 def _try_plugin_cmd(c, history=None):
     """Check if c is a plugin command and dispatch it, returning result or None."""
     c_stripped = c.strip()
@@ -6294,11 +6335,15 @@ def _try_plugin_cmd(c, history=None):
             kv = cmd_args.split(':', 1)
             key = kv[0].strip()
             val = kv[1].strip() if len(kv) > 1 else ""
+            if not key:
+                return "Quantum: key name cannot be empty. Usage: /quantum <key>:<value>"
             if val:
                 _quantum.put(key, val)
                 return f"Quantum: {key} = {val}"
             v = _quantum.get(key)
-            return f"Quantum: {key} = {v}" if v is not None else f"Key '{key}' not found"
+            # 'nothing set' phrasing avoids _cmd_succeeded's 'not found' match
+            # — a normal quantum miss is not a command failure
+            return f"Quantum: {key} = {v}" if v is not None else f"Quantum: nothing set for key '{key}'"
         return f"Usage: /quantum <key>:<value> or /quantum <key>:"
     if cmd_name in ('/harness', 'harness'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "show"
@@ -6481,11 +6526,7 @@ def _try_plugin_cmd(c, history=None):
         task = cmd_args.strip()
         if not task:
             return "Usage: /delegate <task>"
-        provider = None
-        if ' --provider ' in task:
-            parts = task.split(' --provider ', 1)
-            task = parts[0]
-            provider = parts[1].strip().split()[0] if parts[1].strip() else None
+        task, provider = _split_task_provider(task)
         sa = SubAgent(task, provider=provider)
         sa.run()
         _quantum.put(f"subagent_{sa.id}_result", sa.result)
@@ -6496,11 +6537,7 @@ def _try_plugin_cmd(c, history=None):
         task = cmd_args.strip()
         if not task:
             return "Usage: /spawn <task>"
-        provider = None
-        if ' --provider ' in task:
-            parts = task.split(' --provider ', 1)
-            task = parts[0]
-            provider = parts[1].strip().split()[0] if parts[1].strip() else None
+        task, provider = _split_task_provider(task)
         sa = SubAgent(task, provider=provider)
         sa.run_async()
         _quantum.put(f"subagent_{sa.id}_spawned", True)
@@ -6755,7 +6792,7 @@ class QuantumContext:
         with self._lock:
             if not self._data:
                 return "(empty)"
-            return "\n".join(f"  {k}: {str(v)[:120]}" for k, v in self._data.items())
+            return "\n".join(f"  {k}: {str(v)[:240]}" for k, v in self._data.items())
 
 _quantum = QuantumContext()
 _SUBAGENTS = {}  # id -> SubAgent instance
@@ -6847,11 +6884,15 @@ class SubAgent:
         _api_base = Config.API_BASE
         _api_key = Config.API_KEY
         _model = self.model
-        if self.provider and self.provider in PROVIDER_REGISTRY:
-            prov = PROVIDER_REGISTRY[self.provider]
-            _api_base = prov["api_base"]
-            if prov.get("default_key"):
-                _api_key = prov["default_key"]
+        if self.provider:
+            if self.provider in PROVIDER_REGISTRY:
+                prov = PROVIDER_REGISTRY[self.provider]
+                _api_base = prov["api_base"]
+                if prov.get("default_key"):
+                    _api_key = prov["default_key"]
+            else:
+                viz.status(f"Unknown provider '{self.provider}' for {self.id} — using main provider ({Config.PROVIDER})",
+                           "warning")
         try:
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
@@ -6890,7 +6931,10 @@ class SubAgent:
                     if resp.strip():
                         self._history.append({"role": "assistant", "content": resp})
                     command_cancelled = False
+                    _expanded = []
                     for c in commands:
+                        _expanded.extend(_split_plugin_block(c))
+                    for c in _expanded:
                         if agent_cancel_requested():
                             self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
                             self.error = agent_cancel_message()
@@ -6954,18 +6998,19 @@ class SubAgent:
             print(f"  {color}╰{'─' * 50}{RST}")
         return self.result
 
-    def run_async(self):
+    def run_async(self, quiet=False):
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         with _subagent_lock:
             _SUBAGENTS[self.id] = self
         self._thread.start()
-        t = T()
-        with stdout_lock:
-            print(f"\n  {T()['warn']}╭─ SPAWNED SUBAGENT [{self.id}] ASYNC ────────{RST}")
-            print(f"  {T()['warn']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
-            prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
-            print(f"  {T()['warn']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
-            print(f"  {T()['warn']}╰{'─' * 50}{RST}")
+        if not quiet:
+            t = T()
+            with stdout_lock:
+                print(f"\n  {T()['warn']}╭─ SPAWNED SUBAGENT [{self.id}] ASYNC ─────────────────{RST}")
+                print(f"  {T()['warn']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
+                prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
+                print(f"  {T()['warn']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
+                print(f"  {T()['warn']}╰{'─' * 50}{RST}")
         return self.id
 
     def status_str(self):
@@ -7342,6 +7387,36 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
             break
     return last_error
 
+def _content_to_text(content):
+    """Normalize message content to a string. Handles OpenAI parts-list
+    content ([{"type": "text", "text": ...}]) and null/missing content so
+    downstream string methods never crash."""
+    if content is None:
+        return ''
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                parts.append(str(p.get('text') or p.get('content') or ''))
+        return ''.join(parts)
+    return str(content)
+
+def _api_error_text(data):
+    """Extract a provider error payload returned with HTTP 200 (e.g.
+    {"error": {"message": "insufficient quota"}}). Returns '' if absent."""
+    err = data.get('error')
+    if not err:
+        return ''
+    if isinstance(err, dict):
+        msg = str(err.get('message') or err.get('code') or 'unknown error')
+        typ = err.get('type') or 'api_error'
+        return f"[ERROR] API error: {msg} ({typ})"
+    return f"[ERROR] API error: {err}"
+
 def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             api_base=None, api_key=None, model=None):
     '''Resilient AI query with retry, backoff, and history trimming.'''
@@ -7405,8 +7480,13 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                 if agent_cancel_requested(cancel_event):
                     return AGENT_CANCELLED_RESPONSE
                 _track_usage(data.get('usage'))
+                _err = _api_error_text(data)
+                if _err:
+                    return _err
                 _choices = data.get('choices') or []
-                return _choices[0].get('message', {}).get('content', '') if _choices else ''
+                if _choices:
+                    return _content_to_text(_choices[0].get('message', {}).get('content'))
+                return ''
         except urllib.error.HTTPError as e:
             if agent_cancel_requested(cancel_event):
                 return AGENT_CANCELLED_RESPONSE
@@ -7572,6 +7652,12 @@ def stream_response(resp, cancel_event=None):
                 break
             try:
                 chunk = json.loads(data)
+                _err = _api_error_text(chunk)
+                if _err:
+                    _flush_display(force=True)
+                    with stdout_lock:
+                        sys.stdout.write(RST + SHOW)
+                    return _err
                 usage = chunk.get('usage')
                 if usage:
                     _track_usage(usage)
@@ -7579,8 +7665,8 @@ def stream_response(resp, cancel_event=None):
                 if not _choices:
                     continue
                 delta = _choices[0].get('delta', {})
-                content = delta.get('content', '')
-                reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
+                content = _content_to_text(delta.get('content'))
+                reasoning = _content_to_text(delta.get('reasoning_content')) or _content_to_text(delta.get('reasoning'))
                 
                 if reasoning:
                     _queue_display(reasoning, "reasoning")
@@ -7741,6 +7827,16 @@ def build_context():
     startup_block = f"\nSTARTUP MEMORY ({STARTUP_MEMORY_FILE}):\n{startup_mem}\n" if startup_mem else ""
     harness_block = f"\n{harness_context()}\n"
     evolve_block = f"\n{evolve_context()}\n" if _EVOLVE_MODE else ""
+    # Shared quantum state: subagents get this injected in their system
+    # prompt — the main agent needs it too, or it only sees shared keys
+    # after manually running /quantum (README: "system prompt is rebuilt
+    # mid-task to include the latest quantum state").
+    quantum_block = ""
+    try:
+        if _quantum.was_used():
+            quantum_block = f"\nSHARED QUANTUM CONTEXT (cross-agent state; /quantum to read or write):\n{str(_quantum)}\n"
+    except Exception:
+        pass
     
     # List available plugin commands that the AI can invoke via execute blocks
     plugin_cmds = [cmd.name for cmd in registry.all()
@@ -7754,7 +7850,7 @@ def build_context():
         f"CPU: {info.get('cpu', '')}\nRAM: {info.get('ram', '')}\n"
         f"Disk: {info.get('disk', '')}\nIP: {info.get('ip', '')}\n"
         f"Uptime: {info.get('uptime', '')}\nCWD: {os.getcwd()}\n"
-        f"Memory:{mem}\n{extra}{startup_block}{soul_block}{harness_block}{evolve_block}{plugin_block}\nPROMPTSHARD status: {read_promptshard().get('status', 'active')} | Captain agent delegates using /delegate and /spawn with quantum context syncing."
+        f"Memory:{mem}\n{extra}{startup_block}{soul_block}{quantum_block}{harness_block}{evolve_block}{plugin_block}\nPROMPTSHARD status: {read_promptshard().get('status', 'active')} | Captain agent delegates using /delegate and /spawn with quantum context syncing."
     )
 
 # ── User Interaction (ask / interject) ──────────────────────
@@ -7955,7 +8051,10 @@ def cmd_goal(goal_text, history, cmd_log):
                 box(f"STEP {step} ANALYSIS", clean, "accent")
 
             command_cancelled = False
+            _expanded = []
             for c in commands:
+                _expanded.extend(_split_plugin_block(c))
+            for c in _expanded:
                 c = c.strip()
                 viz.tool_call("execute", c)
                 result = run_cmd(c)
@@ -9866,12 +9965,7 @@ def main():
         # ── Subagent commands ──
         if cmd == 'delegate':
             if args_str:
-                task = args_str
-                provider = None
-                if ' --provider ' in task:
-                    parts = task.split(' --provider ', 1)
-                    task = parts[0]
-                    provider = parts[1].strip().split()[0] if parts[1].strip() else None
+                task, provider = _split_task_provider(args_str)
                 sa = SubAgent(task, provider=provider)
                 sa.run()
                 _quantum.put(f"subagent_{sa.id}_result", sa.result)
@@ -9885,14 +9979,9 @@ def main():
 
         if cmd == 'spawn':
             if args_str:
-                task = args_str
-                provider = None
-                if ' --provider ' in task:
-                    parts = task.split(' --provider ', 1)
-                    task = parts[0]
-                    provider = parts[1].strip().split()[0] if parts[1].strip() else None
+                task, provider = _split_task_provider(args_str)
                 sa = SubAgent(task, provider=provider)
-                sa.run_async()
+                sa.run_async(quiet=True)  # banner printed below, once
                 t = T()
                 print(f"  {t['warn']}╭─ SPAWNED [{sa.id}] ASYNC ─────────────────{RST}")
                 print(f"  {t['warn']}│{RST}  {t['bright']}Task:{RST} {task[:80]}")
@@ -9937,9 +10026,10 @@ def main():
             t = T()
             result_text = (sa.result or sa.error or '?')[:2000]
             box(f"SUBAGENT {sid} RESULT", result_text, "primary")
-            # Store result in quantum for other agents
-            _quantum.put(f"subagent:{sid}:result", sa.result or sa.error or "")
-            _quantum.put(f"subagent:{sid}:task", sa.task)
+            # Store result in quantum for other agents (underscore taxonomy,
+            # matching subagent_{id}_result used by /delegate and /spawn)
+            _quantum.put(f"subagent_{sid}_result", sa.result or sa.error or "")
+            _quantum.put(f"subagent_{sid}_task", sa.task)
             history.append({"role": "user",
                 "content": f"[Collected subagent {sid}]\n" + (sa.result or sa.error or '?')[:2000]})
             with _subagent_lock:
@@ -9960,12 +10050,14 @@ def main():
                 kv = args_str.split(':', 1)
                 key = kv[0].strip()
                 val = kv[1].strip() if len(kv) > 1 else ""
-                if val:
+                if not key:
+                    print(f"  Quantum: key name cannot be empty.")
+                elif val:
                     _quantum.put(key, val)
                     print(f"  Quantum: {key} = {val[:80]}")
                 else:
                     v = _quantum.get(key)
-                    print(f"  Quantum: {key} = {str(v)[:80]}" if v is not None else f"  Key '{key}' not found")
+                    print(f"  Quantum: {key} = {str(v)[:80]}" if v is not None else f"  Quantum: nothing set for key '{key}'")
             else:
                 print(f"  Usage: /quantum                    (view all)")
                 print(f"        /quantum <key>:<value>      (set)")
@@ -10267,6 +10359,7 @@ def main():
             history.append({"role": "user", "content": user_input})
         max_iter = 9999
         nudges = 0
+        asks = 0
 
         for iteration in range(max_iter):
             _ctx = context_pct(history)
@@ -10345,16 +10438,30 @@ def main():
                 if resp.strip():
                     history.append({"role": "assistant", "content": resp})
                 save_current_session(history, cmd_log)
+                # Cap consecutive asks: with stdin at EOF every answer comes
+                # back empty and the model re-asks forever (unbounded API
+                # loop). Give up after 4 unanswered questions.
+                asks += 1
+                if asks > 4:
+                    box("AI KEEPS ASKING",
+                        "The AI asked 4 questions in a row without receiving an answer "
+                        "(stdin may be closed). Ending this turn. Re-send your request "
+                        "or answer the questions in a normal interactive session.", "warn")
+                    break
                 continue
 
             if commands:
+                asks = 0
                 if clean and iteration == 0 and not Config.STREAM:
                     box("AI ANALYSIS", clean, "accent")
                 if resp.strip():
                     history.append({"role": "assistant", "content": resp})
 
                 command_cancelled = False
+                _expanded = []
                 for c in commands:
+                    _expanded.extend(_split_plugin_block(c))
+                for c in _expanded:
                     c = c.strip()
                     viz.tool_call("execute", c)
                     plugin_result = _try_plugin_cmd(c, history=history)

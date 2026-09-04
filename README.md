@@ -124,7 +124,7 @@ Most-used first commands inside Prism32:
 /extend <goal>        Generate/load a temporary plugin for a missing capability
 /extend prompt        Print the plugin-generation prompt
 /evolve on            Enable self-repair/plugin/tool-scan context
-/json <file>          Read JSON files with pretty-printing and smart summary
+/json <file>          Read JSON files (AI-side: inside execute blocks)
 /quit                 Exit
 ```
 
@@ -244,7 +244,7 @@ Prism32 combines several systems in one terminal harness:
 - Self-extension with `/extend`: Prism32 can ask the configured model to generate a stdlib-only plugin, syntax-check it, write it, load it, and use the new command immediately.
 - Memory and evolution files that let the system remember machine quirks, recurring fixes, tools, baselines, user rules, and long-term notes.
 - Promptshard files for structured job assignments and subagent deployment.
-- Harness absorption: Prism32 can detect external AI CLIs such as OpenCode, Codex CLI, Claude Code, Aider, Gemini CLI, Goose, and Cursor Agent, then include their availability in context.
+- Harness absorption: Prism32 can detect external AI CLIs such as OpenCode, Codex CLI, Claude Code, KimiCode, Aider, Gemini CLI, Goose, Pi AI CLI, Hermes Agent, and Cursor Agent, then include their availability in context.
 - Terminal interjection while streaming: type while the AI is responding, press Enter, and your message interrupts the model.
 - Bare Escape cancellation: press Escape to stop active AI streaming, non-streaming API waits, foreground shell commands, and goal-mode work.
 - Low-RAM mode: auto-detects <64MB systems, skips heavy startup paths, and caps output to stay usable on 27MB OpenWrt routers.
@@ -268,7 +268,7 @@ The combination creates real emergent power:
 
 **Model mixing for cost and speed.** You talk to a strong model. Subagents run on cheap fast ones. Thousands of tokens of infrastructure scanning happen on a free-tier model while your main session stays on the expensive reasoning model for analysis. `/delegate scan every host on this subnet --provider groq` costs almost nothing. No other terminal agent harness lets you mix providers and models per-task with zero configuration changes.
 
-**Harness absorption.** Prism32 detects OpenCode, Codex CLI, Claude Code, Aider, Gemini CLI, Goose, Cursor Agent, and other AI CLIs on the system. It injects their capabilities into its context. It can then delegate a task to a super-subagent seeded with those tools. Prism32 becomes a coordinator over every AI agent CLI installed on the machine.
+**Harness absorption.** Prism32 detects OpenCode, Codex CLI, Claude Code, KimiCode, Aider, Gemini CLI, Goose, Pi AI CLI, Hermes Agent, Cursor Agent, and other AI CLIs on the system. It injects their capabilities into its context. It can then delegate a task to a super-subagent seeded with those tools. Prism32 becomes a coordinator over every AI agent CLI installed on the machine.
 
 **The peripheral surface is the entire Linux device tree.** USB serial adapters, GPIO pins, I2C sensors, SPI displays, CAN buses, SDR dongles, cameras, microphones, speakers, relays, motor controllers, 3D printer serial ports, Zigbee coordinators, Z-Wave sticks, Bluetooth adapters, WiFi interfaces, and anything with a /dev node. If Linux can talk to it, the agent can script against it. Combine that with on-the-fly plugin generation and you have a universal hardware controller that learns new protocols mid-session.
 
@@ -295,13 +295,13 @@ Optional tools make Prism32 more capable:
 - `git` for updates, repo inspection, and code tasks.
 - `bash` for the Unix installer and richer shell automation.
 - Local model servers such as llama.cpp or Ollama.
-- External AI harnesses such as OpenCode, Codex CLI, Claude Code, Aider, Gemini CLI, Goose, or Cursor Agent.
+- External AI harnesses such as OpenCode, Codex CLI, Claude Code, KimiCode, Aider, Gemini CLI, Goose, Pi AI CLI, Hermes Agent, or Cursor Agent.
 
 ## Supported Systems
 
 Prism32 is a pure-stdlib Python program, so the real portability rule is simple: if Python 3.7+ can run and the system has a usable shell, Prism32 should start. Some features depend on terminal support, process control, SSL certificates, and local command availability.
 
-The repository has automated CI syntax checks on Ubuntu and macOS using Python 3.9, 3.10, 3.11, 3.12, and 3.13. Unit tests run on Ubuntu across the same Python versions. Deployed copies have also been syntax-checked on NetBSD 10.1 and macOS 10.13 in the development environment; NetBSD PTY smoke tests have been used for terminal behavior.
+The repository has automated CI syntax checks and unit tests on Ubuntu (Python 3.9, 3.10, 3.11, 3.12, and 3.13, plus a 3.7 compile check). Deployed copies have also been syntax-checked on NetBSD 10.1 and macOS 10.13 in the development environment; NetBSD PTY smoke tests have been used for terminal behavior.
 
 Primary targets:
 
@@ -413,7 +413,7 @@ Use `/arch` to inspect the detected label. Use `PRISM32_ARCH=<label>` or `/arch 
 
 Prism32's local overhead is intentionally small:
 
-- The main program is a single `prism32.py` file of about 410 KB in this working copy.
+- The main program is a single `prism32.py` file of about 456 KB in this working copy.
 - The core uses only Python standard-library modules.
 - There is no browser, Electron shell, Node.js dependency tree, local vector database, or background service required.
 - Default live streaming is off in the Python runtime (`Config.STREAM = False`), which avoids token-by-token redraw work on slow terminals.
@@ -466,6 +466,30 @@ prism32 --slow-cpu
 
 Use `/stream off` if you enabled streaming in the current session.
 
+## Command-Line Flags
+
+All flags are optional. `--model`, `--api`, and `--api-key` are **session-only overrides** — they apply for the current session and are never persisted to `config.json` (persist providers/models/keys with `/provider ...`, `/model ...`, or `/set ...` inside the app instead):
+
+| Flag | Effect |
+| --- | --- |
+| `--model, -m <name>` | Override model name for this session |
+| `--api, -a <url>` | Override API base URL for this session |
+| `--api-key, -k <key>` | Set API key for this session |
+| `--theme, -t <name>` | Start with a specific theme (session-only) |
+| `--turbo` | Enable live streaming output for this session |
+| `--slow-cpu` | Non-streaming mode, save-on-interaction (old machines) |
+| `--no-boot` | Skip the boot sequence |
+| `--temperature <0.0-2.0>` | AI temperature (session-only) |
+| `--goal, -g <task>` | Run in autonomous goal mode and exit |
+| `--set-timeout <sec>` | Set command timeout and exit |
+| `--update <url|path>` | Update prism32 from a URL or file path and exit |
+| `--setup-runtime` | Refresh startup memory, harness scan, evolve baseline, exit |
+| `--harness-scan` | Scan for external AI harness CLIs and exit |
+| `--evolve-setup` | Create evolve docs/baseline/tool scan and exit |
+| `--version, -V` | Show version and exit |
+
+Additional operator commands not listed elsewhere: `/agentname <name>`, `/autosave <min>`, `/rootpass <pwd>`, `/verify-ssl [on|off]`, `/maxhistory <n>`, `/maxtokens <n>`. Extra environment variables: `PRISM32_VERIFY_SSL=0` (disable TLS verification), `PRISM32_DEVICE=<name>` (manual device label), plus `PRISM32_ARCH` and `NO_COLOR`.
+
 ## How The Agent Loop Works
 
 The main architecture is simple and inspectable:
@@ -501,7 +525,7 @@ Prism32 runs those commands, captures the results, and asks the model to continu
 
 ## Escape, Interjection, And Control
 
-During streaming responses, you can type at any time. The footer changes to `INTERJECT>`. Press Enter to send your interjection as the next message after the AI finishes its current response.
+During streaming responses, you can type at any time. The footer changes to `interject▶`. Press Enter to send your interjection as the next message after the AI finishes its current response.
 
 Useful controls:
 
@@ -668,6 +692,7 @@ The built-in provider registry contains:
 - `together`: `https://api.together.xyz/v1`.
 - `openrouter`: `https://openrouter.ai/api/v1`.
 - `neuralwatt`: `https://api.neuralwatt.com/v1`.
+- `deepseek`: `https://api.deepseek.com/v1`.
 - `custom`: operator-specified.
 
 Prism32 sends OpenAI-style `/chat/completions` requests. Providers work best when they expose an OpenAI-compatible API surface. For providers with native non-OpenAI APIs, use a compatible proxy or gateway.
@@ -676,9 +701,9 @@ Prism32 sends OpenAI-style `/chat/completions` requests. Providers work best whe
 
 All commands require the `/` prefix. Bare text is sent to the AI.
 
-Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/delegate`, `/spawn`, `/subagents`, `/skill-create`, `/auto delete|pause|resume|show`, `/shard reset`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks.
+Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/skill-create`, `/auto delete|pause|resume|show`, `/shard reset`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks. (`/delegate`, `/spawn`, `/subagents`, and `/collect` are exceptions — they work for both the operator and from execute blocks.)
 
-From `execute` blocks, the model can use shell commands (the normal path), plugin-registered commands, `/quantum`, `/auto` (create/list/run automations), `/skill-list`, `/skill-load`, `/shard` (show/deploy/set/secrets/complete), `/harness scan|context|path`, `/evolve on|tools|diff|docs|context`, `/extend`, `/update`, and `/memory path`.
+From `execute` blocks, the model can use shell commands (the normal path), plugin-registered commands, `/quantum`, `/auto` (create/list/run automations), `/skill-list`, `/skill-load`, `/shard` (show/deploy/set/secrets/complete), `/harness scan|context|path`, `/evolve on|tools|diff|docs|context`, `/extend`, `/delegate`, `/spawn`, `/collect`, `/subagents`, and `/memory path`. (`/update` is operator-side only — run it yourself at the prompt; use the `--update` flag before starting an agent session.)
 
 Core:
 
@@ -843,7 +868,7 @@ the model sees all prior results when deciding the next step.
 2. For each block:
    a. Check if it's a plugin command (/quantum, /extend, /skill-load, etc.)
    b. If not, execute as shell command via run_cmd()
-   c. Capture output (truncated to 4000 chars)
+   c. Capture output (results fed back to the model are capped — 1500 chars normal, 500 on low-RAM devices)
    d. Feed result back: "Executed: <cmd>\nResult:\n<output>\nContinue..."
 3. Model sees all results and decides next action
 4. Repeat until model gives final answer with no execute blocks
@@ -937,7 +962,6 @@ The summarization engine scores every line by information density:
 | Errors/failures/denied | 3 points |
 | Package commands (apt/pip/brew) | 2 points |
 | Version numbers (v1.2.3) | 2 points |
-| Headers (===/---/***) | -1 point |
 
 Only the top N most information-dense lines are kept. Lines <5 or >200 chars are skipped.
 
@@ -954,7 +978,7 @@ This state is cleared on `/clear`, `/goal` end, and new goal start.
 
 ### Recent Message Floor
 
-The system guarantees at least **8K tokens** (or 50% on very small models) for the most recent messages. This means:
+The system guarantees at least **8K tokens** of recent messages in normal trimming (4K on very small models, or 50% of the context window, whichever is larger). This means:
 
 - The agent always sees its last few commands and results in full
 - The agent always sees the last user instruction
@@ -1342,7 +1366,7 @@ Prism32 scans for external AI command-line harnesses and records them in `~/.pri
 /harness path
 ```
 
-Detected tools may include OpenCode, Codex CLI, Claude Code, KimiCode, Aider, Gemini CLI, Goose, Cursor Agent, and related commands. Prism32 does not bundle or authenticate those tools. It only detects what exists locally and adds that information to the AI context.
+Detected tools may include OpenCode, Codex CLI, Claude Code, KimiCode, Aider, Gemini CLI, Goose, Pi AI CLI, Hermes Agent, Cursor Agent, and related commands. Prism32 does not bundle or authenticate those tools. It only detects what exists locally and adds that information to the AI context.
 
 ## Why Prism32 Can Do More Than A Plain Chat CLI
 
@@ -1400,7 +1424,7 @@ The `custom_api_base` flag is saved in config across sessions.
 
 ## Themes
 
-Prism32 registers 33 themes, including phosphor, amber, cyan, vapor, nord, solarized, neon, retro, ice, ocean, sunset, forest, plasma, clear, glass, ghost, smoke, paper, ink, daylight, slate, synthcity, outrun, laserdisc, vapordark, chromecrt, sgi, dec, monoamber, iris, hpterm, ember, and cyber.
+Prism32 registers 34 themes, including phosphor, amber, cyan, vapor, nord, solarized, neon, retro, ice, ocean, sunset, forest, plasma, clear, glass, ghost, smoke, paper, ink, daylight, slate, synthcity, outrun, laserdisc, vapordark, chromecrt, sgi, dec, monoamber, iris, hpterm, ember, cyber, and cyberspace.
 
 Cycle themes:
 
@@ -1416,7 +1440,7 @@ prism32 --theme amber
 
 For old terminals, prefer the 16-color compatible themes such as `sgi`, `dec`, `monoamber`, `iris`, and `hpterm` through runtime theme cycling or configuration.
 
-The default visual style uses box-drawing borders (`┌─┐`), `◈` diamond separators, `▶` prompt arrows, and `🔧` wrench tool icons. Step headers use thin `─` lines, and content boxes expand to the full terminal width (up to 120 chars).
+The default visual style uses half-block borders (`▛▀▜` / `▙▄▟`), `|` status-bar separators, `▶` prompt arrows, and `✓`/`✗` success markers on tool output. Step headers use thin `─` lines, and content boxes expand to the terminal width (capped at 78 chars).
 
 ## Floppy And Removable Media
 
@@ -1442,7 +1466,7 @@ mount /dev/sdX /mnt/floppy
 cd /mnt/floppy && sh AUTORUN.SH
 ```
 
-The installer copies `prism32.py` to `~/.prism32/` locally, so the media can be ejected after install. Your configuration, plugins, and memory are all preserved. Total image size: ~410 KB, fits easily on 1.44 MB floppy with 71% free.
+The installer copies `prism32.py` to `~/.prism32/` locally, so the media can be ejected after install. Your configuration, plugins, and memory are all preserved. Total image size: ~470 KB, fits easily on 1.44 MB floppy with ~68% free.
 
 ## OpenWrt Router Install
 
@@ -1467,7 +1491,7 @@ The OpenWrt installer:
 - Low-flash detection: warns and suggests USB install below 8 MB free
 - USB/SD install support: installs Python + Prism32 to external storage
 - Downloads `prism32.py` from GitHub if not present locally
-- Router-tuned config: lower `max_history` (500), `max_tokens` (4096), `stream: false`
+- Router-tuned config: lower `max_history` (500), `max_response_tokens` (4096), `stream: false`
 - Creates `/etc/profile.d/prism32.sh` for USB PATH setup
 - Works on 4 MB+ flash (with USB), 24 MB+ RAM
 
@@ -1549,8 +1573,9 @@ This installs Python 3 + git, clones Prism32, creates a `prism32` command in `$P
 # After install, start Prism32:
 prism32
 
-# Use a cloud provider:
-prism32 --provider openrouter --api-key sk-or-v1-...
+# Use a cloud provider (no --provider flag exists — set it inside the app
+# with /provider openrouter, then /provider key sk-or-v1-...):
+prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
 ```
 
 Works on: phones, tablets, Chromecast with Google TV, Android TV, Wear OS watches, Fire TV (sideloaded Termux), and any device that can run Termux.
@@ -1621,7 +1646,9 @@ HOME=/tmp prism32
 To connect to a cloud provider (since NAS likely has no local LLM):
 
 ```sh
-HOME=/tmp prism32 --provider openrouter --api-key sk-or-v1-...
+# CLI flags are session-only overrides — persist the provider with
+# /provider openrouter and /provider key inside the app instead:
+HOME=/tmp prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
 ```
 
 ### QNAP QTS
@@ -1690,7 +1717,7 @@ Press Escape.
 
 "Process killed" or OOM on an embedded device (router, IoT):
 
-The single-file `prism32.py` is ~410 KB. On devices with less than ~64 MB RAM, CPython's parser may not have enough memory to compile it. Use a pre-compiled `.pyc` instead (see "Embedded and Ultra-Low-RAM Devices" above), or compile on a host with the same Python version and copy the `.pyc` to the device.
+The single-file `prism32.py` is ~460 KB. On devices with less than ~64 MB RAM, CPython's parser may not have enough memory to compile it. Use a pre-compiled `.pyc` instead (see "Embedded and Ultra-Low-RAM Devices" above), or compile on a host with the same Python version and copy the `.pyc` to the device.
 
 Cost tracking shows wrong amount:
 
