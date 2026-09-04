@@ -6898,6 +6898,7 @@ class SubAgent:
                            "warning")
         try:
             nudges = 0
+            nudge_marks = []  # indices of announce/nudge exchanges in self._history
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
                 # Context management, trim if approaching limit
@@ -6927,6 +6928,12 @@ class SubAgent:
                     if was_healed:
                         commands = extract_blocks(resp, 'execute')
                 if commands:
+                    nudges = 0
+                    if nudge_marks:
+                        for idx in sorted(nudge_marks, reverse=True):
+                            if idx < len(self._history):
+                                del self._history[idx]
+                        nudge_marks = []
                     clean = clean_response(resp)
                     if clean:
                         with stdout_lock:
@@ -6976,12 +6983,27 @@ class SubAgent:
                         continue
                     clean = clean_response(resp)
                     # Text-only announcement ("I'll read the files now:") must not
-                    # silently complete the subagent — nudge it to act (max 3).
-                    if nudges < 3 and looks_like_announcement(clean):
+                    # silently complete the subagent — nudge (then reset) until
+                    # it acts. Options are handled by the harness, not the operator.
+                    if looks_like_announcement(clean):
                         nudges += 1
                         if resp.strip():
                             self._history.append({"role": "assistant", "content": resp})
-                        self._history.append({"role": "user", "content": "STOP ANNOUNCING. Your ENTIRE next response must be exactly one ```execute block — copy this shape:\n\n```execute\n<the first command you keep describing>\n```\n\nNo preamble. The block ONLY."})
+                            nudge_marks.append(len(self._history) - 1)
+                        if nudges <= 3:
+                            self._history.append({"role": "user", "content": "STOP ANNOUNCING. Your ENTIRE next response must be exactly one ```execute block — copy this shape:\n\n```execute\n<the first command you keep describing>\n```\n\nNo preamble. The block ONLY."})
+                        elif nudges <= 6:
+                            # Protocol reset: purge failed exchanges, replay surgically
+                            for idx in sorted(nudge_marks, reverse=True):
+                                if idx < len(self._history):
+                                    del self._history[idx]
+                            nudge_marks = []
+                            self._history.append({"role": "user", "content": "PROTOCOL RESET. Your recent replies contained no ```execute block and have been removed. Respond now with ONLY the ```execute block for your next action."})
+                        else:
+                            self.result = "[SUBAGENT] Did not emit any execute block after repeated recovery attempts."
+                            self.error = "announce-loop"
+                            self.done = True
+                            return
                         continue
                     if not clean:
                         self.result = "[SUBAGENT] No actionable response."
@@ -10555,6 +10577,7 @@ def main():
         max_iter = 9999
         nudges = 0
         asks = 0
+        nudge_marks = []  # history indices of announce/nudge exchanges added this turn
 
         for iteration in range(max_iter):
             _ctx = context_pct(history)
@@ -10647,6 +10670,15 @@ def main():
 
             if commands:
                 asks = 0
+                nudges = 0
+                # Compliance achieved: purge the failed announce/nudge exchanges
+                # so future turns aren't contaminated by the model's own
+                # announcements (in-context style matching).
+                if nudge_marks:
+                    for idx in sorted(nudge_marks, reverse=True):
+                        if idx < len(history):
+                            del history[idx]
+                    nudge_marks = []
                 if clean and iteration == 0 and not Config.STREAM:
                     box("AI ANALYSIS", clean, "accent")
                 if resp.strip():
@@ -10725,13 +10757,26 @@ def main():
                                           "Begin with the very first action you announced. The block ONLY.")
                         if resp.strip():
                             history.append({"role": "assistant", "content": resp})
+                            nudge_marks.append(len(history) - 1)
                         history.append({"role": "user", "content": nudge_text})
+                        nudge_marks.append(len(history) - 1)
                         continue
-                    box("AGENT STALLED",
-                        "The model announced actions repeatedly without emitting any execute block "
-                        "(4 nudges produced no tool call). Type > to nudge it again, /model to switch "
-                        "to a stronger model, or rephrase the task.", "warn")
-                    break
+                    # Ladder exhausted: PROTOCOL RESET, no operator intervention.
+                    # Purge the failed announce/nudge exchanges (the model gets
+                    # re-reinforced by its own announcements in context) and
+                    # replay the task with a surgical instruction.
+                    nudges += 1
+                    for idx in sorted(nudge_marks, reverse=True):
+                        if idx < len(history):
+                            del history[idx]
+                    nudge_marks = []
+                    if nudges >= 20:
+                        viz.status("Ending turn after 20 automatic recovery attempts", "error")
+                        break
+                    viz.status("Protocol reset — replaying task without the failed announcements", "warning")
+                    history.append({"role": "user", "content": "PROTOCOL RESET. Your recent replies contained no ```execute block and have been removed from this conversation. Respond now with ONLY the ```execute block for your next action — no prose, no plan, no announcement."})
+                    nudge_marks.append(len(history) - 1)
+                    continue
                 if not Config.STREAM:
                     t2 = T()
                     print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
