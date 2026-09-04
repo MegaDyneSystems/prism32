@@ -26,3 +26,16 @@ def test_final_answers_not_flagged():
     assert not prism32.looks_like_announcement("Here is a summary of what was changed.")
     assert not prism32.looks_like_announcement("")
     assert not prism32.looks_like_announcement(None)
+
+
+def test_unclosed_command_fence_detection():
+    # finish_reason=length truncation mid-block
+    assert prism32._unclosed_command_fence("No output at all. Let me check the capture file separately:\n```execute\nls /tm")
+    assert prism32._unclosed_command_fence("```ask\nwhat now")
+    # complete blocks must NOT be flagged
+    assert not prism32._unclosed_command_fence("text:\n```execute\nls\n```\nafter")
+    assert not prism32._unclosed_command_fence("plain text with no fences at all")
+    assert not prism32._unclosed_command_fence("")
+    assert not prism32._unclosed_command_fence(None)
+    # complete block followed by a truncated NON-command fence is not a stall
+    assert not prism32._unclosed_command_fence("```execute\nls\n```\n```json\n{\"a\": 1")

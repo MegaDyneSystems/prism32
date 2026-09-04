@@ -6965,6 +6965,13 @@ class SubAgent:
                     # Inject latest quantum context so subagent sees cross-agent data
                     self._history[0] = self._build_history()[0]
                 else:
+                    if _unclosed_command_fence(resp):
+                        # Truncated mid-block (finish_reason=length): don't let the
+                        # subagent die silently — ask for the rest of the block.
+                        if resp.strip():
+                            self._history.append({"role": "assistant", "content": resp})
+                        self._history.append({"role": "user", "content": "Your last response ended with an UNCLOSED ```execute block (truncated). Re-emit the complete block, continuing exactly where you left off."})
+                        continue
                     clean = clean_response(resp)
                     if not clean:
                         self.result = "[SUBAGENT] No actionable response."
@@ -7743,6 +7750,23 @@ def looks_like_announcement(text):
     if re.search(r"(?i)\blet (?:me|us)\s+\S", t):
         return True
     return False
+
+def _unclosed_command_fence(text):
+    """True if the response opens a ```execute/```ask block that is never
+    closed — the classic signature of finish_reason=length truncation. The
+    partial block yields no extractable command, the tail text never renders,
+    and (without this check) the turn ends silently as if the agent stopped."""
+    if not text:
+        return False
+    open_tag = None
+    for m in re.finditer(r'```[^\n]*', text):
+        tok = m.group(0).strip().lower()
+        if open_tag is None:
+            if tok.startswith('```execute') or tok.startswith('```ask'):
+                open_tag = tok
+        else:
+            open_tag = None
+    return open_tag is not None
 
 def heal_response(text):
     """Convert non-standard tool-calling formats to proper execute blocks.
@@ -10510,12 +10534,20 @@ def main():
                 # stop with no execute block. Nudge the agent to actually emit
                 # the block instead of silently ending the turn (max 3 per
                 # user turn).
-                if nudges < 3 and looks_like_announcement(clean):
+                truncated_block = _unclosed_command_fence(resp)
+                if nudges < 3 and (truncated_block or looks_like_announcement(clean)):
                     nudges += 1
-                    viz.status("Agent announced actions without an execute block — nudging it to act", "info")
+                    if truncated_block:
+                        viz.status("Response truncated mid-block — asking the agent to re-emit it", "info")
+                        nudge_text = ("Your last response ended with an UNCLOSED ```execute block — it was cut off "
+                                      "(likely at the max response length). Re-emit the complete ```execute block now, "
+                                      "continuing exactly where you left off. Keep commands short enough to finish.")
+                    else:
+                        viz.status("Agent announced actions without an execute block — nudging it to act", "info")
+                        nudge_text = "You said you would take action, but you did not emit any ```execute block. If a command is needed, emit the actual ```execute block NOW in your response — act, don't announce. Otherwise give your final answer directly."
                     if resp.strip():
                         history.append({"role": "assistant", "content": resp})
-                    history.append({"role": "user", "content": "You said you would take action, but you did not emit any ```execute block. If a command is needed, emit the actual ```execute block NOW in your response — act, don't announce. Otherwise give your final answer directly."})
+                    history.append({"role": "user", "content": nudge_text})
                     continue
                 if not Config.STREAM:
                     t2 = T()
