@@ -19,18 +19,53 @@ def test_config_defaults():
 
 def test_config_save_load():
     """Config save/load should preserve values."""
-    # Save current config
+    original_file = Config.CONFIG_FILE
     original = Config.ROOT_PASS
-    Config.ROOT_PASS = "test_password"
-    Config.save_config()
-    
-    # Reload
-    Config.load_config()
-    assert Config.ROOT_PASS == "test_password"
-    
-    # Restore
-    Config.ROOT_PASS = original
-    Config.save_config()
+    tmpdir = tempfile.mkdtemp(prefix="prism32-cfg-")
+    Config.CONFIG_FILE = os.path.join(tmpdir, "config.json")
+    try:
+        Config.ROOT_PASS = "test_password"
+        Config.save_config()
+
+        # Reload from the fresh file
+        Config.ROOT_PASS = ""
+        Config.load_config()
+        assert Config.ROOT_PASS == "test_password"
+    finally:
+        Config.CONFIG_FILE = original_file
+        Config.ROOT_PASS = original
+
+def test_config_session_only_keys_not_persisted():
+    """CLI-overridden fields (SESSION_ONLY_KEYS) must keep their on-disk
+    values when anything triggers a save mid-session."""
+    import json
+    original_file = Config.CONFIG_FILE
+    tmpdir = tempfile.mkdtemp(prefix="prism32-cfg-")
+    Config.CONFIG_FILE = os.path.join(tmpdir, "config.json")
+    old_model, old_key = Config.MODEL, Config.API_KEY
+    old_keys = set(Config.SESSION_ONLY_KEYS)
+    try:
+        # Persist a baseline config with real-looking values
+        Config.MODEL = "saved-model"
+        Config.API_KEY = "saved-key"
+        Config.SESSION_ONLY_KEYS.clear()
+        Config.save_config()
+
+        # Simulate CLI overrides + a later save (e.g. /stream off)
+        Config.MODEL = "cli-model"
+        Config.API_KEY = "cli-key"
+        Config.SESSION_ONLY_KEYS.update({"model", "api_key"})
+        Config.save_config()
+
+        with open(Config.CONFIG_FILE) as f:
+            data = json.load(f)
+        assert data["model"] == "saved-model"
+        assert data["api_key"] == "saved-key"
+    finally:
+        Config.CONFIG_FILE = original_file
+        Config.MODEL, Config.API_KEY = old_model, old_key
+        Config.SESSION_ONLY_KEYS.clear()
+        Config.SESSION_ONLY_KEYS.update(old_keys)
 
 def test_config_model_context_map():
     """MODEL_CONTEXT_MAP should have known models."""
