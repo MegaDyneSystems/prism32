@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.9 - MegaDyne Systems Terminal Agent
+Prism32 v6.9.2 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6094,7 +6094,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.9 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.9.2 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6105,12 +6105,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.9 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.9.2 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.9 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.9.2 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -8961,7 +8961,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.9 — MegaDyne Systems")
+        print("Prism32 v6.9.2 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
