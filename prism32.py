@@ -4068,6 +4068,7 @@ class Config:
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
     ROOT_PASS = ""  # root password for su/sudo commands (injected as $ROOT_PASS env)
     STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
+    NATIVE_TOOLS = os.environ.get("PRISM32_NATIVE_TOOLS", "1").lower() not in ("0", "false", "no", "off")
     MAX_MEMORY_CTX = 1024  # max chars for memory context in system prompt (0 = disable)
     AGENT_NAME = "MDS"     # name displayed before assistant responses
     PROMPT_CACHING = True  # Enable provider prompt caching (Anthropic native / OpenAI auto / DeepSeek auto)
@@ -7051,6 +7052,14 @@ CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_call
 
 BLOCK ARCHITECTURE:
 - ACT, DON'T ANNOUNCE: never say "I'll check/examine/run ..." without including the actual ```execute block in the SAME response. A response with no blocks performs NO action.
+- Example — for the task "check disk space", the ENTIRE correct response is:
+
+```execute
+df -h
+```
+
+  NOT "I'll check the disk space:" — that performs nothing. Wrong protocol, wasted turn.
+- You also have a native `execute` tool available — call it directly for commands (it is equivalent to an execute block). Prefer the tool or the block over any prose plan.
 - You can chain multiple commands in a single execute block using &&, ;, |, and redirections.
 - You can put multiple ```execute blocks in a single response — each will be executed in order.
 - Commands starting with / (like /delegate, /quantum, /remember) are executed as Prism32 commands, not shell.
@@ -7435,6 +7444,62 @@ def _api_error_text(data):
         return f"[ERROR] API error: {msg} ({typ})"
     return f"[ERROR] API error: {err}"
 
+def _tool_calls_to_blocks(tool_calls):
+    """Convert OpenAI native tool_calls into Prism32 block text. Pre-trained
+    tool-calling models emit structured tool_calls and stop — this bridge
+    translates them into ```execute / ```ask blocks so the whole downstream
+    pipeline works unchanged."""
+    out = []
+    for tc in tool_calls or []:
+        fn = tc.get('function') or {}
+        name = (fn.get('name') or '').lower()
+        raw = fn.get('arguments') or '{}'
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        except Exception:
+            continue
+        if not isinstance(args, dict):
+            continue
+        if name in ('execute', 'run_command', 'shell', 'bash', 'run_shell_command', 'terminal'):
+            cmd = args.get('command') or args.get('cmd') or ''
+            if isinstance(cmd, str) and cmd.strip():
+                out.append(f"```execute\n{cmd.strip()}\n```")
+        elif name in ('ask', 'ask_user', 'question', 'ask_operator'):
+            q = args.get('question') or args.get('q') or args.get('text') or ''
+            if isinstance(q, str) and q.strip():
+                out.append(f"```ask\n{q.strip()}\n```")
+    return "\n".join(out)
+
+_NATIVE_TOOLS_SCHEMA = [{
+    "type": "function",
+    "function": {
+        "name": "execute",
+        "description": ("Run a shell command on the operator's machine and get the output. "
+                        "Call this for ANY actionable step — never describe what you will do "
+                        "instead of calling it. Chain commands with && ; |."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The shell command to run"}
+            },
+            "required": ["command"]
+        }
+    }
+}, {
+    "type": "function",
+    "function": {
+        "name": "ask",
+        "description": "Ask the human operator a question when you are truly blocked.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The question for the operator"}
+            },
+            "required": ["question"]
+        }
+    }
+}]
+
 def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             api_base=None, api_key=None, model=None):
     '''Resilient AI query with retry, backoff, and history trimming.'''
@@ -7478,6 +7543,13 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
         "max_tokens": Config.MAX_RESPONSE_TOKENS,
         "temperature": Config.TEMPERATURE,
     }
+    if Config.NATIVE_TOOLS:
+        # Native tool-call bridge: advertise an execute/ask tool so
+        # tool-trained models use the protocol they were RLHF'd on instead
+        # of announcing-and-stopping. Emitted tool_calls are translated back
+        # into ```execute blocks inside ask_ai/stream_response.
+        payload["tools"] = _NATIVE_TOOLS_SCHEMA
+        payload["tool_choice"] = "auto"
     if Config.THINKING_EFFORT:
         payload["reasoning_effort"] = Config.THINKING_EFFORT
     
@@ -7503,12 +7575,24 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                     return _err
                 _choices = data.get('choices') or []
                 if _choices:
-                    return _content_to_text(_choices[0].get('message', {}).get('content'))
+                    _msg = _choices[0].get('message', {}) or {}
+                    content = _content_to_text(_msg.get('content'))
+                    _blocks = _tool_calls_to_blocks(_msg.get('tool_calls'))
+                    if _blocks:
+                        content = (content + "\n" + _blocks).strip()
+                    return content
                 return ''
         except urllib.error.HTTPError as e:
             if agent_cancel_requested(cancel_event):
                 return AGENT_CANCELLED_RESPONSE
             body = e.read().decode('utf-8', errors='replace')[:500]
+            if e.code == 400 and 'tools' in payload and 'tool' in body.lower():
+                # Provider rejects the tools parameter — drop it and retry
+                # once in block-only mode instead of failing the request.
+                payload.pop('tools', None)
+                payload.pop('tool_choice', None)
+                viz.status("Provider rejected tools — retrying in block-only mode", "warning")
+                continue
             if e.code == 401:
                 last_error = f"[HTTP ERROR 401] Authentication failed. Set a valid API key via /provider key or --api-key"
                 learn_error(last_error, f"HTTP 401: {body[:100]}")
@@ -7555,6 +7639,7 @@ def stream_response(resp, cancel_event=None):
     last_flush = time.monotonic()
     fence_state = {"pending": "", "hidden": False}
     footer_released = False
+    tool_calls_acc = {}  # index -> {'name': str, 'args': [str fragments]}
 
     def _filter_visible_content(text, final=False):
         data = fence_state["pending"] + text
@@ -7689,7 +7774,24 @@ def stream_response(resp, cancel_event=None):
                 delta = _choices[0].get('delta', {})
                 content = _content_to_text(delta.get('content'))
                 reasoning = _content_to_text(delta.get('reasoning_content')) or _content_to_text(delta.get('reasoning'))
-                
+
+                # Native tool-call bridge: accumulate tool_calls fragments
+                # (id/name appear once, arguments stream as string chunks).
+                for _tc in delta.get('tool_calls') or []:
+                    _idx = _tc.get('index', 0)
+                    _ent = tool_calls_acc.setdefault(_idx, {'name': '', 'args': []})
+                    _fn = _tc.get('function') or {}
+                    if _fn.get('name'):
+                        _ent['name'] = _fn['name']
+                    if _fn.get('arguments'):
+                        _ent['args'].append(_fn['arguments'])
+                        if not _ent.get('shown'):
+                            _ent['shown'] = True
+                            try:
+                                viz.status(f"tool call: {_ent['name']}(...)", "info")
+                            except Exception:
+                                pass
+
                 if reasoning:
                     _queue_display(reasoning, "reasoning")
                     reasoning_mode = True
@@ -7721,6 +7823,18 @@ def stream_response(resp, cancel_event=None):
             with stdout_lock:
                 sys.stdout.write(RST + SHOW)
             return AGENT_CANCELLED_RESPONSE
+
+        # Native tool-call bridge: translate accumulated tool_call fragments
+        # into execute/ask blocks so the standard pipeline picks them up.
+        if tool_calls_acc:
+            _synth_tcs = []
+            for _idx in sorted(tool_calls_acc):
+                _ent = tool_calls_acc[_idx]
+                _synth_tcs.append({'function': {'name': _ent['name'],
+                                                'arguments': ''.join(_ent['args'])}})
+            _blocks_txt = _tool_calls_to_blocks(_synth_tcs)
+            if _blocks_txt:
+                full = (full + "\n" + _blocks_txt).strip()
 
         _queue_display(_filter_visible_content("", final=True), "content")
         _flush_display(force=True)

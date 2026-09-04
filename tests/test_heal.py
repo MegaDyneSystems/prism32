@@ -58,3 +58,19 @@ def test_normal_execute_blocks_untouched():
     healed, was = prism32.heal_response(text)
     assert not was
     assert healed == text
+
+
+def test_native_tool_calls_to_blocks():
+    tcs = [
+        {"function": {"name": "execute", "arguments": '{"command": "ls /var"}'}},
+        {"function": {"name": "ask", "arguments": '{"question": "Which DB?"}'}},
+        {"function": {"name": "execute", "arguments": "not json"}},
+    ]
+    out = prism32._tool_calls_to_blocks(tcs)
+    assert "```execute\nls /var\n```" in out
+    assert "```ask\nWhich DB?\n```" in out
+    assert prism32._tool_calls_to_blocks(None) == ""
+    assert prism32._tool_calls_to_blocks([]) == ""
+    # aliased function names
+    out2 = prism32._tool_calls_to_blocks([{"function": {"name": "bash", "arguments": '{"command": "date"}'}}])
+    assert "date" in out2 and "```execute" in out2
