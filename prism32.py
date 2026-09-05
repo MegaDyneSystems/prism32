@@ -455,6 +455,7 @@ _INTERJECTION_HISTORY_IDX = -1
 _INTERJECTION_SAVED_BUF = ""
 _INTERJECTION_CANCEL = object()
 AGENT_CANCELLED_RESPONSE = "[CANCELLED] Agent stopped by Escape"
+RESPONSE_BUDGET_EXHAUSTED = "[BUDGET EXHAUSTED] reasoning consumed the entire response budget before any content was produced"
 _AGENT_CANCEL_REQUESTED = False
 _AGENT_CANCEL_REASON = ""
 
@@ -7576,7 +7577,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
         payload["reasoning_effort"] = Config.THINKING_EFFORT
     
     last_error = ""
-    for attempt in range(retry + 1):
+    budget_scaled = False
+    for attempt in range(retry + 3):  # +2 headroom for tools/budget fallbacks
         if agent_cancel_requested(cancel_event):
             return AGENT_CANCELLED_RESPONSE
         try:
@@ -7587,7 +7589,22 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             )
             with urlopen_with_ssl(req, timeout=600) as resp:
                 if stream if stream is not None else Config.STREAM:
-                    return stream_response(resp, cancel_event=cancel_event)
+                    _sr = stream_response(resp, cancel_event=cancel_event)
+                    if _sr == RESPONSE_BUDGET_EXHAUSTED and not budget_scaled:
+                        budget_scaled = True
+                        payload["max_tokens"] = min(65536, Config.MAX_RESPONSE_TOKENS * 4)
+                        viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
+                        continue
+                    if _sr == RESPONSE_BUDGET_EXHAUSTED:
+                        return (f"[ERROR] The model exhausted its entire response budget "
+                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 32768")
+                    if budget_scaled and _sr:
+                        # Recovery worked — keep the larger budget for the rest
+                        # of the session so every later turn doesn't pay for the
+                        # failed small-budget call first.
+                        Config.MAX_RESPONSE_TOKENS = payload["max_tokens"]
+                    return _sr
                 data = json.loads(resp.read().decode())
                 if agent_cancel_requested(cancel_event):
                     return AGENT_CANCELLED_RESPONSE
@@ -7602,6 +7619,20 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                     _blocks = _tool_calls_to_blocks(_msg.get('tool_calls'))
                     if _blocks:
                         content = (content + "\n" + _blocks).strip()
+                    # Budget-exhaustion-by-reasoning (non-stream): length-capped
+                    # with no content but reasoning present
+                    if (not content.strip() and _choices[0].get('finish_reason') == 'length'
+                            and (_msg.get('reasoning') or _msg.get('reasoning_content'))):
+                        if not budget_scaled:
+                            budget_scaled = True
+                            payload["max_tokens"] = min(65536, Config.MAX_RESPONSE_TOKENS * 4)
+                            viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
+                            continue
+                        return (f"[ERROR] The model exhausted its entire response budget "
+                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 32768")
+                    if budget_scaled and content:
+                        Config.MAX_RESPONSE_TOKENS = payload["max_tokens"]
                     return content
                 return ''
         except urllib.error.HTTPError as e:
@@ -7662,6 +7693,8 @@ def stream_response(resp, cancel_event=None):
     fence_state = {"pending": "", "hidden": False}
     footer_released = False
     tool_calls_acc = {}  # index -> {'name': str, 'args': [str fragments]}
+    finish_reason = None
+    reasoning_seen = False
 
     def _filter_visible_content(text, final=False):
         data = fence_state["pending"] + text
@@ -7793,9 +7826,14 @@ def stream_response(resp, cancel_event=None):
                 _choices = chunk.get('choices') or []
                 if not _choices:
                     continue
+                _fr = _choices[0].get('finish_reason')
+                if _fr:
+                    finish_reason = _fr
                 delta = _choices[0].get('delta', {})
                 content = _content_to_text(delta.get('content'))
                 reasoning = _content_to_text(delta.get('reasoning_content')) or _content_to_text(delta.get('reasoning'))
+                if reasoning:
+                    reasoning_seen = True
 
                 # Native tool-call bridge: accumulate tool_calls fragments
                 # (id/name appear once, arguments stream as string chunks).
@@ -7857,6 +7895,16 @@ def stream_response(resp, cancel_event=None):
             _blocks_txt = _tool_calls_to_blocks(_synth_tcs)
             if _blocks_txt:
                 full = (full + "\n" + _blocks_txt).strip()
+
+        # Budget-exhaustion-by-reasoning: the model streamed a long chain of
+        # thought, hit the max_tokens cap mid-reasoning, and never produced a
+        # single character of actual content. Signal the caller so it can
+        # retry with a scaled-up budget instead of reporting 'no response'.
+        if not full.strip() and reasoning_seen:
+            _flush_display(force=True)
+            with stdout_lock:
+                sys.stdout.write(RST + SHOW)
+            return RESPONSE_BUDGET_EXHAUSTED
 
         _queue_display(_filter_visible_content("", final=True), "content")
         _flush_display(force=True)
