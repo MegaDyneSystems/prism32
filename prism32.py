@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.9.2 - MegaDyne Systems Terminal Agent
+Prism32 v6.9.4 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6095,7 +6095,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.9.2 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.9.4 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6106,12 +6106,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.9.2 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.9.4 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.9.2 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.9.4 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7592,7 +7592,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                     _sr = stream_response(resp, cancel_event=cancel_event)
                     if _sr == RESPONSE_BUDGET_EXHAUSTED and not budget_scaled:
                         budget_scaled = True
-                        payload["max_tokens"] = min(65536, Config.MAX_RESPONSE_TOKENS * 4)
+                        _prev_mt = payload.get("max_tokens", Config.MAX_RESPONSE_TOKENS)
+                        payload["max_tokens"] = max(_prev_mt, min(65536, _prev_mt * 4))
                         viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
                         continue
                     if _sr == RESPONSE_BUDGET_EXHAUSTED:
@@ -7625,7 +7626,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                             and (_msg.get('reasoning') or _msg.get('reasoning_content'))):
                         if not budget_scaled:
                             budget_scaled = True
-                            payload["max_tokens"] = min(65536, Config.MAX_RESPONSE_TOKENS * 4)
+                            _prev_mt = payload.get("max_tokens", Config.MAX_RESPONSE_TOKENS)
+                            payload["max_tokens"] = max(_prev_mt, min(65536, _prev_mt * 4))
                             viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
                             continue
                         return (f"[ERROR] The model exhausted its entire response budget "
@@ -9031,7 +9033,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.9.2 — MegaDyne Systems")
+        print("Prism32 v6.9.4 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
