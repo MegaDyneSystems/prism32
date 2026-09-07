@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.9.4 - MegaDyne Systems Terminal Agent
+Prism32 v6.9.5 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -532,7 +532,7 @@ def _fetch_api_pricing():
     try:
         url = Config.API_BASE.rstrip("/") + "/models"
         req = urllib.request.Request(url, headers={
-            "Authorization": f"Bearer {Config.API_KEY}",
+            "Authorization": f"Bearer {str(Config.API_KEY).strip()}",
             **PRISM32_DEFAULT_HEADERS,
         })
         ctx = create_ssl_context()
@@ -4181,7 +4181,9 @@ class Config:
             if "api_base" in data: cls.API_BASE = data["api_base"]
             if "custom_api_base" in data: cls.CUSTOM_API_BASE = bool(data["custom_api_base"])
             if "model" in data: cls.MODEL = data["model"]
-            if "api_key" in data: cls.API_KEY = data["api_key"]
+            if "api_key" in data:
+                _k = data["api_key"]
+                cls.API_KEY = _k.strip() if isinstance(_k, str) else _k
             if "temperature" in data: cls.TEMPERATURE = data["temperature"]
             if "theme" in data: cls.THEME = data["theme"]
             if "provider" in data:
@@ -6095,7 +6097,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.9.4 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.9.5 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6106,12 +6108,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.9.4 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.9.5 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.9.4 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.9.5 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7649,7 +7651,14 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                 viz.status("Provider rejected tools — retrying in block-only mode", "warning")
                 continue
             if e.code == 401:
-                last_error = f"[HTTP ERROR 401] Authentication failed. Set a valid API key via /provider key or --api-key"
+                _sent = mask_key(_api_key if _api_key is not None else Config.API_KEY)
+                if _sent == "<none>":
+                    last_error = ("[HTTP ERROR 401] Authentication failed — NO API key was sent. "
+                                  "Set one: /provider key <key> (persistent) or --api-key <key> (this session only)")
+                else:
+                    last_error = (f"[HTTP ERROR 401] Authentication failed — key sent: {_sent}. "
+                                  f"If that is an old/rotated key, update it: /provider key <key> "
+                                  f"(persistent) or --api-key <key> (this session only)")
                 learn_error(last_error, f"HTTP 401: {body[:100]}")
             else:
                 last_error = f"[HTTP ERROR {e.code}] {body}"
@@ -9033,7 +9042,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.9.4 — MegaDyne Systems")
+        print("Prism32 v6.9.5 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9055,8 +9064,37 @@ def main():
         Config.STREAM = False
         Config.AUTO_SAVE_INTERVAL = 0
     if args.api_key:
-        Config.API_KEY = args.api_key
+        Config.API_KEY = args.api_key.strip() if isinstance(args.api_key, str) else args.api_key
         Config.SESSION_ONLY_KEYS.add("api_key")
+
+    def _warn_session_only_exit():
+        """Last line of defense against the silent --api-key reversion trap:
+        a valid key set via --api-key works all session, then the NEXT session
+        quietly falls back to the old stored key and every request 401s."""
+        try:
+            protected = [k for k in ("api_key", "model", "api_base") if k in Config.SESSION_ONLY_KEYS]
+            if not protected:
+                return
+            print()
+            if "api_key" in protected:
+                _disk_key = ""
+                try:
+                    with open(Config.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        _disk_key = (json.load(f) or {}).get("api_key") or ""
+                except Exception:
+                    pass
+                print(f"  {T()['warn']}⚠ --api-key was session-only and was NOT saved.{RST}")
+                if _disk_key:
+                    print(f"  {T()['dim']}Next session will use the stored key: {mask_key(_disk_key)}{RST}")
+                    print(f"  {T()['dim']}To make THIS session's key permanent: /provider key <key>{RST}")
+                else:
+                    print(f"  {T()['dim']}No key is stored — next session will have none. /provider key <key>{RST}")
+            else:
+                print(f"  {T()['dim']}⚠ CLI overrides ({', '.join(protected)}) were session-only and not saved.{RST}")
+        except Exception:
+            pass
+    atexit.register(_warn_session_only_exit)
+
     if args.theme:
         Config.THEME = args.theme
     if args.temperature is not None:
@@ -9416,9 +9454,8 @@ def main():
                         mask = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
                         print(f"  {t['bright']}+ API key set: {mask}{RST}")
                     else:
-                        has_key = bool(Config.API_KEY)
-                        print(f"  API key: {t['bright']}{'<set>' if has_key else '<not set>'}{RST}")
-                        print(f"  Usage: provider key <key>")
+                        print(f"  API key: {t['bright']}{mask_key(Config.API_KEY)}{RST}")
+                        print(f"  {t['dim']}To change: provider key <key>{RST}")
                 elif subcmd in ('list', 'ls'):
                     cmd_provider_list()
                 else:
@@ -10528,7 +10565,7 @@ def main():
                 f" Agent name: {Config.AGENT_NAME}",
                  f" Model:      {Config.MODEL}",
                 f" API:        {Config.API_BASE}{' (custom)' if Config.CUSTOM_API_BASE else ''}",
-                f" API Key:    {'<set>' if Config.API_KEY else '<not set>'}",
+                f" API Key:    {mask_key(Config.API_KEY)} (masked)",
                 f" Theme:      {Config.THEME}",
                 f" Provider:   {Config.PROVIDER}{_cheap}",
                 f" Temp:       {Config.TEMPERATURE}",
@@ -10913,9 +10950,18 @@ def normalize_api_base(base):
 
 # ── Model Selector ──────────────────────────────────────────
 
+def mask_key(key):
+    """Masked key for display: first4...last4. Never log full keys."""
+    k = (key or "").strip() if isinstance(key, str) else ""
+    if not k:
+        return "<none>"
+    return (k[:4] + "..." + k[-4:]) if len(k) > 12 else "***"
+
 def build_headers(extra=None, api_key=None, api_base=None):
     h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.9"}
     _key = api_key if api_key is not None else Config.API_KEY
+    if isinstance(_key, str):
+        _key = _key.strip()
     if _key:
         h["Authorization"] = f"Bearer {_key}"
     _base = (api_base if api_base is not None else Config.API_BASE).lower()

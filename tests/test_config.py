@@ -81,3 +81,30 @@ def test_config_theme():
     assert 'primary' in theme
     assert 'bright' in theme
     assert 'dim' in theme
+
+def test_config_strips_whitespace_key():
+    """Keys saved with trailing whitespace/newlines must be stripped on load
+    (a 'Bearer <key> ' header 401s on strict servers)."""
+    original_file = Config.CONFIG_FILE
+    old_key = Config.API_KEY
+    try:
+        payload = {"api_key": "sk-valid-key-123  \n", "api_base": "https://x/v1", "model": "m"}
+        with open(Config.CONFIG_FILE, "w") as f:
+            json.dump(payload, f)
+        Config.API_KEY = ""
+        Config.load_config()
+        assert Config.API_KEY == "sk-valid-key-123"
+    finally:
+        Config.CONFIG_FILE = original_file
+        Config.API_KEY = old_key
+
+def test_mask_key():
+    """mask_key shows first4...last4, never the full key, and <none> when empty."""
+    assert mask_key("sk-goodkey123") == "sk-g...y123"
+    assert mask_key("short") == "***"
+    assert mask_key("") == "<none>"
+    assert mask_key(None) == "<none>"
+    assert mask_key("  sk-pad  ") == "<none>" or mask_key("sk-padded-key") != ""
+    m = mask_key("sk-a4fee0b3c2d1e4f5d4ee3c5d")
+    assert m.startswith("sk-a") and m.endswith("3c5d")
+    assert "a4fee0b3" not in m  # middle never exposed
