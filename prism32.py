@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.9.5 - MegaDyne Systems Terminal Agent
+Prism32 v6.9.6 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -4155,15 +4155,21 @@ class Config:
                 "verify_ssl": cls.VERIFY_SSL,
                 "prompt_caching": cls.PROMPT_CACHING,
             }
-            # Session-only fields (set via CLI flags like --model/--api/--api-key)
-            # must not be persisted — preserve the on-disk values instead.
-            if cls.SESSION_ONLY_KEYS and os.path.exists(cls.CONFIG_FILE):
+            # Preserve fields prism32 doesn't own, plus session-only CLI
+            # overrides (set via --model/--api/--api-key) which must keep
+            # their on-disk values. Without this, the first in-session save
+            # dropped the installer-written providers.<name>.api_key entries
+            # and strangled freshly installed keys on disk.
+            if os.path.exists(cls.CONFIG_FILE):
                 try:
                     with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
                         old = json.load(f)
-                    for k in cls.SESSION_ONLY_KEYS:
-                        if k in old:
-                            data[k] = old[k]
+                    if isinstance(old, dict):
+                        if "providers" in old and "providers" not in data:
+                            data["providers"] = old["providers"]
+                        for k in cls.SESSION_ONLY_KEYS:
+                            if k in old:
+                                data[k] = old[k]
                 except Exception:
                     pass
             _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
@@ -4181,6 +4187,23 @@ class Config:
             if "api_base" in data: cls.API_BASE = data["api_base"]
             if "custom_api_base" in data: cls.CUSTOM_API_BASE = bool(data["custom_api_base"])
             if "model" in data: cls.MODEL = data["model"]
+            # Merge the per-provider section FIRST: install.sh stores keys under
+            # providers.<name>.api_key, and the active-provider fallback below
+            # consults PROVIDER_REGISTRY[...]["default_key"] — parsing this
+            # section after that lookup left freshly installed keys stranded
+            # in the registry and Config.API_KEY empty on first boot.
+            if "providers" in data:
+                for prov_name, prov_cfg in data["providers"].items():
+                    if prov_name not in PROVIDER_REGISTRY:
+                        PROVIDER_REGISTRY[prov_name] = {}
+                    PROVIDER_REGISTRY[prov_name].update({
+                        "name": prov_name.replace("_", " ").title(),
+                        "api_base": prov_cfg.get("api_base", cls.API_BASE),
+                        "model": prov_cfg.get("model", cls.MODEL),
+                        "description": "Configured via installer",
+                    })
+                    if prov_cfg.get("api_key"):
+                        PROVIDER_REGISTRY[prov_name]["default_key"] = prov_cfg["api_key"]
             if "api_key" in data:
                 _k = data["api_key"]
                 cls.API_KEY = _k.strip() if isinstance(_k, str) else _k
@@ -4222,18 +4245,6 @@ class Config:
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
             if "custom_arch_map" in data and isinstance(data["custom_arch_map"], dict):
                 cls.CUSTOM_ARCH_MAP = data["custom_arch_map"]
-            if "providers" in data:
-                for prov_name, prov_cfg in data["providers"].items():
-                    if prov_name not in PROVIDER_REGISTRY:
-                        PROVIDER_REGISTRY[prov_name] = {}
-                    PROVIDER_REGISTRY[prov_name].update({
-                        "name": prov_name.replace("_", " ").title(),
-                        "api_base": prov_cfg.get("api_base", cls.API_BASE),
-                        "model": prov_cfg.get("model", cls.MODEL),
-                        "description": "Configured via installer",
-                    })
-                    if prov_cfg.get("api_key"):
-                        PROVIDER_REGISTRY[prov_name]["default_key"] = prov_cfg["api_key"]
         except Exception as e:
             print(f"  Config load failed ({cls.CONFIG_FILE}): {e}")
 
@@ -6097,7 +6108,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.9.5 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.9.6 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6108,12 +6119,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.9.5 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.9.6 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.9.5 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.9.6 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -9042,7 +9053,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.9.5 — MegaDyne Systems")
+        print("Prism32 v6.9.6 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -11278,15 +11289,29 @@ def cmd_provider_set(provider_name):
         Config.MODEL = prov.get("model", Config.MODEL)
     Config.save_config()
     
-    needs_key = not Config.API_KEY and not prov.get("default_key")
+    # Provider-scoped key logic: a key stored for another provider must not
+    # silently satisfy a switch to THIS one (cross-provider 401s), and a
+    # per-provider key (providers.<name>.api_key, install.sh or prior switch)
+    # should follow the provider you switch to.
+    _prov_key = (prov.get("default_key") or "")
+    _prov_key = _prov_key.strip() if isinstance(_prov_key, str) else ""
+    if switching and _prov_key and Config.API_KEY != _prov_key:
+        Config.API_KEY = _prov_key
+        Config.save_config()
+        print(f"   {t['bright']}+ Using stored {provider_name} key: {mask_key(_prov_key)}{RST}")
+    needs_key = (not _prov_key) and (switching or not Config.API_KEY)
     if needs_key:
-        print(f"   {t['warn']}This provider may require an API key.{RST}")
+        if switching and Config.API_KEY:
+            print(f"   {t['warn']}Current key belongs to your previous provider.{RST}")
+        else:
+            print(f"   {t['warn']}This provider may require an API key.{RST}")
         try:
-            key = input(rl_prompt(f"   API key (or Enter to skip): ")).strip()
+            key = input(rl_prompt(f"   API key for {provider_name} (Enter to keep current): ")).strip()
             if key:
                 Config.API_KEY = key
+                Config.SESSION_ONLY_KEYS.discard("api_key")
                 Config.save_config()
-                print(f"   {t['bright']}+ API key set.{RST}")
+                print(f"   {t['bright']}+ API key set: {mask_key(key)}{RST}")
         except (EOFError, KeyboardInterrupt):
             print()
     return True

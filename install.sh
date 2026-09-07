@@ -464,18 +464,9 @@ header "Step 7/9 - Writing Config"
 
 if [ "$skip_config_write" = "1" ]; then
   ok "Config preserved (auto-update mode)"
-elif [ -f "$CONFIG_FILE" ]; then
-  "$PY3" -c "
-import json, sys
-c = json.load(open(sys.argv[1]))
-c['provider'] = sys.argv[2]
-c['model'] = sys.argv[3]
-c['api_base'] = sys.argv[4]
-c['providers'] = json.loads(sys.argv[5])
-json.dump(c, open(sys.argv[1], 'w'), indent=2)
-" "$CONFIG_FILE" "$PROV" "$MODEL" "$API_BASE" "$ALL_PROVIDERS" && ok "Config updated" || { fail "Config write failed"; exit 1; }
 else
-  cat > "$CONFIG_FILE" << JSONEOF
+  if [ ! -f "$CONFIG_FILE" ]; then
+    cat > "$CONFIG_FILE" << JSONEOF
 {
   "theme": "phosphor",
   "provider": "$PROV",
@@ -493,9 +484,29 @@ else
   "subagent_model": ""
 }
 JSONEOF
-  "$PY3" -c "import json, sys; json.load(open(sys.argv[1]))" "$CONFIG_FILE" \
-    && ok "Config written" \
-    || { fail "Config JSON invalid"; exit 1; }
+  fi
+  # Merge/normalize via Python in BOTH paths: provider fields, the installer
+  # providers section, and — critically — the ACTIVE provider's key lifted to
+  # top-level api_key so prism32 has a working key on first boot.
+  "$PY3" -c "
+import json, sys
+path, prov, model, base, allp = sys.argv[1:6]
+c = {}
+try:
+    c = json.load(open(path)) or {}
+except Exception:
+    c = {}
+c['provider'] = prov
+c['model'] = model
+c['api_base'] = base
+c['providers'] = json.loads(allp)
+k = (c.get('providers') or {}).get(prov, {}).get('api_key', '')
+if k and not c.get('api_key'):
+    c['api_key'] = k
+json.dump(c, open(path, 'w'), indent=2)
+" "$CONFIG_FILE" "$PROV" "$MODEL" "$API_BASE" "$ALL_PROVIDERS" \
+    && ok "Config written (active key is top-level api_key)" \
+    || { fail "Config write failed"; exit 1; }
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 fi
 
@@ -571,8 +582,8 @@ echo -e "  ${CY}Run:  prism32${RST}"
 echo -e "  ${CY}Help: prism32 --help${RST}"
 echo ""
 
-if [ -n "${api_key+x}" ]; then
-  echo -e "  ${Y}w${RST} API key set in shell only. Use /provider key inside Prism32 to persist."
+if [ -n "${api_key:-}" ]; then
+  echo -e "  ${G}+${RST} API key saved to ${CY}$CONFIG_FILE${RST} (top-level + providers.$PROV)"
   echo ""
 fi
 

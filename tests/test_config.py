@@ -108,3 +108,60 @@ def test_mask_key():
     m = mask_key("sk-a4fee0b3c2d1e4f5d4ee3c5d")
     assert m.startswith("sk-a") and m.endswith("3c5d")
     assert "a4fee0b3" not in m  # middle never exposed
+
+def test_config_providers_key_applies_on_first_boot():
+    """install.sh writes keys under providers.<name>.api_key only. The
+    providers section must merge BEFORE the active-provider fallback so a
+    freshly installed key lands in Config.API_KEY on first boot."""
+    original_file = Config.CONFIG_FILE
+    old_key = Config.API_KEY
+    try:
+        payload = {
+            "provider": "neuralwatt",
+            "api_base": "https://api.neuralwatt.com/v1",
+            "model": "kimi-k3",
+            "providers": {"neuralwatt": {"api_base": "https://api.neuralwatt.com/v1",
+                                         "model": "kimi-k3",
+                                         "api_key": "sk-installer-key-1"}},
+        }
+        with open(Config.CONFIG_FILE, "w") as f:
+            json.dump(payload, f)
+        Config.API_KEY = ""
+        Config.load_config()
+        assert Config.API_KEY == "sk-installer-key-1"
+        assert PROVIDER_REGISTRY["neuralwatt"].get("default_key") == "sk-installer-key-1"
+    finally:
+        Config.CONFIG_FILE = original_file
+        Config.API_KEY = old_key
+        PROVIDER_REGISTRY["neuralwatt"]["default_key"] = None
+
+def test_save_config_preserves_providers_section():
+    """save_config builds a fresh dict — it must NOT drop the installer's
+    providers.<name>.api_key entries on the first in-session save."""
+    original_file = Config.CONFIG_FILE
+    old_key, old_model = Config.API_KEY, Config.MODEL
+    old_keys = set(Config.SESSION_ONLY_KEYS)
+    try:
+        payload = {
+            "provider": "neuralwatt", "model": "kimi-k3",
+            "api_base": "https://api.neuralwatt.com/v1",
+            "providers": {"neuralwatt": {"api_key": "sk-installer-key-2",
+                                         "api_base": "https://api.neuralwatt.com/v1"}},
+        }
+        with open(Config.CONFIG_FILE, "w") as f:
+            json.dump(payload, f)
+        Config.load_config()
+        assert Config.API_KEY == "sk-installer-key-2"
+        Config.MODEL = "changed-model"
+        Config.API_KEY = "sk-user-replaced"
+        Config.save_config()
+        with open(Config.CONFIG_FILE) as f:
+            on_disk = json.load(f)
+        assert on_disk["providers"]["neuralwatt"]["api_key"] == "sk-installer-key-2"
+        assert on_disk["api_key"] == "sk-user-replaced"
+        assert on_disk["model"] == "changed-model"
+    finally:
+        Config.CONFIG_FILE = original_file
+        Config.API_KEY, Config.MODEL = old_key, old_model
+        Config.SESSION_ONLY_KEYS.clear()
+        Config.SESSION_ONLY_KEYS.update(old_keys)
