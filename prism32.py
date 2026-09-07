@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.9.6 - MegaDyne Systems Terminal Agent
+Prism32 v6.10.0 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
 import urllib.error
+import urllib.parse
 try:
     import ssl
 except ImportError:  # Some minimal/embedded builds lack ssl
@@ -4067,6 +4068,7 @@ class Config:
     VERIFY_SSL = True  # Set False for self-signed/internal HTTPS APIs
 
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
+    SUBAGENT_PROVIDER = ""  # provider for subagents (empty = main provider)
     ROOT_PASS = ""  # root password for su/sudo commands (injected as $ROOT_PASS env)
     STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
     NATIVE_TOOLS = os.environ.get("PRISM32_NATIVE_TOOLS", "1").lower() not in ("0", "false", "no", "off")
@@ -4134,6 +4136,7 @@ class Config:
                 "custom_api_base": cls.CUSTOM_API_BASE,
                 "model": cls.MODEL,
                 "subagent_model": cls.SUBAGENT_MODEL,
+                "subagent_provider": cls.SUBAGENT_PROVIDER,
                 "root_pass": cls.ROOT_PASS,
                 "api_key": cls.API_KEY,
                 "temperature": cls.TEMPERATURE,
@@ -4176,6 +4179,64 @@ class Config:
         except Exception as e:
             print(f"  Config save failed: {e}")
     
+    @classmethod
+    def set_provider_entry(cls, name, api_base=None, model=None, api_key=None, persist=True):
+        """Create/update one providers.<name> entry (api base, default model,
+        per-provider key). Persists to config.json and updates the registry."""
+        if not name:
+            return False
+        try:
+            data = {}
+            if os.path.exists(cls.CONFIG_FILE):
+                try:
+                    with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        data = json.load(f) or {}
+                except Exception:
+                    data = {}
+            provs = data.get("providers") or {}
+            entry = dict(provs.get(name) or {})
+            if api_base is not None:
+                entry["api_base"] = api_base
+            if model is not None:
+                entry["model"] = model
+            if api_key is not None:
+                entry["api_key"] = str(api_key).strip()
+            provs[name] = entry
+            data["providers"] = provs
+            if persist:
+                _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
+            if name not in PROVIDER_REGISTRY:
+                PROVIDER_REGISTRY[name] = {}
+            PROVIDER_REGISTRY[name].update({
+                "name": name.replace("_", " ").title(),
+                "api_base": entry.get("api_base", ""),
+                "model": entry.get("model", ""),
+                "description": "Configured by user",
+            })
+            if entry.get("api_key"):
+                PROVIDER_REGISTRY[name]["default_key"] = entry["api_key"]
+            return True
+        except Exception as e:
+            print(f"  Provider save failed: {e}")
+            return False
+
+    @classmethod
+    def remove_provider_entry(cls, name):
+        """Delete one providers.<name> entry from disk and the registry."""
+        try:
+            if os.path.exists(cls.CONFIG_FILE):
+                with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f) or {}
+                provs = data.get("providers") or {}
+                if name in provs:
+                    del provs[name]
+                    data["providers"] = provs
+                    _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
+        except Exception as e:
+            print(f"  Provider remove failed: {e}")
+        PROVIDER_REGISTRY.pop(name, None)
+        return True
+
     @classmethod
     def load_config(cls):
         """Load config from file."""
@@ -4241,6 +4302,7 @@ class Config:
             if "prompt_caching" in data:
                 cls.PROMPT_CACHING = bool(data["prompt_caching"])
             if "subagent_model" in data: cls.SUBAGENT_MODEL = data["subagent_model"]
+            if "subagent_provider" in data: cls.SUBAGENT_PROVIDER = data["subagent_provider"]
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
             if "custom_arch_map" in data and isinstance(data["custom_arch_map"], dict):
@@ -4715,6 +4777,7 @@ register_provider("together", display_name="Together AI", api_base="https://api.
 register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", cheap_model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)", cache_support=None)
 register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
 register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-chat", cheap_model="deepseek-chat", description="DeepSeek V3 / R1 (requires API key)", cache_support="deepseek_auto")
+register_provider("llamacpp-remote", display_name="llama.cpp (remote server)", api_base="http://192.168.0.43:8080/v1", model="", description="Remote llama.cpp server (OpenAI-compatible). Fix the host via /provider api llamacpp-remote <url>", cache_support=None)
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
 
 
@@ -6108,7 +6171,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.9.6 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.10.0 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6119,12 +6182,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.9.6 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.10.0 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.9.6 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.10.0 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -6898,18 +6961,23 @@ class SubAgent:
         self._history = self._build_history()
         # Resolve provider credentials once; pass explicitly to ask_ai so
         # parallel subagents never mutate Config globals (race condition fix).
-        _api_base = Config.API_BASE
-        _api_key = Config.API_KEY
-        _model = self.model
-        if self.provider:
-            if self.provider in PROVIDER_REGISTRY:
-                prov = PROVIDER_REGISTRY[self.provider]
-                _api_base = prov["api_base"]
-                if prov.get("default_key"):
-                    _api_key = prov["default_key"]
-            else:
-                viz.status(f"Unknown provider '{self.provider}' for {self.id} — using main provider ({Config.PROVIDER})",
-                           "warning")
+        _prov = self.provider or Config.SUBAGENT_PROVIDER or Config.PROVIDER
+        if self.provider and self.provider not in PROVIDER_REGISTRY:
+            viz.status(f"Unknown provider '{self.provider}' for {self.id} — using main provider ({_prov})",
+                       "warning")
+            _prov = Config.PROVIDER
+        _api_base, _api_key, _model = resolve_runtime(_prov, self.model)
+        # TCP pre-flight: a dead local server (e.g. llama.cpp not running)
+        # used to surface as a cryptic '<Errno 111> Connection refused'
+        # after burning every retry. Fail fast with an actionable message.
+        _ok, _why = check_endpoint_reachable(_api_base)
+        if not _ok:
+            self.error = f"provider '{_prov}' unreachable at {_api_base} ({_why})"
+            self.result = (f"[SUBAGENT ERROR] Provider '{_prov}' is unreachable at {_api_base} "
+                           f"({_why}). Is the server running? Fix it: /model (pick a reachable "
+                           f"model) or /provider api {_prov} <url>")
+            self.done = True
+            return
         try:
             nudges = 0
             nudge_marks = []  # indices of announce/nudge exchanges in self._history
@@ -9053,7 +9121,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.9.6 — MegaDyne Systems")
+        print("Prism32 v6.10.0 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9410,115 +9478,83 @@ def main():
             continue
 
         if cmd in ('providers', 'provider'):
+            # /provider manages the provider REGISTRY (add/fix/remove/list).
+            # Switching models/providers happens in /model — it picks the
+            # provider for you so requests always carry the right base+key.
             if args_str:
-                parts = args_str.split(None, 1)
-                subcmd = parts[0].lower()
-                
+                _p_parts = args_str.split()
+                subcmd = _p_parts[0].lower()
+
                 if subcmd == 'add':
-                    add_parts = args_str.split(None, 4)
-                    if len(add_parts) >= 4:
-                        name = add_parts[1]
-                        api_base = add_parts[2]
-                        model = add_parts[3]
-                        desc = add_parts[4] if len(add_parts) > 4 else "Custom provider"
-                        cmd_provider_add(name, api_base, model, desc)
+                    _a = args_str.split(None, 4)
+                    if len(_a) >= 3:
+                        _name, _base = _a[1], _a[2]
+                        _model = _a[3] if len(_a) > 3 else ""
+                        _desc = _a[4] if len(_a) > 4 else None
+                        Config.set_provider_entry(_name, api_base=_base, model=_model or None)
+                        if _desc:
+                            PROVIDER_REGISTRY[_name]["description"] = _desc
+                        print(f"  {t['bright']}+ Provider added: {_name} → {_base}{RST}")
+                        print(f"  {t['dim']}Optional next: /provider key {_name} <api-key>{RST}")
                     else:
-                        # Interactive prompt
-                        print(f"\n  {t['bright']}Add a new provider:{RST}")
-                        try:
-                            name = input(rl_prompt(f"  Provider name: ")).strip()
-                            if not name:
-                                print(f"  {t['dim']}Cancelled.{RST}")
-                            else:
-                                api_base = input(rl_prompt(f"  API base URL: ")).strip()
-                                if api_base:
-                                    model = input(rl_prompt(f"  Model name: ")).strip()
-                                    if model:
-                                        desc = input(rl_prompt(f"  Description (optional): ")).strip() or "Custom provider"
-                                        cmd_provider_add(name, api_base, model, desc)
-                                    else:
-                                        print(f"  {t['dim']}Cancelled.{RST}")
-                                else:
-                                    print(f"  {t['dim']}Cancelled.{RST}")
-                        except (EOFError, KeyboardInterrupt):
-                            print(f"\n  {t['dim']}Cancelled.{RST}")
+                        print(f"  {t['dim']}Usage: provider add <name> <api-base> [default-model] [description]{RST}")
                 elif subcmd in ('rm', 'remove', 'delete'):
-                    if len(parts) > 1:
-                        cmd_provider_remove(parts[1])
+                    if len(_p_parts) > 1:
+                        cmd_provider_remove(_p_parts[1])
                     else:
-                        print(f"  Usage: provider rm <name>")
+                        print(f"  {t['dim']}Usage: provider rm <name>{RST}")
                 elif subcmd == 'api':
-                    arg = parts[1].strip() if len(parts) > 1 else ""
-                    if arg.lower() in ('reset', 'clear', 'default'):
-                        reset_api_base()
-                    elif arg:
-                        set_custom_api_base(arg)
+                    # /provider api <name> <url>  → fix that provider's base
+                    # /provider api reset         → main base back to provider default
+                    # /provider api <url>         → (legacy) set main custom base
+                    if len(_p_parts) >= 3:
+                        _pname, _purl = _p_parts[1], _p_parts[2]
+                        if _pname in PROVIDER_REGISTRY or True:
+                            Config.set_provider_entry(_pname, api_base=_purl)
+                            print(f"  {t['bright']}+ {_pname} API base: {_purl}{RST}")
                     else:
-                        show_api_base()
-                        print(f"  {t['dim']}Subcommands: {t['bright']}/provider api <url>{RST}{t['dim']} | {t['bright']}/provider api reset{RST}")
+                        _arg = _p_parts[1].strip() if len(_p_parts) > 1 else ""
+                        if _arg.lower() in ('reset', 'clear', 'default'):
+                            reset_api_base()
+                        elif _arg:
+                            set_custom_api_base(_arg)
+                        else:
+                            show_api_base()
+                            print(f"  {t['dim']}Fix a provider: {t['bright']}provider api <name> <url>{RST}"
+                                  f"{t['dim']} | main base: {t['bright']}provider api <url> | reset{RST}")
                 elif subcmd == 'key':
-                    key = parts[1].strip() if len(parts) > 1 else ""
-                    if key:
-                        Config.API_KEY = key
+                    # /provider key <name> <key>  → per-provider key (persisted)
+                    # /provider key <key>         → main key (legacy)
+                    if len(_p_parts) >= 3:
+                        _pname, _pkey = _p_parts[1], _p_parts[2]
+                        Config.set_provider_entry(_pname, api_key=_pkey)
+                        print(f"  {t['bright']}+ {_pname} key set: {mask_key(_pkey)}{RST}")
+                    elif len(_p_parts) == 2:
+                        _pkey = _p_parts[1]
+                        Config.API_KEY = _pkey.strip()
                         Config.SESSION_ONLY_KEYS.discard("api_key")
                         Config.save_config()
-                        mask = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
-                        print(f"  {t['bright']}+ API key set: {mask}{RST}")
+                        print(f"  {t['bright']}+ Main API key set: {mask_key(_pkey)}{RST}")
                     else:
-                        print(f"  API key: {t['bright']}{mask_key(Config.API_KEY)}{RST}")
-                        print(f"  {t['dim']}To change: provider key <key>{RST}")
+                        print(f"  Main key:   {t['bright']}{mask_key(Config.API_KEY)}{RST}")
+                        _sorted = sorted(PROVIDER_REGISTRY.items())
+                        for _pn, _pr in _sorted:
+                            if _pr.get("default_key"):
+                                print(f"  {_pn:<14} {mask_key(_pr['default_key'])}")
+                        print(f"  {t['dim']}Set: provider key <name> <key>  (per-provider) | provider key <key>  (main){RST}")
                 elif subcmd in ('list', 'ls'):
                     cmd_provider_list()
                 else:
-                    # Treat as provider name to switch to
-                    cmd_provider_set(subcmd)
+                    print(f"  {t['dim']}Provider switching moved to {t['bright']}/model{RST}{t['dim']} — it lists every provider's models")
+                    print(f"  {t['dim']}and assigns the right base+key per pick. /provider manages the registry:{RST}")
+                    print(f"  {t['dim']}  provider add <name> <base> [model]   provider rm <name>{RST}")
+                    print(f"  {t['dim']}  provider api <name> <url>            provider key <name> <key>{RST}")
             else:
-                # No args → interactive provider selector
-                provider_names = sorted(PROVIDER_REGISTRY.keys())
-                print(f"\n  {t['bright']}Select a provider:{RST}")
-                print(f"  {t['dim']}{'─' * 50}{RST}")
-                for i, pname in enumerate(provider_names, 1):
-                    prov = PROVIDER_REGISTRY[pname]
-                    marker = f"{t['bright']}*{RST}" if pname == Config.PROVIDER else " "
-                    label = prov.get('display_name', prov.get('name', pname))
-                    print(f"  {marker} {t['primary']}{i:>2}.{RST} {label}")
-                print(f"  {t['dim']}{'─' * 50}{RST}")
-                print(f"  {t['primary']}  c.{RST} Custom (enter your own)")
-                print(f"  {t['primary']}  q.{RST} Cancel")
-                try:
-                    sel = input(rl_prompt(f"  {t['bright']}choice{RST} {t['primary']}>{RST} ")).strip().lower()
-                    if sel == 'q' or not sel:
-                        print(f"  {t['dim']}Cancelled.{RST}")
-                    elif sel == 'c':
-                        print(f"\n  {t['bright']}Custom provider:{RST}")
-                        cname = input(rl_prompt(f"  Provider name: ")).strip()
-                        if cname:
-                            cbase = input(rl_prompt(f"  API base URL: ")).strip()
-                            if cbase:
-                                cmodel = input(rl_prompt(f"  Model name: ")).strip()
-                                if cmodel:
-                                    cdesc = input(rl_prompt(f"  Description (optional): ")).strip() or "Custom provider"
-                                    cmd_provider_add(cname, cbase, cmodel, cdesc)
-                                    cmd_provider_set(cname)
-                                else:
-                                    print(f"  {t['dim']}Cancelled.{RST}")
-                            else:
-                                print(f"  {t['dim']}Cancelled.{RST}")
-                        else:
-                            print(f"  {t['dim']}Cancelled.{RST}")
-                    else:
-                        try:
-                            idx = int(sel) - 1
-                            if 0 <= idx < len(provider_names):
-                                cmd_provider_set(provider_names[idx])
-                            else:
-                                print(f"  {t['dim']}Invalid choice.{RST}")
-                        except ValueError:
-                            print(f"  {t['dim']}Invalid choice.{RST}")
-                except (EOFError, KeyboardInterrupt):
-                    print(f"\n  {t['dim']}Cancelled.{RST}")
+                cmd_provider_list()
+                print(f"  {t['dim']}Add: provider add <name> <base> [model] | Fix: provider api/key <name> ... | Pick models: /model{RST}")
             print()
             continue
+
 
         if cmd == 'session':
             if args_str:
@@ -9537,13 +9573,10 @@ def main():
             continue
 
         if cmd == 'model':
-            if args_str and args_str.lower() not in ('list', 'ls', 'browse', 'select'):
-                Config.MODEL = args_str
-                Config.SESSION_ONLY_KEYS.discard("model")
-                print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
-                Config.save_config()
-            else:
-                cmd_model_list(history, cmd_log)
+            # Bare /model = full multi-provider browser; /model <text> = the
+            # same browser with search pre-filled. Exact quick-set: /set model <name>.
+            cmd_model_list(history, cmd_log,
+                           search=args_str if args_str and args_str.lower() not in ('list', 'ls', 'browse', 'select') else None)
             continue
 
         if cmd == 'set':
@@ -9551,7 +9584,7 @@ def main():
             set_parts = args_str.split(None, 1) if args_str else []
             set_key = set_parts[0].lower() if set_parts else ""
             set_val = set_parts[1].strip() if len(set_parts) > 1 else ""
-            _set_usage = (f"  {t['dim']}Settings: api_base, model, subagent_model,"
+            _set_usage = (f"  {t['dim']}Settings: api_base, model, subagent_model, subagent_provider,"
                           f" max_context_tokens, context_recent_floor,"
                           f" context_compress_keep, temperature, prompt_caching{RST}")
             if set_key in ('api_base', 'apibase', 'api', 'base', 'url'):
@@ -9572,6 +9605,19 @@ def main():
                     print(f"  {t['bright']}+ Subagent model set to: {set_val}{RST}")
                     print(f"  {t['dim']}Subagents will use this cheaper/faster model instead of the main model.{RST}")
                     Config.save_config()
+            elif set_key == 'subagent_provider':
+                # /set subagent_provider <name> | clear (use main provider)
+                if not set_val or set_val.lower() in ('clear', 'none', 'reset', 'default'):
+                    Config.SUBAGENT_PROVIDER = ""
+                    print(f"  {t['bright']}+ Subagent provider cleared (uses main: {Config.PROVIDER}){RST}")
+                    Config.save_config()
+                    print(f"  {t['dim']}TIP: /model can pick main+subagent models across providers in one place.{RST}")
+                elif set_val in PROVIDER_REGISTRY:
+                    Config.SUBAGENT_PROVIDER = set_val
+                    print(f"  {t['bright']}+ Subagent provider: {set_val} ({PROVIDER_REGISTRY[set_val].get('api_base', '')}){RST}")
+                    Config.save_config()
+                else:
+                    print(f"  {t['dim']}Unknown provider '{set_val}'. Known: {', '.join(sorted(PROVIDER_REGISTRY)[:12])}...{RST}")
             elif set_key == 'model':
                 if set_val:
                     Config.MODEL = set_val
@@ -10968,6 +11014,79 @@ def mask_key(key):
         return "<none>"
     return (k[:4] + "..." + k[-4:]) if len(k) > 12 else "***"
 
+def resolve_runtime(provider=None, model=None):
+    """Resolve (api_base, api_key, model) for a provider.
+
+    Falls back to the active session config when the provider is unknown
+    or omitted. Per-provider keys (providers.<name>.api_key) win for their
+    own provider; the session key is kept when the provider matches the
+    main one so CLI overrides like --api-key stay honored.
+    """
+    prov = (provider or Config.PROVIDER or "").strip()
+    base = Config.API_BASE
+    key = Config.API_KEY
+    mdl = model or Config.MODEL
+    reg = PROVIDER_REGISTRY.get(prov) if prov else None
+    if prov and reg:
+        base = reg.get("api_base") or base
+        _rk = reg.get("default_key") or ""
+        if isinstance(_rk, str) and _rk.strip():
+            key = _rk.strip()
+        mdl = model or reg.get("model") or mdl
+    return base, key, mdl
+
+
+def check_endpoint_reachable(api_base, timeout=3):
+    """TCP pre-flight for an API base. Returns (ok, detail).
+
+    Catches the classic 'connection refused' before requests burn retry
+    budgets, so dead local servers surface instantly with an actionable
+    message instead of a cryptic errno after the fact.
+    """
+    try:
+        raw = (api_base or "").strip()
+        if not raw:
+            return False, "no API base configured"
+        u = urllib.parse.urlparse(raw if "//" in raw else f"http://{raw}")
+        host = u.hostname
+        if not host:
+            return False, f"cannot parse base {api_base!r}"
+        port = u.port or (443 if u.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, ""
+    except OSError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
+def fetch_models_from(api_base, api_key=None, timeout=15):
+    """Fetch model list from one OpenAI-compatible endpoint.
+    Returns a list of {"id", "pricing"} dicts; raises on HTTP/network error."""
+    _base = normalize_api_base(api_base)
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.9"}
+    _key = api_key if api_key is not None else Config.API_KEY
+    if isinstance(_key, str):
+        _key = _key.strip()
+    if _key:
+        h["Authorization"] = f"Bearer {_key}"
+    req = urllib.request.Request(f"{_base}/v1/models", headers=h)
+    with urlopen_with_ssl(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode())
+    models = []
+    if "data" in data and isinstance(data["data"], list):
+        for m in data["data"]:
+            if m.get("id"):
+                models.append({"id": m["id"], "pricing": m.get("pricing") or None})
+    elif "models" in data and isinstance(data["models"], list):
+        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data["models"]]
+    elif isinstance(data, list):
+        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data]
+    elif isinstance(data, dict) and data.get("id"):
+        models = [{"id": data["id"], "pricing": None}]
+    return [m for m in models if m.get("id")]
+
+
 def build_headers(extra=None, api_key=None, api_base=None):
     h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.9"}
     _key = api_key if api_key is not None else Config.API_KEY
@@ -10989,28 +11108,7 @@ def fetch_models():
     Returns a list of model IDs/names, or empty list on success but no data.
     Raises Exception on failure so callers can show diagnostics.
     """
-    _base = normalize_api_base(Config.API_BASE)
-    req = urllib.request.Request(
-        f"{_base}/v1/models",
-        headers=build_headers(),
-    )
-    with urlopen_with_ssl(req, timeout=15) as resp:
-        data = json.loads(resp.read().decode())
-
-    models = []
-    if "data" in data and isinstance(data["data"], list):
-        for m in data["data"]:
-            if m.get("id"):
-                pricing = m.get("pricing") or None
-                models.append({"id": m["id"], "pricing": pricing})
-    elif "models" in data and isinstance(data["models"], list):
-        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data["models"]]
-    elif isinstance(data, list):
-        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data]
-    elif data.get("id"):
-        models = [{"id": data["id"], "pricing": None}]
-
-    return [m for m in models if m.get("id")]
+    return fetch_models_from(Config.API_BASE, Config.API_KEY)
 
 def _pricing_str(pricing):
     if not pricing or not isinstance(pricing, dict):
@@ -11039,101 +11137,157 @@ def _pricing_str(pricing):
             return f"${val}"
     return f"  {_fmt(prompt)}/{_fmt(completion)}/M"
 
-def cmd_model_list(history=None, cmd_log=None, provider=None):
-    """Interactive model browser. Fetches models, paginates, lets user pick.
-    If provider is given, temporarily switches to that provider for browsing."""
+def _fetch_catalog_entries():
+    """Fetch model lists from every configured provider, in parallel.
+    Returns (entries, failures): entries are {"id", "provider", "pricing"}."""
+    entries, failures = [], []
+
+    def _grab(name, base, key):
+        try:
+            ms = fetch_models_from(base, key, timeout=12)
+            for m in ms:
+                entries.append({"id": m["id"], "provider": name, "pricing": m.get("pricing")})
+        except Exception as e:
+            failures.append((name, str(e)))
+
+    _sbase, _skey = (Config.API_BASE or "").rstrip('/'), Config.API_KEY
+    targets = []
+    # Registry providers (each with its own base; per-provider key if set).
+    for pname, prow in sorted(PROVIDER_REGISTRY.items()):
+        base = prow.get("api_base") or ""
+        if not base:
+            continue
+        key = prow.get("default_key")
+        if not (key or "").strip() and base.rstrip('/') == _sbase:
+            # The active provider: the session key (possibly from --api-key or
+            # /provider key) applies even without a stored per-provider key.
+            key = Config.API_KEY
+        targets.append((pname, base, key))
+    # A custom session base not present in the registry is its own source.
+    if _sbase and not any(b.rstrip('/') == _sbase for _, b, _ in targets):
+        targets.append(("_session", Config.API_BASE, _skey))
+
+    threads = []
+    for name, base, key in targets:
+        th = threading.Thread(target=_grab, args=(name, base, key), daemon=True)
+        th.start()
+        threads.append(th)
+    for th in threads:
+        th.join(timeout=15)
+
+    # De-dup: same model id from multiple providers stays as separate rows
+    # (users pick the provider explicitly); collapse identical (id, provider).
+    seen = set()
+    unique = []
+    for e in sorted(entries, key=lambda e: (e["id"].lower(), e["provider"])):
+        k = (e["id"], e["provider"])
+        if k not in seen:
+            seen.add(k)
+            unique.append(e)
+    return unique, failures
+
+
+def _apply_model_selection(provider, model_id, role):
+    """Apply a picked (provider, model) to the main or subagent slot."""
     t = T()
-    _saved = {}
-    if provider and provider in PROVIDER_REGISTRY:
-        _saved = {"base": Config.API_BASE, "model": Config.MODEL, "key": Config.API_KEY, "custom": Config.CUSTOM_API_BASE}
-        Config.API_BASE = PROVIDER_REGISTRY[provider]["api_base"]
-        Config.CUSTOM_API_BASE = False  # browsing uses the provider's real base
-        if PROVIDER_REGISTRY[provider].get("default_key"):
-            Config.API_KEY = PROVIDER_REGISTRY[provider]["default_key"]
-    
-    try:
-        models = fetch_models()
-    except Exception as e:
-        if _saved:
-            Config.API_BASE = _saved["base"]
-            Config.MODEL = _saved["model"]
-            Config.API_KEY = _saved["key"]
-            Config.CUSTOM_API_BASE = _saved["custom"]
-        viz.status(f"Failed to fetch models: {e}", "error")
+    reg = PROVIDER_REGISTRY.get(provider) or {}
+    if role == "subagent":
+        Config.SUBAGENT_PROVIDER = provider
+        Config.SUBAGENT_MODEL = model_id
+        Config.save_config()
+        print(f"  {t['bright']}+ Subagent model: {model_id} [{provider}]{RST}")
+        print(f"  {t['dim']}Main agent unchanged ({Config.MODEL} [{Config.PROVIDER}]). Providers can mix.{RST}")
+    else:
+        if provider != Config.PROVIDER or not Config.MODEL:
+            Config.MODEL = model_id
+            Config.PROVIDER = provider
+            base = reg.get("api_base") or Config.API_BASE
+            if base and base != Config.API_BASE:
+                Config.API_BASE = base
+                Config.CUSTOM_API_BASE = False
+            _rk = (reg.get("default_key") or "")
+            if isinstance(_rk, str) and _rk.strip():
+                Config.API_KEY = _rk.strip()
+            Config.SESSION_ONLY_KEYS.discard("api_key")
+            Config.SESSION_ONLY_KEYS.discard("api_base")
+            Config.SESSION_ONLY_KEYS.discard("model")
+            Config.save_config()
+        else:
+            Config.MODEL = model_id
+            Config.SESSION_ONLY_KEYS.discard("model")
+            Config.save_config()
+        print(f"  {t['bright']}+ Main model: {model_id} [{provider}]{RST}")
+        tips = []
+        if reg.get("cheap_model"):
+            tips.append(f"cheap: {reg['cheap_model']}")
+        if tips:
+            print(f"  {t['dim']}{' | '.join(tips)}{RST}")
+    return True
+
+
+def cmd_model_list(history=None, cmd_log=None, provider=None, search=None):
+    """Unified model browser across ALL providers.
+
+    Lists every reachable provider's models with their provider tags, lets
+    you assign any of them to the main or subagent slot — mixing providers
+    (e.g. local qwen subagent + cloud main) is first-class.
+    """
+    t = T()
+    # Legacy provider= argument narrows the fetch instead of switching.
+    viz.status("Fetching model catalogs from all providers...", "info")
+    entries, failures = _fetch_catalog_entries()
+
+    prov_counts = {}
+    for e in entries:
+        prov_counts[e["provider"]] = prov_counts.get(e["provider"], 0) + 1
+    print(f"\n  {t['bright']}{len(entries)} models across {len(prov_counts)} providers{RST}"
+          f"  {t['dim']}({', '.join(f'{p}={c}' for p, c in sorted(prov_counts.items()))}){RST}")
+    for fname, ferr in failures:
+        print(f"  {t['dim']}⚠ {fname}: {ferr[:80]}{RST}")
+
+    if not entries:
+        print(f"  {t['warn']}No models reachable. Check /status and /provider.{RST}")
         return
 
-    if not models:
-        if "openrouter" in Config.API_BASE.lower() and not Config.API_KEY:
-            print(f"\n  {t['warn']}OpenRouter requires an API key.{RST}")
-            print(f"  Set it: {t['bright']}/provider key sk-or-v1-...{RST}")
-            print(f"  Or:     {t['bright']}--api-key sk-or-v1-...{RST}")
-        else:
-            viz.status("No models returned by API. Check connection or API key.", "warning")
-        return
+    if provider:
+        entries = [e for e in entries if e["provider"] == provider]
+        print(f"  {t['dim']}Filtered to provider '{provider}'.{RST}")
 
-    # Cost-saving suggestion: surface the provider's cheap model for subagents.
-    _prov_name_for_tip = provider if provider else Config.PROVIDER
-    _reg_for_tip = PROVIDER_REGISTRY.get(_prov_name_for_tip, {})
-    _cheap_for_tip = _reg_for_tip.get("cheap_model")
-    if _cheap_for_tip and _cheap_for_tip.lower() != (Config.MODEL or "").lower():
-        _cur_in, _cur_out = _get_model_pricing()
-        _ch_in = _ch_out = None
-        _cl = _cheap_for_tip.lower()
-        if _cl in _MODEL_PRICING:
-            _ch_in, _ch_out = _MODEL_PRICING[_cl]
-        else:
-            for _k, _v in _MODEL_PRICING.items():
-                if _k in _cl or _cl in _k:
-                    _ch_in, _ch_out = _v
-                    break
-        _fmt_p = lambda v: "free" if v == 0 else f"${v:.5f}"
-        if _ch_in is not None:
-            _saving = 0.0
-            if (_cur_in + _cur_out) > 0 and (_ch_in + _ch_out) < (_cur_in + _cur_out):
-                try:
-                    _saving = (1.0 - (_ch_in + _ch_out) / (_cur_in + _cur_out)) * 100.0
-                except Exception:
-                    _saving = 0.0
-            _save_txt = f"  {t['dim']}(~{_saving:.0f}% cheaper than current model){RST}" if _saving > 1 else ""
-            print(f"\n  {t['accent']}Cost-saving tip:{RST} use {t['bright']}{_cheap_for_tip}{RST}"
-                  f" {t['dim']}({_fmt_p(_ch_in)}/{_fmt_p(_ch_out)}/1K in/out){RST}{_save_txt}")
-            print(f"  {t['dim']}Assign it to subagents: /set subagent_model {_cheap_for_tip}{RST}")
-
-    models.sort(key=lambda m: m["id"].lower())
-    page_size = 30
-    total_pages = max(1, (len(models) + page_size - 1) // page_size)
+    search_term = (search or "").strip()
     page = 0
-    search_term = ""
+    page_size = 30
+
+    def _filtered():
+        if search_term:
+            return [e for e in entries if search_term.lower() in e["id"].lower()
+                    or search_term.lower() in e["provider"].lower()]
+        return entries
 
     while True:
+        fl = _filtered()
+        total_pages = max(1, (len(fl) + page_size - 1) // page_size)
         start = page * page_size
-        end = min(start + page_size, len(models))
-        page_models = models[start:end]
+        end = min(start + page_size, len(fl))
+        page_rows = fl[start:end]
 
-        if search_term:
-            filtered = [m for m in models if search_term.lower() in m["id"].lower()]
-            filtered_start = page * page_size
-            filtered_end = min(filtered_start + page_size, len(filtered))
-            page_models = filtered[filtered_start:filtered_end]
-            total_pages = max(1, (len(filtered) + page_size - 1) // page_size)
-        else:
-            filtered = models
-            total_pages = max(1, (len(models) + page_size - 1) // page_size)
-
-        prov_name = provider if provider else Config.PROVIDER
-        print(f"\n {t['bright']}MODELS -- {prov_name}{RST}  {t['dim']}(page {page+1}/{total_pages} | {len(filtered)} total){RST}")
+        print(f"\n {t['bright']}MODELS{RST}  {t['dim']}(page {page+1}/{total_pages} | {len(fl)} shown"
+              f"{' | search: ' + search_term if search_term else ''}){RST}")
         print(f" {t['dim']}{'─' * 72}{RST}")
 
-        for i, m in enumerate(page_models, 1):
-            is_current = " ←" if m["id"] == Config.MODEL else ""
+        for i, m in enumerate(page_rows, 1):
+            is_main = " ←main" if (m["id"] == Config.MODEL and m["provider"] == Config.PROVIDER) else ""
+            is_sub = " ←sub" if (m["id"] == Config.SUBAGENT_MODEL and
+                                  m["provider"] == (Config.SUBAGENT_PROVIDER or Config.PROVIDER)) else ""
             pricing = _pricing_str(m.get("pricing"))
-            print(f"  {t['primary']}{start + i:>3}.{RST} {m['id'][:50]}{pricing}{t['bright']}{is_current}{RST}")
+            mark = f"{t['bright']}{is_main}{is_sub}{RST}" if (is_main or is_sub) else ""
+            print(f"  {t['primary']}{start + i:>3}.{RST} {m['id'][:44]}"
+                  f" {t['accent']}[{m['provider']}]{RST}{pricing}{mark}")
 
         print(f" {t['dim']}{'─' * 72}{RST}")
-        print(f"  {t['dim']}n next  p prev  /text{RST}{t['bright']} search  q{RST}{t['dim']}uit{RST}{t['bright']}  <number>{RST}{t['dim']} select  clear{RST}{t['dim']} (default){RST}")
-        thinking_tag = f" {t['dim']}{Config.THINKING_EFFORT}{RST}" if Config.THINKING_EFFORT else ""
+        print(f"  {t['dim']}n next  p prev  /text{RST}{t['bright']} search  q{RST}{t['dim']}uit"
+              f"{t['bright']}  <number>{RST}{t['dim']} select  clear{RST}{t['dim']} (clears search){RST}")
         try:
-            sel = input(rl_prompt(f" {t['bright']}model{RST}{thinking_tag} {t['primary']}>{RST} ")).strip().lower()
+            sel = input(rl_prompt(f" {t['bright']}model{RST} {t['primary']}>{RST} ")).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -11141,11 +11295,6 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
         if not sel:
             continue
         if sel == 'q':
-            if _saved:
-                Config.API_BASE = _saved["base"]
-                Config.MODEL = _saved["model"]
-                Config.API_KEY = _saved["key"]
-                Config.CUSTOM_API_BASE = _saved["custom"]
             break
         if sel == 'n':
             if page < total_pages - 1:
@@ -11160,186 +11309,48 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
             page = 0
             continue
         if sel == 'clear':
-            if Config.PROVIDER in PROVIDER_REGISTRY:
-                Config.MODEL = PROVIDER_REGISTRY[Config.PROVIDER].get("model", Config.MODEL)
-            Config.save_config()
-            print(f"  {t['bright']}+ Model reset to provider default: {Config.MODEL}{RST}")
-            break
-        if sel == '*':
             search_term = ""
             page = 0
             continue
 
         try:
             idx = int(sel) - 1
-            if 0 <= idx < len(filtered):
-                chosen = filtered[idx]["id"]
-                Config.MODEL = chosen
-                if _saved:
-                    Config.PROVIDER = provider
-                    if PROVIDER_REGISTRY.get(provider, {}).get("default_key"):
-                        Config.API_KEY = PROVIDER_REGISTRY[provider]["default_key"]
-                Config.save_config()
-                print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
-                if _saved:
-                    print(f"  {t['dim']}  Switched provider to: {provider}{RST}")
+            if 0 <= idx < len(fl):
+                entry = fl[idx]
+                print(f"\n  {t['bright']}Selected: {entry['id']} [{entry['provider']}]{RST}")
+                try:
+                    role = input(rl_prompt(
+                        f"  Assign as {t['bright']}main{RST}{t['dim']}(Enter) / {RST}{t['bright']}s{RST}{t['dim']}ubagent / q{RST} {t['primary']}>{RST} ")).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if role == 'q':
+                    continue
+                _apply_model_selection(entry["provider"], entry["id"],
+                                       "subagent" if role.startswith('s') else "main")
                 break
             else:
-                viz.status("Invalid number", "warning")
+                print(f"  {t['dim']}Out of range.{RST}")
         except ValueError:
-            pass
+            print(f"  {t['dim']}Not a valid choice.{RST}")
 
-# ── Provider Commands ────────────────────────────────────────────
 
-def set_custom_api_base(url):
-    """Explicitly set a custom API base URL and mark it as user-overridden.
 
-    A custom URL is preserved across provider switches until cleared with
-    reset_api_base() (via '/provider api reset' or '/set api_base reset').
-    """
-    t = T()
-    url = (url or "").strip()
-    if not url:
-        viz.status("No URL provided. Usage: /set api_base <url>", "error")
-        return False
-    Config.API_BASE = url
-    Config.CUSTOM_API_BASE = True
-    Config.SESSION_ONLY_KEYS.discard("api_base")
-    Config.save_config()
-    print(f"  {t['bright']}+ API base set to: {url}{RST}")
-    print(f"  {t['dim']}This custom URL is preserved when switching providers.{RST}")
-    print(f"  {t['dim']}Reset to a provider default with: {t['bright']}/provider api reset{RST}")
-    return True
 
-def reset_api_base():
-    """Clear a user-set custom API base URL and revert to the current provider's default."""
-    t = T()
-    prov = PROVIDER_REGISTRY.get(Config.PROVIDER, {})
-    default_base = prov.get("api_base", Config.API_BASE)
-    Config.API_BASE = default_base
-    Config.CUSTOM_API_BASE = False
-    Config.SESSION_ONLY_KEYS.discard("api_base")
-    Config.save_config()
-    print(f"  {t['bright']}+ Custom API base cleared.{RST}")
-    print(f"  {t['dim']}Reverted to {Config.PROVIDER} default: {default_base}{RST}")
-    return True
-
-def show_api_base():
-    """Display the current API base URL and whether it's a custom override."""
-    t = T()
-    tag = f" {t['bright']}(custom){RST}" if Config.CUSTOM_API_BASE else ""
-    print(f"  API base: {t['bright']}{Config.API_BASE}{RST}{tag}")
-    if Config.CUSTOM_API_BASE:
-        print(f"  {t['dim']}Provider: {Config.PROVIDER} (custom URL overrides provider default){RST}")
-    else:
-        print(f"  {t['dim']}Provider: {Config.PROVIDER}{RST}")
-    print(f"  {t['dim']}Usage: /set api_base <url>  |  /set api_base reset{RST}")
-    return True
-
-def cmd_provider_list():
-    """List all available providers."""
-    t = T()
-    print(f"\n {t['bright']}MODEL PROVIDERS{RST}")
-    print(f" {t['dim']}{'─' * 60}{RST}")
-    
-    for key, prov in PROVIDER_REGISTRY.items():
-        marker = f"{t['bright']}*{RST}" if key == Config.PROVIDER else " "
-        print(f" {marker} {t['primary']}{key:<12}{RST} {t['dim']}{prov.get('display_name', prov.get('name', ''))}{RST}")
-        print(f"   {t['dim']}{prov.get('description', '')}{RST}")
-        print(f"   {t['dim']}API: {prov.get('api_base', '')}{RST}")
-        print(f"   {t['dim']}Model: {prov.get('model', '')[:40]}{RST}")
-        print()
-    
-    print(f" {t['dim']}{'─' * 60}{RST}")
-    print(f" {t['dim']}* = current provider{RST}")
-
-def cmd_provider_set(provider_name):
-    """Switch to a different provider."""
-    t = T()
-    
-    if provider_name not in PROVIDER_REGISTRY:
-        viz.status(f"Unknown provider: {provider_name}", "error")
-        print(f"   {t['dim']}Use 'providers' to see available options{RST}")
-        return False
-    
-    prov = PROVIDER_REGISTRY[provider_name]
-    switching = provider_name != Config.PROVIDER
-    Config.PROVIDER = provider_name
-    # Preserve a user-set custom API base URL; do NOT let provider defaults clobber it.
-    if Config.CUSTOM_API_BASE:
-        if switching:
-            label = prov.get('display_name', prov.get('name', ''))
-            viz.status(f"Switched to: {label} (custom API base preserved)", "success")
-            print(f"   {t['dim']}API: {t['bright']}{Config.API_BASE}{RST} {t['bright']}(custom){RST}")
-            print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
-            print(f"   {t['dim']}To use {label}'s default API: {t['bright']}/provider api reset{RST}")
-        # else: re-selecting current provider, custom URL stays as-is
-    else:
-        Config.API_BASE = prov.get("api_base", Config.API_BASE)
-        viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
-        print(f"   {t['dim']}API: {Config.API_BASE}{RST}")
-        print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
-    # Explicit provider switch is an intentional, persistent change — lift any
-    # session-only protection set by --api/--api-key/--model CLI flags.
-    Config.SESSION_ONLY_KEYS.discard("api_base")
-    Config.SESSION_ONLY_KEYS.discard("api_key")
-    Config.SESSION_ONLY_KEYS.discard("model")
-    # Only suggest a default model if user hasn't set one; never overwrite their choice
-    if not Config.MODEL:
-        Config.MODEL = prov.get("model", Config.MODEL)
-    Config.save_config()
-    
-    # Provider-scoped key logic: a key stored for another provider must not
-    # silently satisfy a switch to THIS one (cross-provider 401s), and a
-    # per-provider key (providers.<name>.api_key, install.sh or prior switch)
-    # should follow the provider you switch to.
-    _prov_key = (prov.get("default_key") or "")
-    _prov_key = _prov_key.strip() if isinstance(_prov_key, str) else ""
-    if switching and _prov_key and Config.API_KEY != _prov_key:
-        Config.API_KEY = _prov_key
-        Config.save_config()
-        print(f"   {t['bright']}+ Using stored {provider_name} key: {mask_key(_prov_key)}{RST}")
-    needs_key = (not _prov_key) and (switching or not Config.API_KEY)
-    if needs_key:
-        if switching and Config.API_KEY:
-            print(f"   {t['warn']}Current key belongs to your previous provider.{RST}")
-        else:
-            print(f"   {t['warn']}This provider may require an API key.{RST}")
-        try:
-            key = input(rl_prompt(f"   API key for {provider_name} (Enter to keep current): ")).strip()
-            if key:
-                Config.API_KEY = key
-                Config.SESSION_ONLY_KEYS.discard("api_key")
-                Config.save_config()
-                print(f"   {t['bright']}+ API key set: {mask_key(key)}{RST}")
-        except (EOFError, KeyboardInterrupt):
-            print()
-    return True
-
-def cmd_provider_add(name, api_base, model, description="Custom provider"):
-    """Add a custom provider."""
-    t = T()
-    PROVIDER_REGISTRY[name] = {
-        "name": name.replace("_", " ").title(),
-        "api_base": api_base,
-        "model": model,
-        "description": description
-    }
-    viz.status(f"Added provider: {name}", "success")
 
 def cmd_provider_remove(name):
-    """Remove a provider."""
+    """Remove a provider from the registry and config.json."""
     t = T()
-    if name in PROVIDER_REGISTRY:
-        if name == "local":
-            viz.status("Cannot remove built-in 'local' provider", "error")
-            return
-        del PROVIDER_REGISTRY[name]
-        viz.status(f"Removed provider: {name}", "success")
-    else:
-        viz.status(f"Provider not found: {name}", "error")
+    if name in ("local", "ollama"):
+        viz.status("Built-in local providers can't be removed", "warning")
+        return
+    was_current = (name == Config.PROVIDER)
+    Config.remove_provider_entry(name)
+    if was_current:
+        Config.PROVIDER = ""
+        print(f"   {t['warn']}Removed your active provider — pick a model via /model{RST}")
+    viz.status(f"Provider removed: {name}", "success")
 
-# ── Image / Multimodal Input ──────────────────────────────────
 
 def cmd_image(args_str):
     """Load an image from file or URL and return multimodal content list.
