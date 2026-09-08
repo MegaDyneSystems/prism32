@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.10.0 - MegaDyne Systems Terminal Agent
+Prism32 v6.10.1 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6171,7 +6171,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.10.0 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.10.1 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6182,12 +6182,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.10.0 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.10.1 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.10.0 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.10.1 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -9121,7 +9121,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.10.0 — MegaDyne Systems")
+        print("Prism32 v6.10.1 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -11150,22 +11150,37 @@ def _fetch_catalog_entries():
         except Exception as e:
             failures.append((name, str(e)))
 
+    # Scope: ONLY providers the user actually uses — the active provider plus
+    # entries they explicitly configured (config.json providers section).
+    # Built-in registry defaults are NOT polled: their public /v1/models
+    # (e.g. openrouter) floods the list with hundreds of models the user
+    # has no key for and cannot run.
+    try:
+        with open(Config.CONFIG_FILE, 'r', encoding='utf-8') as f:
+            _cfg_provs = (json.load(f) or {}).get("providers") or {}
+    except Exception:
+        _cfg_provs = {}
     _sbase, _skey = (Config.API_BASE or "").rstrip('/'), Config.API_KEY
+    _active = Config.PROVIDER or ""
     targets = []
-    # Registry providers (each with its own base; per-provider key if set).
-    for pname, prow in sorted(PROVIDER_REGISTRY.items()):
+    if _active and Config.API_BASE:
+        # Active provider: prefer its per-provider key, else the session key.
+        _reg = PROVIDER_REGISTRY.get(_active) or {}
+        _akey = (_reg.get("default_key") or "").strip() or _skey
+        targets.append((_active, Config.API_BASE, _akey))
+    for pname, prow in sorted(_cfg_provs.items()):
+        if pname == _active:
+            continue
         base = prow.get("api_base") or ""
         if not base:
             continue
-        key = prow.get("default_key")
-        if not (key or "").strip() and base.rstrip('/') == _sbase:
-            # The active provider: the session key (possibly from --api-key or
-            # /provider key) applies even without a stored per-provider key.
-            key = Config.API_KEY
-        targets.append((pname, base, key))
-    # A custom session base not present in the registry is its own source.
-    if _sbase and not any(b.rstrip('/') == _sbase for _, b, _ in targets):
-        targets.append(("_session", Config.API_BASE, _skey))
+        if prow.get("api_key"):
+            targets.append((pname, base, prow["api_key"]))
+        elif base.rstrip('/') == _sbase:
+            # Same endpoint as the session (custom-shared base) — session key applies.
+            targets.append((pname, base, _skey))
+        else:
+            targets.append((pname, base, None))
 
     threads = []
     for name, base, key in targets:
@@ -11337,6 +11352,24 @@ def cmd_model_list(history=None, cmd_log=None, provider=None, search=None):
 
 
 
+
+def cmd_provider_list():
+    """List all configured providers."""
+    t = T()
+    print(f"\n {t['bright']}MODEL PROVIDERS{RST}")
+    print(f" {t['dim']}{'─' * 60}{RST}")
+
+    for key, prov in PROVIDER_REGISTRY.items():
+        marker = f"{t['bright']}*{RST}" if key == Config.PROVIDER else " "
+        print(f" {marker} {t['primary']}{key:<12}{RST} {t['dim']}{prov.get('display_name', prov.get('name', ''))}{RST}")
+        key_state = mask_key(prov.get("default_key")) if prov.get("default_key") else "(no stored key)"
+        print(f"   {t['dim']}Key: {key_state}   API: {prov.get('api_base', '')}{RST}")
+        print(f"   {t['dim']}Model: {prov.get('model', '')[:40]}{RST}")
+        print()
+
+    print(f" {t['dim']}{'─' * 60}{RST}")
+    print(f" {t['dim']}* = current provider  |  add: provider add <name> <base> [model]  |  keys: provider key <name> <key>{RST}")
+    print(f" {t['dim']}Pick models (and providers) with /model{RST}")
 
 def cmd_provider_remove(name):
     """Remove a provider from the registry and config.json."""
