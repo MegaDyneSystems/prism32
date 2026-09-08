@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.10.1 - MegaDyne Systems Terminal Agent
+Prism32 v6.10.2 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6171,7 +6171,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.10.1 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.10.2 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6182,12 +6182,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.10.1 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.10.2 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.10.1 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.10.2 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -9121,7 +9121,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.10.1 — MegaDyne Systems")
+        print("Prism32 v6.10.2 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9551,7 +9551,6 @@ def main():
                     print(f"  {t['dim']}  provider api <name> <url>            provider key <name> <key>{RST}")
             else:
                 cmd_provider_list()
-                print(f"  {t['dim']}Add: provider add <name> <base> [model] | Fix: provider api/key <name> ... | Pick models: /model{RST}")
             print()
             continue
 
@@ -11335,14 +11334,17 @@ def cmd_model_list(history=None, cmd_log=None, provider=None, search=None):
                 print(f"\n  {t['bright']}Selected: {entry['id']} [{entry['provider']}]{RST}")
                 try:
                     role = input(rl_prompt(
-                        f"  Assign as {t['bright']}main{RST}{t['dim']}(Enter) / {RST}{t['bright']}s{RST}{t['dim']}ubagent / q{RST} {t['primary']}>{RST} ")).strip().lower()
+                        f"  Assign: {t['bright']}1{RST}{t['dim']}) main agent  {RST}{t['bright']}2{RST}{t['dim']}) subagent"
+                        f"  {t['dim']}(Enter=1, q=cancel) {t['primary']}>{RST} ")).strip().lower()
                 except (EOFError, KeyboardInterrupt):
                     print()
                     break
                 if role == 'q':
                     continue
-                _apply_model_selection(entry["provider"], entry["id"],
-                                       "subagent" if role.startswith('s') else "main")
+                if role in ('2', 's', 'sub', 'subagent'):
+                    _apply_model_selection(entry["provider"], entry["id"], "subagent")
+                else:
+                    _apply_model_selection(entry["provider"], entry["id"], "main")
                 break
             else:
                 print(f"  {t['dim']}Out of range.{RST}")
@@ -11368,8 +11370,14 @@ def cmd_provider_list():
         print()
 
     print(f" {t['dim']}{'─' * 60}{RST}")
-    print(f" {t['dim']}* = current provider  |  add: provider add <name> <base> [model]  |  keys: provider key <name> <key>{RST}")
-    print(f" {t['dim']}Pick models (and providers) with /model{RST}")
+    print(f" {t['dim']}* = current provider  |  Pick models (main/subagent) with {t['bright']}/model{RST}")
+    print()
+    print(f" {t['bright']}How to configure providers:{RST}")
+    print(f"  {t['dim']}Switch model/provider ......... {t['bright']}/model{RST}{t['dim']} (numbered picker, assigns main or subagent){RST}")
+    print(f"  {t['dim']}Add a provider ............... {t['bright']}/provider add <name> <api-base> [model]{RST}")
+    print(f"  {t['dim']}Fix a provider's URL ......... {t['bright']}/provider api <name> <url>{RST}")
+    print(f"  {t['dim']}Set a provider's API key ...... {t['bright']}/provider key <name> <key>{RST}")
+    print(f"  {t['dim']}Remove a provider ............ {t['bright']}/provider rm <name>{RST}")
 
 def cmd_provider_remove(name):
     """Remove a provider from the registry and config.json."""
