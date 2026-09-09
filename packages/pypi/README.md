@@ -1,4 +1,4 @@
-# Prism32 v6.12.0
+# Prism32 v7.0.0
 
 Prism32 is a self-extending, self-repairing, self-evolving hivemind program with a AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do. it can turn any PC or low end hardware SBC or laptop etc into a robotic assistant that can control external peripherals and can also run on robots and IOT devices with shell and python on bare metal. Prism32 is the first polymorphic AI assistant and coding harness
 Prism32 uses MegadyneSystem's Tesseract hivemind technology to maximize intelligence and efficiency removing bloated A2A communication and addressing the issues with multi agent systems
@@ -6,6 +6,22 @@ Prism32 uses MegadyneSystem's Tesseract hivemind technology to maximize intellig
 It is designed for modern PC's and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
 
 This README is the full operator guide. The GitHub front page shows the same document.
+
+## What's New In 7.0
+
+Prism32 v7.0.0 is the multi-provider + mission release. Upgrading from 6.x is seamless — config, sessions, memory, and provider keys carry over.
+
+**Unified multi-provider `/model`.** `/model` now fetches every configured provider's catalog into one browseable list. Models are tagged `[provider]`, and a numbered pick assigns the model to the **main agent** or the **subagent** slot. Mixing providers is first-class: run a cloud reasoning model as your main agent and a local qwen as your subagent, picked from the same screen.
+
+**`/provider` manages the registry.** Provider switching moved into `/model`; `/provider` handles configuration only: `add <name> <base> [model]` (no args = interactive wizard: base → key → live reachability/auth test → model pick), `rm <name>`, `api <name> <url>` (fix a provider's base), `key <name> <key>` (per-provider keys, persisted under `providers.<name>.api_key`), `test [name]` (3-step diagnostic: reachability → auth → model-in-catalog), and `list`. A new built-in `llamacpp-remote` provider targets remote llama.cpp servers (no default host — point it with `/provider api`). Round out subagent routing with `/set subagent_provider` and `/set subagent_model`.
+
+**`/mission` replaces `/goal`.** A planner decomposes your goal into 3-6 steps, and each ready step runs as a PARALLEL subagent shard — siblings run concurrently, children wait for parents. If the goal is ambiguous, the planner first asks the operator 1-3 clarifying questions. Completion is STRUCTURAL: all leaf steps done (failed steps requeue once, then the leaf fails and the mission continues) — no more `GOAL COMPLETE` magic phrase. Every shard receives mission context (completed steps + team notes). The REPL stays live — `/mission` returns instantly, with `/mission status | pause | resume | interject <note> | wait` for control. Results land in quantum context (`mission_<id>_result`). `--goal`/`--mission` runs headless, `/maxsteps` sets the per-todo step budget, and `/goal` still works as an alias.
+
+**Reliability.** Atomic writes (temp + fsync + replace) protect all state files against power loss; a corrupt `config.json` is quarantined instead of silently rewritten; reasoning models that exhaust the response budget auto-retry with a larger budget; protocol routing follows the request's base URL so mixed providers never misroute; subagent requests run a TCP pre-flight with actionable error messages; session-only `--api-key` overrides print an exit warning so a working key is never silently lost; API keys are masked in all error output.
+
+**Real-hardware compat pass.** Verified on Synology DSM 7.1.1 (ARMv7, Python 3.8, nonexistent user home — the runtime dir reroutes to `/tmp/prism32`), NetBSD 10.1 i386 (pkgsrc python detection, `hw.physmem` RAM detection, `su -c` fallbacks), and Fire TV / Termux on Android 5.1.1. Installers handle noexec `/tmp`, pkgsrc python, and broken homes.
+
+**Packaging.** Published packages are trimmed to PyPI + npm; the Homebrew and Scoop seed repositories are kept.
 
 ## Cheat Sheet: Fastest Path
 
@@ -109,17 +125,18 @@ Most-used first commands inside Prism32:
 
 ```text
 /help                 Show all commands
-/provider list        Show providers
-/provider openrouter  Switch provider
-/provider key KEY     Set API key
-/model                Browse/select models
+/provider list        Show configured providers
+/provider add         Add a provider (interactive wizard)
+/provider key <name> <key>
+                      Set a provider's API key (persisted)
+/model                Browse every provider's models; assign main/subagent
 /cost                 Show session token usage and cost
 /config               Show active config
-/goal <task>          Autonomous multi-step mode
+/mission <goal>       Autonomous orchestrated mission mode
 /bash <cmd>           Run a shell command manually
 /memory edit          Edit machine notes injected into context
 /remember <text>      Store long-term memory
-/delegate <task>      Run a subagent now
+/delegate <task>       Run a subagent now
 /spawn <task>         Start a background subagent
 /extend <goal>        Generate/load a temporary plugin for a missing capability
 /extend prompt        Print the plugin-generation prompt
@@ -139,7 +156,7 @@ inspect this git repo, run the tests, and summarize what failed without changing
 ```
 
 ```text
-/goal audit this server for disk pressure, failed services, open ports, and risky logs; report only
+/mission audit this server for disk pressure, failed services, open ports, and risky logs; report only
 ```
 
 Stop anything that is taking too long:
@@ -238,7 +255,7 @@ Prism32 combines several systems in one terminal harness:
 
 - Interactive chat with OpenAI-compatible model APIs.
 - Active task mode: the AI can emit shell commands in fenced `execute` blocks; Prism32 runs them, captures output, and asks the AI what to do next.
-- Autonomous goal mode with `/goal <task>` for multi-step tasks up to a configurable step limit.
+- Autonomous mission mode with `/mission <goal>`: a planner decomposes the goal into 3-6 steps that run as parallel subagent shards until the mission is structurally complete.
 - Synchronous and asynchronous subagents with `/delegate`, `/spawn`, `/subagents`, and `/collect`.
 - Plugin loading from `~/.prism32/plugins/*.py` for custom slash commands, providers, themes, context injection, timers, and HTTP helpers.
 - Self-extension with `/extend`: Prism32 can ask the configured model to generate a stdlib-only plugin, syntax-check it, write it, load it, and use the new command immediately.
@@ -250,7 +267,7 @@ Prism32 combines several systems in one terminal harness:
 - Low-RAM mode: auto-detects <64MB systems, skips heavy startup paths, and caps output to stay usable on 27MB OpenWrt routers.
 - Prompt caching: Anthropic native cache_control, OpenAI automatic cached_tokens billing, and DeepSeek prompt_cache_hit_tokens — toggle with `/prompt_caching on|off`.
 - Cheaper inference: non-destructive compression of older verbose tool results (~85% token reduction), condensed system prompt, and per-provider `cheap_model` suggestions in `/model`.
-- Provider URL protection: custom `api_base` survives provider switches; set with `/set api_base <url>` or `reset` to revert.
+- Provider URL protection: custom `api_base` survives provider switches; set with `/set api_base <url>` or `reset` to revert. Per-provider bases are fixed with `/provider api <name> <url>`.
 
 ## The Emergent Agent
 
@@ -274,7 +291,7 @@ The combination creates real emergent power:
 
 **Platform reach means deployment everywhere.** The same Prism32 binary runs on a Raspberry Pi inside a robot, an old laptop in a garage, a Steam Deck, a jailbroken Kindle, a Tesla MCU, a DEC AlphaStation, a Synology NAS, a $15 OpenWrt travel router, an SGI Octane, and an AWS Graviton instance, a bluetooth speaker. It auto-detects the architecture, the package manager, and the shell, then adjusts every command it runs. Install once, deploy anywhere.
 
-**Cost scales down to zero.** Local llama.cpp or Ollama models run entirely offline on the same machine. No API costs. No cloud dependency. Use `/provider local` for private work, switch to OpenRouter for hard reasoning, and let subagents run on Groq's free tier for bulk scanning. You control the cost-per-task by choosing which model does which job.
+**Cost scales down to zero.** Local llama.cpp or Ollama models run entirely offline on the same machine. No API costs. No cloud dependency. Pick a local model from `/model` for private work, a cloud model for hard reasoning, and let subagents run on Groq's free tier for bulk scanning. You control the cost-per-task by choosing which model does which job.
 
 **The system is theoretically unbounded.** Because the agent can write and load plugins, spawn subagents, absorb external harnesses, evolve its own context, and persist everything it learns, there is no fixed feature ceiling. Every task expands the agent's capability surface. The operator does not configure features — they describe goals, and the agent builds the path.
 
@@ -301,7 +318,7 @@ Optional tools make Prism32 more capable:
 
 Prism32 is a pure-stdlib Python program, so the real portability rule is simple: if Python 3.7+ can run and the system has a usable shell, Prism32 should start. Some features depend on terminal support, process control, SSL certificates, and local command availability.
 
-The repository has automated CI syntax checks and unit tests on Ubuntu (Python 3.9, 3.10, 3.11, 3.12, and 3.13, plus a 3.7 compile check). Deployed copies have also been syntax-checked on NetBSD 10.1 and macOS 10.13 in the development environment; NetBSD PTY smoke tests have been used for terminal behavior.
+The repository has automated CI syntax checks and unit tests on Ubuntu (Python 3.9, 3.10, 3.11, 3.12, and 3.13, plus a 3.7 compile check). Deployed copies have also been syntax-checked on NetBSD 10.1 and macOS 10.13 in the development environment; NetBSD PTY smoke tests have been used for terminal behavior. The v7.0 compat pass was verified end-to-end on real hardware: Synology DSM 7.1.1 (ARMv7, Python 3.8, nonexistent user home), NetBSD 10.1 i386, and Fire TV / Termux (Android 5.1.1, Python 3.8).
 
 Primary targets:
 
@@ -413,7 +430,7 @@ Use `/arch` to inspect the detected label. Use `PRISM32_ARCH=<label>` or `/arch 
 
 Prism32's local overhead is intentionally small:
 
-- The main program is a single `prism32.py` file of about 456 KB in this working copy.
+- The main program is a single `prism32.py` file of about 507 KB in this working copy.
 - The core uses only Python standard-library modules.
 - There is no browser, Electron shell, Node.js dependency tree, local vector database, or background service required.
 - Live streaming of AI responses is on by default (`Config.STREAM = True`) — tokens (and reasoning, dimmed) render as they arrive and flow into terminal scrollback. Turn it off with `/stream off` (persisted) or `--slow-cpu` on fragile/slow terminals.
@@ -468,7 +485,7 @@ Use `/stream off` if you enabled streaming in the current session.
 
 ## Command-Line Flags
 
-All flags are optional. `--model`, `--api`, and `--api-key` are **session-only overrides** — they apply for the current session and are never persisted to `config.json` (persist providers/models/keys with `/provider ...`, `/model ...`, or `/set ...` inside the app instead):
+All flags are optional. `--model`, `--api`, and `--api-key` are **session-only overrides** — they apply for the current session and are never persisted to `config.json` (persist providers/models/keys with `/provider ...`, `/model ...`, or `/set ...` inside the app instead). On exit, Prism32 prints a warning if a session-only `--api-key` or other CLI override was never saved, so a working key is not silently lost to the next session:
 
 | Flag | Effect |
 | --- | --- |
@@ -480,7 +497,7 @@ All flags are optional. `--model`, `--api`, and `--api-key` are **session-only o
 | `--slow-cpu` | Non-streaming mode, save-on-interaction (old machines) |
 | `--no-boot` | Skip the boot sequence |
 | `--temperature <0.0-2.0>` | AI temperature (session-only) |
-| `--goal, -g <task>` | Run in autonomous goal mode and exit |
+| `--goal, --mission, -g <task>` | Run a mission headless and exit on completion |
 | `--set-timeout <sec>` | Set command timeout and exit |
 | `--update <url|path>` | Update prism32 from a URL or file path and exit |
 | `--setup-runtime` | Refresh startup memory, harness scan, evolve baseline, exit |
@@ -529,7 +546,7 @@ During streaming responses, you can type at any time. The footer changes to `int
 
 Useful controls:
 
-- Escape: **the only key that cancels** agent work. This covers streaming, non-streaming API waits, foreground commands, and goal mode. Escape is detected through a unified `select()` that polls stdin and stdout simultaneously, so there is no blind spot during tool execution. Typed interjections do NOT cancel — they are queued for after the current response completes.
+- Escape: **the only key that cancels** agent work. This covers streaming, non-streaming API waits, foreground commands, and in-flight mission shards/subagents. Escape is detected through a unified `select()` that polls stdin and stdout simultaneously, so there is no blind spot during tool execution. Typed interjections do NOT cancel — they are queued for after the current response completes.
 - Up/Down while interjecting: cycle previous interjections.
 - Left/Right, Home, End: edit the interjection buffer.
 - Delete (forward): delete the character after the cursor.
@@ -622,33 +639,38 @@ All package managers install the same `prism32` command. After installation, run
 Recommended first commands:
 
 ```text
-/provider list
-/provider openrouter
-/provider key sk-or-v1-...
-/model
-/config
+/provider list        Show configured providers and their keys/bases
+/provider add         Interactive add wizard: base → key → live test → model pick
+/model                Browse every provider's models; assign main/subagent
+/config               Show active config
 /memory path
 /help
 ```
 
-Provider examples:
+Provider management examples:
 
 ```text
-/provider local
-/provider ollama
-/provider openai
-/provider groq
-/provider together
-/provider openrouter
-/provider custom
+/provider add myserver http://192.168.1.50:8080/v1
+/provider add openrouter https://openrouter.ai/api/v1
+/provider key openrouter sk-or-v1-...
+/provider api llamacpp-remote http://192.168.1.60:8080/v1
+/provider test openrouter
+/provider rm myserver
+/provider list
 ```
 
-Set a custom endpoint:
+- `add <name> <base> [model]` registers a provider; with no arguments it runs an interactive wizard (base → key → live reachability/auth test → model pick).
+- `key <name> <key>` stores a per-provider key under `providers.<name>.api_key` (a bare `/provider key <key>` still sets the main key).
+- `api <name> <url>` fixes that provider's base URL.
+- `test [name]` runs a 3-step diagnostic: reachability → auth → model-in-catalog, with the exact fix command for each failure.
+- Switching models and providers happens in `/model` — it lists every provider's models and assigns the right base+key per pick.
+
+Model selection — browse every configured provider's catalog in one list, then assign a pick to the main agent or the subagent slot (mixing providers is fine):
 
 ```text
-/provider api http://127.0.0.1:8080
-/model deepseek-v4-flash
-/savecfg
+/model                     Full multi-provider browser
+/model qwen                Same browser with search pre-filled
+/set model <name>          Exact quick-set for the main model
 ```
 
 Track session cost:
@@ -670,21 +692,15 @@ Prism32 captures token usage from both streaming and non-streaming API responses
 
 - `compress_tool_turns()`: non-destructive compression of older verbose tool results, keeping the most recent 6 turns verbatim. Saves ~85% tokens on long sessions.
 - System prompt is condensed (~190 tokens saved per request).
-- `/set subagent_model` routes subagents to a cheaper model.
+- `/set subagent_model` routes subagents to a cheaper model; `/set subagent_provider` routes them to a different provider entirely.
 - `CONTEXT_RECENT_FLOOR` and `CONTEXT_COMPRESS_KEEP` are configurable.
 - The `/model` browser shows each provider's `cheap_model` field with cost-saving suggestions.
-
-Browse/select models for the current provider:
-
-```text
-/model
-```
 
 ## Built-In Providers
 
 The built-in provider registry contains:
 
-- `local`: `http://127.0.0.1:8080`.
+- `local`: `http://127.0.0.1:8080` (local llama.cpp server).
 - `ollama`: `http://localhost:11434/v1`.
 - `openai`: `https://api.openai.com/v1`.
 - `anthropic`: `https://api.anthropic.com/v1`.
@@ -693,9 +709,12 @@ The built-in provider registry contains:
 - `openrouter`: `https://openrouter.ai/api/v1`.
 - `neuralwatt`: `https://api.neuralwatt.com/v1`.
 - `deepseek`: `https://api.deepseek.com/v1`.
+- `llamacpp-remote`: no default host — configure its address with `/provider api llamacpp-remote http://<host>:8080/v1`.
 - `custom`: operator-specified.
 
-Prism32 sends OpenAI-style `/chat/completions` requests. Providers work best when they expose an OpenAI-compatible API surface. For providers with native non-OpenAI APIs, use a compatible proxy or gateway.
+Add your own with `/provider add <name> <base> [model]` or the `/provider add` wizard; remove with `/provider rm <name>`. Per-provider keys persist under `providers.<name>.api_key` in `config.json` and win for their own provider; model/provider selection happens in `/model`.
+
+Prism32 sends OpenAI-style `/chat/completions` requests (protocol is routed by each request's base URL, so mixing providers in one session is safe). Providers work best when they expose an OpenAI-compatible API surface. For providers with native non-OpenAI APIs, use a compatible proxy or gateway.
 
 ## Common Commands
 
@@ -714,18 +733,27 @@ Core:
 /config               Show current configuration
 /savecfg              Save configuration
 /loadcfg              Reload configuration
+/model                Browse all providers' models; assign main/subagent
+/provider add|rm|api|key|test|list
+                      Manage the provider registry
 ```
 
 AI and task execution:
 
 ```text
-/goal <task>          Run autonomous multi-step goal mode
+/mission <goal>       Start an orchestrated autonomous mission
+/mission status       Show mission todo tree and running shards
+/mission pause        Pause mission dispatch (running shards finish)
+/mission resume       Resume a paused mission
+/mission interject <note>
+                      Add a team note delivered to future shards
+/mission wait         Block until the active mission completes
 /stream on|off        Toggle streamed responses
 /temperature <0-2>    Set model temperature
 /thinking off|low|medium|high
                       Set reasoning effort (saves to config)
 /timeout <seconds>    Set shell command timeout
-/maxsteps <n>         Set goal-mode step limit (default: 1000)
+/maxsteps <n>         Set mission per-step budget (default 1000; each shard capped at 25)
 /cost                 Show session token usage and dollar cost
 /usage                Show API usage/cost (OpenRouter)
 /extend <goal>        AI-generate/load a temporary plugin
@@ -798,6 +826,7 @@ Subagents and shared context:
 /quantum              Show shared session context
 /quantum key:value    Set a shared context value
 /quantum key:         Read a shared context value
+/quantum key          Read a shared context value (no colon)
 ```
 
 Automation, skills, promptshards, and evolution:
@@ -843,8 +872,9 @@ Which interface should I configure?
 ```
 
 This is a question block. Prism32 pauses, shows the question to
-the operator, and feeds the answer back. In goal mode, ask blocks
-are stripped and the model is told to run commands instead.
+the operator, and feeds the answer back. Mission shards and
+subagents are told to work autonomously and finish with a
+plain-text result instead of asking.
 
 ```execute
 df -h
@@ -969,12 +999,12 @@ Only the top N most information-dense lines are kept. Lines <5 or >200 chars are
 
 Prism32 tracks session state across trims:
 
-- **Objective**: set via `/goal`, survives all context trims
+- **Objective**: set by `/mission`, survives all context trims
 - **Discoveries**: accumulated key facts from command results
 - **Errors**: recurring problems tracked across the session
 - **Trim count**: how many times context was compressed
 
-This state is cleared on `/clear`, `/goal` end, and new goal start.
+This state is cleared on `/clear` and when the active mission ends.
 
 ### Recent Message Floor
 
@@ -987,23 +1017,50 @@ The system guarantees at least **8K tokens** of recent messages in normal trimmi
 
 The result: the agent keeps going when its context fills up and doesn't lose track of what it was doing.
 
-## Goal Mode Examples
+## Mission Mode Examples
 
-Goal mode is for tasks where you want Prism32 to keep working step by step in a loop
+Mission mode is for goals where you want Prism32 to plan the work, dispatch parallel workers, and keep going until the goal is structurally complete.
 
 ```text
-/goal find what llama.cpp command runs qwen 3.6 at the fastest tokens per second on this system
+/mission find what llama.cpp command runs qwen 3.6 at the fastest tokens per second on this system
 ```
 
 ```text
-/goal inspect this git repository, run the tests, comb through the code for bugs
+/mission inspect this git repository, run the tests, comb through the code for bugs
 ```
 
 ```text
-/goal on this NetBSD machine
+/mission audit this server for disk pressure, failed services, open ports, and risky logs; report only
 ```
 
-Goal mode stops when the AI says `GOAL COMPLETE`, reaches `/maxsteps`, fails, or you press Escape.
+When you start a mission:
+
+1. **Clarify** — if the goal is ambiguous, the planner asks the operator 1-3 short questions before decomposing (skipped in headless mode; press Enter to accept the goal as-is).
+2. **Plan** — the planner decomposes the goal into 3-6 short imperative steps (with a heuristic fallback split).
+3. **Dispatch** — every ready step (parent chain done) runs as a PARALLEL subagent shard: siblings run concurrently, children wait for their parents.
+4. **Complete structurally** — the mission ends when all leaf steps are done or failed. A failed step requeues once, then its leaf is marked failed and the mission continues.
+
+Every shard receives the mission context: the goal, the last 10 completed step results, and team notes — so shards build on each other instead of redoing work. The REPL stays live while the mission runs — `/mission` returns instantly.
+
+Mission control:
+
+```text
+/mission status       Show the todo tree, running shards, and notes
+/mission pause        Pause dispatch (running shards finish)
+/mission resume       Resume dispatch
+/mission interject <note>
+                      Add a note delivered to the next dispatched shards
+/mission wait         Block until the active mission completes
+```
+
+On completion you get a summary box (per-step results, failures marked) and the full result lands in quantum context as `mission_<id>_result` for the main agent and cross-agent handoff. `/maxsteps <n>` sets the per-step (per-todo) shard step budget — each shard is additionally capped at 25 steps. `/goal` still works as an alias for `/mission`.
+
+Run a mission headless (plans, runs, exits on completion):
+
+```sh
+prism32 --mission "audit this server and write a report to /tmp/audit.md"
+# --goal is an alias for --mission
+```
 
 ## Advanced Task Examples
 
@@ -1021,7 +1078,7 @@ Prism32 is useful for tasks that need conversation plus terminal feedback:
 
 ## Subagents
 
-Subagents are independent task runners with their own mini history. They use the same model as the main agent by default, or `Config.SUBAGENT_MODEL` if set. Change at runtime with `/set subagent_model <model>`.
+Subagents are independent task runners with their own mini history. They use the same model as the main agent by default, or the subagent slot (`Config.SUBAGENT_MODEL` + `Config.SUBAGENT_PROVIDER`) if set — so subagents can deliberately run on a different, cheaper provider than the main agent. Change at runtime with `/set subagent_model <model>` and `/set subagent_provider <name>`, or pick both slots from `/model`. Each subagent run gets a TCP pre-flight check on its provider base and fails fast with an actionable fix command if the endpoint is down.
 
 Run synchronously:
 
@@ -1159,7 +1216,7 @@ Safe self-edit workflow:
 ```text
 create a plugin that shows me a visually stunning view of what the subagents running my website are doing and how many visisters are using the site
 create a C compiler plugin so we can check cyntax of C code
-/goal create a temporary plugin to connect to my outdoor webcam and send me a telegram message when my important package arrives today from USPS
+/mission create a temporary plugin to connect to my outdoor webcam and send me a telegram message when my important package arrives today from USPS
 /evolve on
 /extend temp add a command that parses this project's test output and highlights failures 
 /extend prompt
@@ -1208,7 +1265,7 @@ Plugin hooks currently useful in normal operation:
 
 Best practice: every plugin should define its own usage context. Add a `USAGE_CONTEXT` string that lists the commands, options, and when the agent should use them, then inject it with `on_boot(api): api.inject_context(USAGE_CONTEXT)`. That makes the agent aware of plugin capabilities instead of only seeing command names.
 
-Plugin commands can be called as normal slash commands. They can also be used from AI `execute` blocks in the default active task loop and subagent loop. Goal mode focuses on shell commands and does not route every plugin command path the same way.
+Plugin commands can be called as normal slash commands. They can also be used from AI `execute` blocks in the default active task loop, the subagent loop, and mission shards.
 
 Minimal plugin:
 
@@ -1406,9 +1463,10 @@ Important settings:
 - `max_history`: maximum message history count.
 - `max_response_tokens`: response token limit sent to the API.
 - `cmd_timeout`: shell command timeout in seconds.
-- `goal_max_steps`: maximum goal-mode steps.
+- `goal_max_steps`: per-step (per-todo) shard step budget for missions (see `/maxsteps`).
 - `max_memory_ctx`: character limit for injected memory context.
 - `subagent_model`: optional model override for subagents.
+- `subagent_provider`: optional provider override for subagents (empty = main provider).
 - `agent_name`: display name shown before assistant responses.
 
 Use `/config`, `/savecfg`, and `/loadcfg` rather than editing JSON while Prism32 is running.
@@ -1418,6 +1476,7 @@ Set or reset a custom API base URL without it being clobbered by provider switch
 ```text
 /set api_base <url>      # persist a custom endpoint
 /set api_base reset      # revert to the provider's default
+/provider api <name> <url>   # fix one provider's own base
 ```
 
 The `custom_api_base` flag is saved in config across sessions.
@@ -1573,8 +1632,8 @@ This installs Python 3 + git, clones Prism32, creates a `prism32` command in `$P
 # After install, start Prism32:
 prism32
 
-# Use a cloud provider (no --provider flag exists — set it inside the app
-# with /provider openrouter, then /provider key sk-or-v1-...):
+# Use a cloud provider (no --provider CLI flag exists — pick a model with /model
+# inside the app, then store the key with /provider key <name> <key>):
 prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
 ```
 
@@ -1628,11 +1687,13 @@ wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstr
 cat bootstrap.sh | ssh user@nas "cat > /tmp/bootstrap.sh && HOME=/tmp sh /tmp/bootstrap.sh"
 ```
 
-Tested on Synology DS414 (Marvell Armada XP, ARMv7l, 2GB RAM, Python 3.8.12, DSM 7.x). The installer:
+Tested on Synology DS414 (Marvell Armada XP, ARMv7l, 2GB RAM, Python 3.8.12, DSM 7.x; the v7.0 compat pass verified DSM 7.1.1 end-to-end with a broken user home). The installer:
 - Detects missing git and falls back to direct download of `prism32.py` + `install.sh`
 - Detects missing `$HOME` directory and falls back to `/tmp` as HOME
 - Copies `prism32.py` to `~/.prism32/` (or `/tmp/.prism32/`)
 - Creates wrapper command in `~/.local/bin/prism32`
+- Reroutes the runtime dir to `/tmp/prism32` inside `prism32.py` itself when the home is missing or unwritable — chat, execute blocks, and session persistence all work under the fallback
+- Skips the `~/.local/bin` wrapper with a run-command hint when `/tmp` is mounted noexec (DSM does this) instead of writing a wrapper that dies with permission denied
 - No root required (installs to user-local paths)
 
 After install, run with:
@@ -1646,8 +1707,8 @@ HOME=/tmp prism32
 To connect to a cloud provider (since NAS likely has no local LLM):
 
 ```sh
-# CLI flags are session-only overrides — persist the provider with
-# /provider openrouter and /provider key inside the app instead:
+# CLI flags are session-only overrides — persist the pick with /model and
+# /provider key <name> <key> inside the app instead:
 HOME=/tmp prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
 ```
 
@@ -1671,18 +1732,21 @@ Prism32 can execute shell commands. Treat it like a powerful operator sitting at
 - Review diffs before trusting AI-generated code changes.
 - Use Escape to stop active work if the agent is going in the wrong direction.
 - Use `/timeout <seconds>` to limit foreground command duration.
-- Limit /goal steps on expensive models so expensivie models don't drain your bank account looping on a simple task
+- Limit mission steps with `/maxsteps` on expensive models so expensive models don't drain your bank account looping on a simple task
 
 ## Troubleshooting
 
 API connection failed:
 
 ```text
+/provider test
 /provider list
-/provider api https://your-provider/v1
-/provider key YOUR_KEY
+/provider api <name> https://your-provider/v1
+/provider key <name> YOUR_KEY
 /model
 ```
+
+`/provider test <name>` runs the full 3-step diagnostic (reachability → auth → model-in-catalog) and prints the exact fix command for whatever fails.
 
 Terminal rendering is broken:
 
@@ -1717,7 +1781,7 @@ Press Escape.
 
 "Process killed" or OOM on an embedded device (router, IoT):
 
-The single-file `prism32.py` is ~460 KB. On devices with less than ~64 MB RAM, CPython's parser may not have enough memory to compile it. Use a pre-compiled `.pyc` instead (see "Embedded and Ultra-Low-RAM Devices" above), or compile on a host with the same Python version and copy the `.pyc` to the device.
+The single-file `prism32.py` is ~507 KB. On devices with less than ~64 MB RAM, CPython's parser may not have enough memory to compile it. Use a pre-compiled `.pyc` instead (see "Embedded and Ultra-Low-RAM Devices" above), or compile on a host with the same Python version and copy the `.pyc` to the device.
 
 Cost tracking shows wrong amount:
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.12.0 - MegaDyne Systems Terminal Agent
+Prism32 v7.0.0 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6244,7 +6244,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.12.0 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.0.0 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6255,12 +6255,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.12.0 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.0.0 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.12.0 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.0.0 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -8508,6 +8508,59 @@ class Mission:
         return "\n".join(lines)
 
 
+def _mission_clarify(goal):
+    """One round of clarifying questions from the planner to the operator.
+
+    Runs only when stdin is interactive (a REPL session; headless --goal,
+    scripted pipes and subagent-driven missions skip it). If the model has
+    questions, the operator's answers are folded back into the goal before
+    decomposition — misunderstand mission objectives get fixed here, where
+    it is cheap, instead of three shards deep.
+    """
+    if not (hasattr(sys.stdin, "isatty") and sys.stdin.isatty()):
+        return goal
+    prompt = ("You are the mission planner. Decide whether the goal below is clear "
+              "enough to decompose and execute autonomously.\n"
+              "If it is already clear and actionable, reply with exactly: CLEAR\n"
+              "If you genuinely need more information, reply with 1-3 short questions, "
+              "one per line, no numbering, nothing else. Ask only what changes what "
+              "you would DO — never ask for permission to proceed.\n\nGoal: " + goal)
+    try:
+        resp = ask_ai([{"role": "user", "content": prompt}], stream=False)
+    except Exception:
+        return goal
+    if (not resp or resp.startswith(("[ERROR", "[HTTP ERROR", "[NETWORK ERROR", "[CANCELLED"))
+            or "CLEAR" in resp.upper()[:40]):
+        return goal
+    questions = []
+    for ln in resp.splitlines():
+        ln = ln.strip().lstrip("-*0123456789. ").strip()
+        if ln and 5 < len(ln) < 200 and ln.upper() != "CLEAR":
+            questions.append(ln)
+    if not questions:
+        return goal
+    questions = questions[:3]
+    t = T()
+    print()
+    box("MISSION PLANNER QUESTIONS",
+        "The planner wants clarification before decomposing:\n\n" +
+        "\n".join(f"  {i + 1}. {q}" for i, q in enumerate(questions)) +
+        "\n\nAnswer what you can, blank line to skip a question, or just press "
+        "Enter to accept the goal as-is.", "accent")
+    answers = []
+    try:
+        for i, q in enumerate(questions, 1):
+            ans = input(rl_prompt(f"  {t['bright']}{i}.{RST} {q}\n  {t['primary']}answer>{RST} ")).strip()
+            if ans:
+                answers.append(f"Q: {q}\nA: {ans}")
+    except (EOFError, KeyboardInterrupt):
+        print()
+        print(f"  {t['dim']}Clarification skipped — planning with the original goal.{RST}")
+    if not answers:
+        return goal
+    return goal + "\n\nOperator clarifications:\n" + "\n".join(answers)
+
+
 def _mission_plan(goal):
     """Decompose a goal into 3-6 steps via the main model (tesseract.py:2128
     LLMPlanner) with a heuristic fallback split."""
@@ -8558,24 +8611,26 @@ def _mission_monitor(mission):
     dispatch ready todos, harvest finished shards, complete structurally."""
     try:
         while mission.state == "active":
-            if mission.paused:
-                time.sleep(0.5)
-                continue
             with _MISSION_LOCK:
-                for todo in mission.next_ready():
-                    todo.state = "running"
-                    sa = SubAgent(mission.step_prompt(todo),
-                                  max_steps=min(Config.GOAL_MAX_STEPS, Mission.MAX_TODO_STEPS))
-                    todo.shard = sa
-                    sa.run_async(quiet=True)
-                    with stdout_lock:
-                        t = T()
-                        print(f"  {t['accent']}▶ mission step dispatched [{sa.id}]:{RST} {todo.label[:64]}")
-                # harvest
+                # HARVEST ALWAYS RUNS — 'running shards finish' is the pause
+                # contract; suspending harvest too wedged /mission wait
+                # forever on a paused mission with finished-but-unreported
+                # todos (bugtest finding 3a).
                 for todo in list(mission.todos.values()):
                     if todo.state == "running" and todo.shard is not None and todo.shard.done:
                         ok = bool(todo.shard.result) and not todo.shard.error
                         _mission_report(mission, todo, ok, todo.shard.result or todo.shard.error or "")
+                # Dispatch is what pause freezes — new shards wait.
+                if not mission.paused:
+                    for todo in mission.next_ready():
+                        todo.state = "running"
+                        sa = SubAgent(mission.step_prompt(todo),
+                                      max_steps=min(Config.GOAL_MAX_STEPS, Mission.MAX_TODO_STEPS))
+                        todo.shard = sa
+                        sa.run_async(quiet=True)
+                        with stdout_lock:
+                            t = T()
+                            print(f"  {t['accent']}▶ mission step dispatched [{sa.id}]:{RST} {todo.label[:64]}")
                 if mission.leaves_terminal() and not mission.any_running() and not mission.next_ready():
                     mission.state = "complete"
                     break
@@ -8611,6 +8666,8 @@ def mission_take(goal, wait=False):
             return None
         mission = Mission(goal)
         _ACTIVE_MISSION = mission
+    goal = _mission_clarify(goal)   # planner may ask the operator questions
+    mission.goal = goal
     labels = _mission_plan(goal)
     for label in labels:
         mission.add_todo(label)
@@ -9284,7 +9341,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.12.0 — MegaDyne Systems")
+        print("Prism32 v7.0.0 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9983,10 +10040,14 @@ def main():
                 if _am:
                     _am.paused = True
                     print(f"  {t['bright']}+ Mission paused (running shards finish; new dispatch waits).{RST}")
+                else:
+                    print(f"  {t['dim']}No active mission to pause.{RST}")
             elif _sub == "resume":
                 if _am:
                     _am.paused = False
                     print(f"  {t['bright']}+ Mission resumed.{RST}")
+                else:
+                    print(f"  {t['dim']}No active mission to resume.{RST}")
             elif _sub == "interject" and len(_mparts) > 1:
                 if _am:
                     _am.notes.append(f"user: {' '.join(_mparts[1:])[:300]}")
@@ -9997,8 +10058,16 @@ def main():
                 if _am:
                     print(f"  {t['dim']}Blocking until mission {_am.id} completes...{RST}")
                     while _am.state == "active":
+                        if _am.paused and not _am.any_running():
+                            # A paused mission with idle shards would otherwise
+                            # wedge the REPL forever with no way to type /resume.
+                            print(f"  {t['warn']}Mission is paused with no running shards — /mission resume to continue.{RST}")
+                            break
                         time.sleep(0.5)
-                    print(_am.render())
+                    if _am.state == "complete":
+                        print(_am.render())
+                else:
+                    print(f"  {t['dim']}No active mission to wait for.{RST}")
             else:
                 if _am:
                     print(f"  {t['warn']}Mission already active — /mission status first.{RST}")
