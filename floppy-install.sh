@@ -162,7 +162,8 @@ write_image() {
 # ── Main ──
 IMAGE="${1:-prism32_floppy.img}"
 if [ ! -f "$IMAGE" ]; then
-    IMAGE="/tmp/opencode/prism32_floppy.img"
+    # Must match make_floppy.py OUTPUT_IMG
+    IMAGE="/tmp/prism32_floppy.img"
 fi
 
 if [ -n "$2" ]; then

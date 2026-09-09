@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.9 - MegaDyne Systems Terminal Agent
+Prism32 v6.10.2 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
 import urllib.error
+import urllib.parse
 try:
     import ssl
 except ImportError:  # Some minimal/embedded builds lack ssl
@@ -455,6 +456,7 @@ _INTERJECTION_HISTORY_IDX = -1
 _INTERJECTION_SAVED_BUF = ""
 _INTERJECTION_CANCEL = object()
 AGENT_CANCELLED_RESPONSE = "[CANCELLED] Agent stopped by Escape"
+RESPONSE_BUDGET_EXHAUSTED = "[BUDGET EXHAUSTED] reasoning consumed the entire response budget before any content was produced"
 _AGENT_CANCEL_REQUESTED = False
 _AGENT_CANCEL_REASON = ""
 
@@ -531,7 +533,7 @@ def _fetch_api_pricing():
     try:
         url = Config.API_BASE.rstrip("/") + "/models"
         req = urllib.request.Request(url, headers={
-            "Authorization": f"Bearer {Config.API_KEY}",
+            "Authorization": f"Bearer {str(Config.API_KEY).strip()}",
             **PRISM32_DEFAULT_HEADERS,
         })
         ctx = create_ssl_context()
@@ -4066,8 +4068,10 @@ class Config:
     VERIFY_SSL = True  # Set False for self-signed/internal HTTPS APIs
 
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
+    SUBAGENT_PROVIDER = ""  # provider for subagents (empty = main provider)
     ROOT_PASS = ""  # root password for su/sudo commands (injected as $ROOT_PASS env)
-    STREAM = False
+    STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
+    NATIVE_TOOLS = os.environ.get("PRISM32_NATIVE_TOOLS", "1").lower() not in ("0", "false", "no", "off")
     MAX_MEMORY_CTX = 1024  # max chars for memory context in system prompt (0 = disable)
     AGENT_NAME = "MDS"     # name displayed before assistant responses
     PROMPT_CACHING = True  # Enable provider prompt caching (Anthropic native / OpenAI auto / DeepSeek auto)
@@ -4121,7 +4125,8 @@ class Config:
     CONFIG_FILE = os.path.join(_PRISM32_HOME, "config.json")
     CUSTOM_THEME = None  # User-defined theme name
     CUSTOM_ARCH_MAP = {}  # User-defined arch pattern -> label mappings
-    
+    SESSION_ONLY_KEYS = set()  # config.json keys protected from persistence (CLI overrides)
+
     @classmethod
     def save_config(cls):
         """Save current config to file with timeout-safe write."""
@@ -4131,6 +4136,7 @@ class Config:
                 "custom_api_base": cls.CUSTOM_API_BASE,
                 "model": cls.MODEL,
                 "subagent_model": cls.SUBAGENT_MODEL,
+                "subagent_provider": cls.SUBAGENT_PROVIDER,
                 "root_pass": cls.ROOT_PASS,
                 "api_key": cls.API_KEY,
                 "temperature": cls.TEMPERATURE,
@@ -4141,6 +4147,7 @@ class Config:
                 "cmd_timeout": cls.CMD_TIMEOUT,
                 "goal_max_steps": cls.GOAL_MAX_STEPS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
+                "stream": cls.STREAM,
                 "thinking_effort": cls.THINKING_EFFORT,
                 "max_memory_ctx": cls.MAX_MEMORY_CTX,
                 "max_context_tokens": cls.MAX_CONTEXT_TOKENS,
@@ -4151,10 +4158,85 @@ class Config:
                 "verify_ssl": cls.VERIFY_SSL,
                 "prompt_caching": cls.PROMPT_CACHING,
             }
+            # Preserve fields prism32 doesn't own, plus session-only CLI
+            # overrides (set via --model/--api/--api-key) which must keep
+            # their on-disk values. Without this, the first in-session save
+            # dropped the installer-written providers.<name>.api_key entries
+            # and strangled freshly installed keys on disk.
+            if os.path.exists(cls.CONFIG_FILE):
+                try:
+                    with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        old = json.load(f)
+                    if isinstance(old, dict):
+                        if "providers" in old and "providers" not in data:
+                            data["providers"] = old["providers"]
+                        for k in cls.SESSION_ONLY_KEYS:
+                            if k in old:
+                                data[k] = old[k]
+                except Exception:
+                    pass
             _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
         except Exception as e:
             print(f"  Config save failed: {e}")
     
+    @classmethod
+    def set_provider_entry(cls, name, api_base=None, model=None, api_key=None, persist=True):
+        """Create/update one providers.<name> entry (api base, default model,
+        per-provider key). Persists to config.json and updates the registry."""
+        if not name:
+            return False
+        try:
+            data = {}
+            if os.path.exists(cls.CONFIG_FILE):
+                try:
+                    with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        data = json.load(f) or {}
+                except Exception:
+                    data = {}
+            provs = data.get("providers") or {}
+            entry = dict(provs.get(name) or {})
+            if api_base is not None:
+                entry["api_base"] = api_base
+            if model is not None:
+                entry["model"] = model
+            if api_key is not None:
+                entry["api_key"] = str(api_key).strip()
+            provs[name] = entry
+            data["providers"] = provs
+            if persist:
+                _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
+            if name not in PROVIDER_REGISTRY:
+                PROVIDER_REGISTRY[name] = {}
+            PROVIDER_REGISTRY[name].update({
+                "name": name.replace("_", " ").title(),
+                "api_base": entry.get("api_base", ""),
+                "model": entry.get("model", ""),
+                "description": "Configured by user",
+            })
+            if entry.get("api_key"):
+                PROVIDER_REGISTRY[name]["default_key"] = entry["api_key"]
+            return True
+        except Exception as e:
+            print(f"  Provider save failed: {e}")
+            return False
+
+    @classmethod
+    def remove_provider_entry(cls, name):
+        """Delete one providers.<name> entry from disk and the registry."""
+        try:
+            if os.path.exists(cls.CONFIG_FILE):
+                with open(cls.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    data = json.load(f) or {}
+                provs = data.get("providers") or {}
+                if name in provs:
+                    del provs[name]
+                    data["providers"] = provs
+                    _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
+        except Exception as e:
+            print(f"  Provider remove failed: {e}")
+        PROVIDER_REGISTRY.pop(name, None)
+        return True
+
     @classmethod
     def load_config(cls):
         """Load config from file."""
@@ -4166,7 +4248,26 @@ class Config:
             if "api_base" in data: cls.API_BASE = data["api_base"]
             if "custom_api_base" in data: cls.CUSTOM_API_BASE = bool(data["custom_api_base"])
             if "model" in data: cls.MODEL = data["model"]
-            if "api_key" in data: cls.API_KEY = data["api_key"]
+            # Merge the per-provider section FIRST: install.sh stores keys under
+            # providers.<name>.api_key, and the active-provider fallback below
+            # consults PROVIDER_REGISTRY[...]["default_key"] — parsing this
+            # section after that lookup left freshly installed keys stranded
+            # in the registry and Config.API_KEY empty on first boot.
+            if "providers" in data:
+                for prov_name, prov_cfg in data["providers"].items():
+                    if prov_name not in PROVIDER_REGISTRY:
+                        PROVIDER_REGISTRY[prov_name] = {}
+                    PROVIDER_REGISTRY[prov_name].update({
+                        "name": prov_name.replace("_", " ").title(),
+                        "api_base": prov_cfg.get("api_base", cls.API_BASE),
+                        "model": prov_cfg.get("model", cls.MODEL),
+                        "description": "Configured via installer",
+                    })
+                    if prov_cfg.get("api_key"):
+                        PROVIDER_REGISTRY[prov_name]["default_key"] = prov_cfg["api_key"]
+            if "api_key" in data:
+                _k = data["api_key"]
+                cls.API_KEY = _k.strip() if isinstance(_k, str) else _k
             if "temperature" in data: cls.TEMPERATURE = data["temperature"]
             if "theme" in data: cls.THEME = data["theme"]
             if "provider" in data:
@@ -4187,6 +4288,7 @@ class Config:
                 loaded_steps = int(data["goal_max_steps"])
                 cls.GOAL_MAX_STEPS = max(1000, loaded_steps) if loaded_steps == 50 else loaded_steps
             if "auto_save_interval" in data: cls.AUTO_SAVE_INTERVAL = int(data["auto_save_interval"])
+            if "stream" in data: cls.STREAM = bool(data["stream"])
             if "thinking_effort" in data: cls.THINKING_EFFORT = data["thinking_effort"]
             if "max_memory_ctx" in data: cls.MAX_MEMORY_CTX = int(data["max_memory_ctx"])
             if "max_context_tokens" in data: cls.MAX_CONTEXT_TOKENS = int(data["max_context_tokens"])
@@ -4200,22 +4302,11 @@ class Config:
             if "prompt_caching" in data:
                 cls.PROMPT_CACHING = bool(data["prompt_caching"])
             if "subagent_model" in data: cls.SUBAGENT_MODEL = data["subagent_model"]
+            if "subagent_provider" in data: cls.SUBAGENT_PROVIDER = data["subagent_provider"]
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
             if "custom_arch_map" in data and isinstance(data["custom_arch_map"], dict):
                 cls.CUSTOM_ARCH_MAP = data["custom_arch_map"]
-            if "providers" in data:
-                for prov_name, prov_cfg in data["providers"].items():
-                    if prov_name not in PROVIDER_REGISTRY:
-                        PROVIDER_REGISTRY[prov_name] = {}
-                    PROVIDER_REGISTRY[prov_name].update({
-                        "name": prov_name.replace("_", " ").title(),
-                        "api_base": prov_cfg.get("api_base", cls.API_BASE),
-                        "model": prov_cfg.get("model", cls.MODEL),
-                        "description": "Configured via installer",
-                    })
-                    if prov_cfg.get("api_key"):
-                        PROVIDER_REGISTRY[prov_name]["default_key"] = prov_cfg["api_key"]
         except Exception as e:
             print(f"  Config load failed ({cls.CONFIG_FILE}): {e}")
 
@@ -4686,6 +4777,7 @@ register_provider("together", display_name="Together AI", api_base="https://api.
 register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", cheap_model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)", cache_support=None)
 register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
 register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-chat", cheap_model="deepseek-chat", description="DeepSeek V3 / R1 (requires API key)", cache_support="deepseek_auto")
+register_provider("llamacpp-remote", display_name="llama.cpp (remote server)", api_base="http://192.168.0.43:8080/v1", model="", description="Remote llama.cpp server (OpenAI-compatible). Fix the host via /provider api llamacpp-remote <url>", cache_support=None)
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
 
 
@@ -5516,8 +5608,13 @@ def ensure_session_dir():
     os.makedirs(Config.SESSION_DIR, exist_ok=True)
 
 def get_session_path(session_id):
-    """Get the file path for a session."""
-    return os.path.join(Config.SESSION_DIR, f"{session_id}.json")
+    """Get the file path for a session. Session ids are sanitized to a
+    single path component — ../, separators, and absolute paths are
+    rejected so /load and /delete cannot escape the sessions dir."""
+    sid = str(session_id or "").strip()
+    if not sid or sid.startswith('.') or '/' in sid or '\\' in sid or '..' in sid:
+        raise ValueError(f"Invalid session id: {session_id!r}")
+    return os.path.join(Config.SESSION_DIR, f"{sid}.json")
 
 def generate_session_id(name=None):
     """Generate a unique session ID."""
@@ -5564,21 +5661,30 @@ def save_session(session_id, history, cmd_log, metadata=None):
         "api_base": Config.API_BASE,
         "theme": Config.THEME,
         "metadata": metadata or {},
-        "history": history,
-        "cmd_log": cmd_log,
+        # stats before history/cmd_log: _quick_scan_session only reads the
+        # first bytes of the file — big histories pushed counts out of the
+        # window and /sessions showed "0 msgs | 0 cmds".
         "stats": {
             "messages": len(history),
             "commands": len(cmd_log)
-        }
+        },
+        "history": history,
+        "cmd_log": cmd_log,
     }
-    path = get_session_path(session_id)
+    try:
+        path = get_session_path(session_id)
+    except ValueError:
+        path = get_session_path(generate_session_id())
     with open(path, 'w', encoding='utf-8') as f:
         json.dump(session_data, f, indent=2)
     return path
 
 def load_session(session_id):
     """Load session from file."""
-    path = get_session_path(session_id)
+    try:
+        path = get_session_path(session_id)
+    except ValueError:
+        return None
     if not os.path.exists(path):
         return None
     try:
@@ -5592,7 +5698,7 @@ def _quick_scan_session(path, sid):
     Reads first 4KB which covers the header fields (id, title, timestamp, model, stats).'''
     try:
         with open(path, 'r', encoding='utf-8') as f:
-            chunk = f.read(4096)
+            chunk = f.read(8192)
         import re as _re
         def _grab(key, fallback=sid):
             m = _re.search(r'\"' + key + r'\":\s*\"([^\"]+)\"', chunk)
@@ -5627,7 +5733,10 @@ def list_sessions():
 
 def delete_session(session_id):
     """Delete a session file."""
-    path = get_session_path(session_id)
+    try:
+        path = get_session_path(session_id)
+    except ValueError:
+        return False
     if os.path.exists(path):
         os.remove(path)
         return True
@@ -6062,7 +6171,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.9 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.10.2 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6073,12 +6182,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.9 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.10.2 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.9 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.10.2 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -6265,6 +6374,30 @@ def _cmd_succeeded(result):
     low = (result or "").lower()[:4000]
     return not any(w in low for w in ["error", "blocked", "timeout", "failed", "failure", "not found", "cancelled", "denied"])
 
+def _split_task_provider(task):
+    """Split a trailing '--provider <name>' switch off a delegate/spawn task.
+    Only matches at end-of-string so quoted tasks that merely mention
+    --provider mid-sentence keep their text intact.
+    Returns (task, provider_or_None)."""
+    m = re.search(r'\s+--provider\s+(\S+)\s*$', task or '')
+    if not m:
+        return task, None
+    return (task[:m.start()] or '').rstrip(' \t'), m.group(1)
+
+def _split_plugin_block(block):
+    """A multi-line execute block where every non-empty line is a Prism32
+    /command is really a list of commands — split them so each runs
+    separately (otherwise everything after the first line is silently
+    swallowed as arguments of the first command)."""
+    lines = [ln.strip() for ln in (block or '').splitlines() if ln.strip()]
+    if len(lines) > 1 and all(ln.startswith('/') for ln in lines):
+        return lines
+    return [block] if (block or '').strip() else []
+    m = re.search(r'\s+--provider\s+(\S+)\s*$', task or '')
+    if not m:
+        return task, None
+    return (task[:m.start()] or '').rstrip(' \t'), m.group(1)
+
 def _try_plugin_cmd(c, history=None):
     """Check if c is a plugin command and dispatch it, returning result or None."""
     c_stripped = c.strip()
@@ -6282,11 +6415,15 @@ def _try_plugin_cmd(c, history=None):
             kv = cmd_args.split(':', 1)
             key = kv[0].strip()
             val = kv[1].strip() if len(kv) > 1 else ""
+            if not key:
+                return "Quantum: key name cannot be empty. Usage: /quantum <key>:<value>"
             if val:
                 _quantum.put(key, val)
                 return f"Quantum: {key} = {val}"
             v = _quantum.get(key)
-            return f"Quantum: {key} = {v}" if v is not None else f"Key '{key}' not found"
+            # 'nothing set' phrasing avoids _cmd_succeeded's 'not found' match
+            # — a normal quantum miss is not a command failure
+            return f"Quantum: {key} = {v}" if v is not None else f"Quantum: nothing set for key '{key}'"
         return f"Usage: /quantum <key>:<value> or /quantum <key>:"
     if cmd_name in ('/harness', 'harness'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "show"
@@ -6469,11 +6606,7 @@ def _try_plugin_cmd(c, history=None):
         task = cmd_args.strip()
         if not task:
             return "Usage: /delegate <task>"
-        provider = None
-        if ' --provider ' in task:
-            parts = task.split(' --provider ', 1)
-            task = parts[0]
-            provider = parts[1].strip().split()[0] if parts[1].strip() else None
+        task, provider = _split_task_provider(task)
         sa = SubAgent(task, provider=provider)
         sa.run()
         _quantum.put(f"subagent_{sa.id}_result", sa.result)
@@ -6484,11 +6617,7 @@ def _try_plugin_cmd(c, history=None):
         task = cmd_args.strip()
         if not task:
             return "Usage: /spawn <task>"
-        provider = None
-        if ' --provider ' in task:
-            parts = task.split(' --provider ', 1)
-            task = parts[0]
-            provider = parts[1].strip().split()[0] if parts[1].strip() else None
+        task, provider = _split_task_provider(task)
         sa = SubAgent(task, provider=provider)
         sa.run_async()
         _quantum.put(f"subagent_{sa.id}_spawned", True)
@@ -6743,7 +6872,7 @@ class QuantumContext:
         with self._lock:
             if not self._data:
                 return "(empty)"
-            return "\n".join(f"  {k}: {str(v)[:120]}" for k, v in self._data.items())
+            return "\n".join(f"  {k}: {str(v)[:240]}" for k, v in self._data.items())
 
 _quantum = QuantumContext()
 _SUBAGENTS = {}  # id -> SubAgent instance
@@ -6832,15 +6961,26 @@ class SubAgent:
         self._history = self._build_history()
         # Resolve provider credentials once; pass explicitly to ask_ai so
         # parallel subagents never mutate Config globals (race condition fix).
-        _api_base = Config.API_BASE
-        _api_key = Config.API_KEY
-        _model = self.model
-        if self.provider and self.provider in PROVIDER_REGISTRY:
-            prov = PROVIDER_REGISTRY[self.provider]
-            _api_base = prov["api_base"]
-            if prov.get("default_key"):
-                _api_key = prov["default_key"]
+        _prov = self.provider or Config.SUBAGENT_PROVIDER or Config.PROVIDER
+        if self.provider and self.provider not in PROVIDER_REGISTRY:
+            viz.status(f"Unknown provider '{self.provider}' for {self.id} — using main provider ({_prov})",
+                       "warning")
+            _prov = Config.PROVIDER
+        _api_base, _api_key, _model = resolve_runtime(_prov, self.model)
+        # TCP pre-flight: a dead local server (e.g. llama.cpp not running)
+        # used to surface as a cryptic '<Errno 111> Connection refused'
+        # after burning every retry. Fail fast with an actionable message.
+        _ok, _why = check_endpoint_reachable(_api_base)
+        if not _ok:
+            self.error = f"provider '{_prov}' unreachable at {_api_base} ({_why})"
+            self.result = (f"[SUBAGENT ERROR] Provider '{_prov}' is unreachable at {_api_base} "
+                           f"({_why}). Is the server running? Fix it: /model (pick a reachable "
+                           f"model) or /provider api {_prov} <url>")
+            self.done = True
+            return
         try:
+            nudges = 0
+            nudge_marks = []  # indices of announce/nudge exchanges in self._history
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
                 # Context management, trim if approaching limit
@@ -6870,6 +7010,12 @@ class SubAgent:
                     if was_healed:
                         commands = extract_blocks(resp, 'execute')
                 if commands:
+                    nudges = 0
+                    if nudge_marks:
+                        for idx in sorted(nudge_marks, reverse=True):
+                            if idx < len(self._history):
+                                del self._history[idx]
+                        nudge_marks = []
                     clean = clean_response(resp)
                     if clean:
                         with stdout_lock:
@@ -6878,7 +7024,10 @@ class SubAgent:
                     if resp.strip():
                         self._history.append({"role": "assistant", "content": resp})
                     command_cancelled = False
+                    _expanded = []
                     for c in commands:
+                        _expanded.extend(_split_plugin_block(c))
+                    for c in _expanded:
                         if agent_cancel_requested():
                             self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
                             self.error = agent_cancel_message()
@@ -6907,7 +7056,37 @@ class SubAgent:
                     # Inject latest quantum context so subagent sees cross-agent data
                     self._history[0] = self._build_history()[0]
                 else:
+                    if _unclosed_command_fence(resp):
+                        # Truncated mid-block (finish_reason=length): don't let the
+                        # subagent die silently — ask for the rest of the block.
+                        if resp.strip():
+                            self._history.append({"role": "assistant", "content": resp})
+                        self._history.append({"role": "user", "content": "Your last response ended with an UNCLOSED ```execute block (truncated). Re-emit the complete block, continuing exactly where you left off."})
+                        continue
                     clean = clean_response(resp)
+                    # Text-only announcement ("I'll read the files now:") must not
+                    # silently complete the subagent — nudge (then reset) until
+                    # it acts. Options are handled by the harness, not the operator.
+                    if looks_like_announcement(clean):
+                        nudges += 1
+                        if resp.strip():
+                            self._history.append({"role": "assistant", "content": resp})
+                            nudge_marks.append(len(self._history) - 1)
+                        if nudges <= 3:
+                            self._history.append({"role": "user", "content": "STOP ANNOUNCING. Your ENTIRE next response must be exactly one ```execute block — copy this shape:\n\n```execute\n<the first command you keep describing>\n```\n\nNo preamble. The block ONLY."})
+                        elif nudges <= 6:
+                            # Protocol reset: purge failed exchanges, replay surgically
+                            for idx in sorted(nudge_marks, reverse=True):
+                                if idx < len(self._history):
+                                    del self._history[idx]
+                            nudge_marks = []
+                            self._history.append({"role": "user", "content": "PROTOCOL RESET. Your recent replies contained no ```execute block and have been removed. Respond now with ONLY the ```execute block for your next action."})
+                        else:
+                            self.result = "[SUBAGENT] Did not emit any execute block after repeated recovery attempts."
+                            self.error = "announce-loop"
+                            self.done = True
+                            return
+                        continue
                     if not clean:
                         self.result = "[SUBAGENT] No actionable response."
                     else:
@@ -6942,18 +7121,19 @@ class SubAgent:
             print(f"  {color}╰{'─' * 50}{RST}")
         return self.result
 
-    def run_async(self):
+    def run_async(self, quiet=False):
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         with _subagent_lock:
             _SUBAGENTS[self.id] = self
         self._thread.start()
-        t = T()
-        with stdout_lock:
-            print(f"\n  {T()['warn']}╭─ SPAWNED SUBAGENT [{self.id}] ASYNC ────────{RST}")
-            print(f"  {T()['warn']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
-            prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
-            print(f"  {T()['warn']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
-            print(f"  {T()['warn']}╰{'─' * 50}{RST}")
+        if not quiet:
+            t = T()
+            with stdout_lock:
+                print(f"\n  {T()['warn']}╭─ SPAWNED SUBAGENT [{self.id}] ASYNC ─────────────────{RST}")
+                print(f"  {T()['warn']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
+                prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
+                print(f"  {T()['warn']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
+                print(f"  {T()['warn']}╰{'─' * 50}{RST}")
         return self.id
 
     def status_str(self):
@@ -6975,6 +7155,15 @@ command here
 CRITICAL: You MUST use ```execute blocks to run commands. Do NOT use <|tool_calls_section_begin|>, function calls, JSON tool schemas, or any other format. ONLY use ```execute blocks. This is not optional. If you accidentally use a non-standard format, it will be auto-healed, but always use execute blocks directly.
 
 BLOCK ARCHITECTURE:
+- ACT, DON'T ANNOUNCE: never say "I'll check/examine/run ..." without including the actual ```execute block in the SAME response. A response with no blocks performs NO action.
+- Example — for the task "check disk space", the ENTIRE correct response is:
+
+```execute
+df -h
+```
+
+  NOT "I'll check the disk space:" — that performs nothing. Wrong protocol, wasted turn.
+- You also have a native `execute` tool available — call it directly for commands (it is equivalent to an execute block). Prefer the tool or the block over any prose plan.
 - You can chain multiple commands in a single execute block using &&, ;, |, and redirections.
 - You can put multiple ```execute blocks in a single response — each will be executed in order.
 - Commands starting with / (like /delegate, /quantum, /remember) are executed as Prism32 commands, not shell.
@@ -7329,6 +7518,92 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
             break
     return last_error
 
+def _content_to_text(content):
+    """Normalize message content to a string. Handles OpenAI parts-list
+    content ([{"type": "text", "text": ...}]) and null/missing content so
+    downstream string methods never crash."""
+    if content is None:
+        return ''
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for p in content:
+            if isinstance(p, str):
+                parts.append(p)
+            elif isinstance(p, dict):
+                parts.append(str(p.get('text') or p.get('content') or ''))
+        return ''.join(parts)
+    return str(content)
+
+def _api_error_text(data):
+    """Extract a provider error payload returned with HTTP 200 (e.g.
+    {"error": {"message": "insufficient quota"}}). Returns '' if absent."""
+    err = data.get('error')
+    if not err:
+        return ''
+    if isinstance(err, dict):
+        msg = str(err.get('message') or err.get('code') or 'unknown error')
+        typ = err.get('type') or 'api_error'
+        return f"[ERROR] API error: {msg} ({typ})"
+    return f"[ERROR] API error: {err}"
+
+def _tool_calls_to_blocks(tool_calls):
+    """Convert OpenAI native tool_calls into Prism32 block text. Pre-trained
+    tool-calling models emit structured tool_calls and stop — this bridge
+    translates them into ```execute / ```ask blocks so the whole downstream
+    pipeline works unchanged."""
+    out = []
+    for tc in tool_calls or []:
+        fn = tc.get('function') or {}
+        name = (fn.get('name') or '').lower()
+        raw = fn.get('arguments') or '{}'
+        try:
+            args = json.loads(raw) if isinstance(raw, str) else dict(raw or {})
+        except Exception:
+            continue
+        if not isinstance(args, dict):
+            continue
+        if name in ('execute', 'run_command', 'shell', 'bash', 'run_shell_command', 'terminal'):
+            cmd = args.get('command') or args.get('cmd') or ''
+            if isinstance(cmd, str) and cmd.strip():
+                out.append(f"```execute\n{cmd.strip()}\n```")
+        elif name in ('ask', 'ask_user', 'question', 'ask_operator'):
+            q = args.get('question') or args.get('q') or args.get('text') or ''
+            if isinstance(q, str) and q.strip():
+                out.append(f"```ask\n{q.strip()}\n```")
+    return "\n".join(out)
+
+_NATIVE_TOOLS_SCHEMA = [{
+    "type": "function",
+    "function": {
+        "name": "execute",
+        "description": ("Run a shell command on the operator's machine and get the output. "
+                        "Call this for ANY actionable step — never describe what you will do "
+                        "instead of calling it. Chain commands with && ; |."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "The shell command to run"}
+            },
+            "required": ["command"]
+        }
+    }
+}, {
+    "type": "function",
+    "function": {
+        "name": "ask",
+        "description": "Ask the human operator a question when you are truly blocked.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "The question for the operator"}
+            },
+            "required": ["question"]
+        }
+    }
+}]
+
 def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             api_base=None, api_key=None, model=None):
     '''Resilient AI query with retry, backoff, and history trimming.'''
@@ -7372,11 +7647,19 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
         "max_tokens": Config.MAX_RESPONSE_TOKENS,
         "temperature": Config.TEMPERATURE,
     }
+    if Config.NATIVE_TOOLS:
+        # Native tool-call bridge: advertise an execute/ask tool so
+        # tool-trained models use the protocol they were RLHF'd on instead
+        # of announcing-and-stopping. Emitted tool_calls are translated back
+        # into ```execute blocks inside ask_ai/stream_response.
+        payload["tools"] = _NATIVE_TOOLS_SCHEMA
+        payload["tool_choice"] = "auto"
     if Config.THINKING_EFFORT:
         payload["reasoning_effort"] = Config.THINKING_EFFORT
     
     last_error = ""
-    for attempt in range(retry + 1):
+    budget_scaled = False
+    for attempt in range(retry + 3):  # +2 headroom for tools/budget fallbacks
         if agent_cancel_requested(cancel_event):
             return AGENT_CANCELLED_RESPONSE
         try:
@@ -7387,18 +7670,74 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             )
             with urlopen_with_ssl(req, timeout=600) as resp:
                 if stream if stream is not None else Config.STREAM:
-                    return stream_response(resp, cancel_event=cancel_event)
+                    _sr = stream_response(resp, cancel_event=cancel_event)
+                    if _sr == RESPONSE_BUDGET_EXHAUSTED and not budget_scaled:
+                        budget_scaled = True
+                        _prev_mt = payload.get("max_tokens", Config.MAX_RESPONSE_TOKENS)
+                        payload["max_tokens"] = max(_prev_mt, min(65536, _prev_mt * 4))
+                        viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
+                        continue
+                    if _sr == RESPONSE_BUDGET_EXHAUSTED:
+                        return (f"[ERROR] The model exhausted its entire response budget "
+                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 32768")
+                    if budget_scaled and _sr:
+                        # Recovery worked — keep the larger budget for the rest
+                        # of the session so every later turn doesn't pay for the
+                        # failed small-budget call first.
+                        Config.MAX_RESPONSE_TOKENS = payload["max_tokens"]
+                    return _sr
                 data = json.loads(resp.read().decode())
                 if agent_cancel_requested(cancel_event):
                     return AGENT_CANCELLED_RESPONSE
                 _track_usage(data.get('usage'))
-                return data.get('choices', [{}])[0].get('message', {}).get('content', '')
+                _err = _api_error_text(data)
+                if _err:
+                    return _err
+                _choices = data.get('choices') or []
+                if _choices:
+                    _msg = _choices[0].get('message', {}) or {}
+                    content = _content_to_text(_msg.get('content'))
+                    _blocks = _tool_calls_to_blocks(_msg.get('tool_calls'))
+                    if _blocks:
+                        content = (content + "\n" + _blocks).strip()
+                    # Budget-exhaustion-by-reasoning (non-stream): length-capped
+                    # with no content but reasoning present
+                    if (not content.strip() and _choices[0].get('finish_reason') == 'length'
+                            and (_msg.get('reasoning') or _msg.get('reasoning_content'))):
+                        if not budget_scaled:
+                            budget_scaled = True
+                            _prev_mt = payload.get("max_tokens", Config.MAX_RESPONSE_TOKENS)
+                            payload["max_tokens"] = max(_prev_mt, min(65536, _prev_mt * 4))
+                            viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
+                            continue
+                        return (f"[ERROR] The model exhausted its entire response budget "
+                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 32768")
+                    if budget_scaled and content:
+                        Config.MAX_RESPONSE_TOKENS = payload["max_tokens"]
+                    return content
+                return ''
         except urllib.error.HTTPError as e:
             if agent_cancel_requested(cancel_event):
                 return AGENT_CANCELLED_RESPONSE
             body = e.read().decode('utf-8', errors='replace')[:500]
+            if e.code == 400 and 'tools' in payload and 'tool' in body.lower():
+                # Provider rejects the tools parameter — drop it and retry
+                # once in block-only mode instead of failing the request.
+                payload.pop('tools', None)
+                payload.pop('tool_choice', None)
+                viz.status("Provider rejected tools — retrying in block-only mode", "warning")
+                continue
             if e.code == 401:
-                last_error = f"[HTTP ERROR 401] Authentication failed. Set a valid API key via /provider key or --api-key"
+                _sent = mask_key(_api_key if _api_key is not None else Config.API_KEY)
+                if _sent == "<none>":
+                    last_error = ("[HTTP ERROR 401] Authentication failed — NO API key was sent. "
+                                  "Set one: /provider key <key> (persistent) or --api-key <key> (this session only)")
+                else:
+                    last_error = (f"[HTTP ERROR 401] Authentication failed — key sent: {_sent}. "
+                                  f"If that is an old/rotated key, update it: /provider key <key> "
+                                  f"(persistent) or --api-key <key> (this session only)")
                 learn_error(last_error, f"HTTP 401: {body[:100]}")
             else:
                 last_error = f"[HTTP ERROR {e.code}] {body}"
@@ -7442,6 +7781,10 @@ def stream_response(resp, cancel_event=None):
     display_color = None
     last_flush = time.monotonic()
     fence_state = {"pending": "", "hidden": False}
+    footer_released = False
+    tool_calls_acc = {}  # index -> {'name': str, 'args': [str fragments]}
+    finish_reason = None
+    reasoning_seen = False
 
     def _filter_visible_content(text, final=False):
         data = fence_state["pending"] + text
@@ -7449,7 +7792,11 @@ def stream_response(resp, cancel_event=None):
         # Hide non-standard tool-call modal tags during streaming
         for tag in ['<|tool_calls_section_begin|>', '<|tool_calls_section_end|>',
                      '<|tool_call_begin|>', '<|tool_call_end|>',
-                     '<|tool_call_argument_begin|>']:
+                     '<|tool_call_argument_begin|>',
+                     # fullwidth kimi/deepseek spellings
+                     '<｜tool▁calls▁section▁begin｜>', '<｜tool▁calls▁section▁end｜>',
+                     '<｜tool▁call▁begin｜>', '<｜tool▁call▁end｜>',
+                     '<｜tool▁call▁argument▁begin｜>']:
             data = data.replace(tag, '')
         data = re.sub(r'functions\.\w+:\d+\s*', '', data)
         out = []
@@ -7503,15 +7850,29 @@ def stream_response(resp, cancel_event=None):
             display_color = color_key
         display_buf += text
         now = time.monotonic()
-        if "\n" in display_buf or len(display_buf) >= 240 or now - last_flush >= 0.15:
+        if "\n" in display_buf or len(display_buf) >= 64 or now - last_flush >= 0.06:
             _flush_display(force=True)
 
     def _flush_display(force=False):
-        nonlocal display_buf, stream_color, agent_prefix_printed, last_flush
+        nonlocal display_buf, stream_color, agent_prefix_printed, last_flush, footer_released
         if not display_buf:
             return
-        if not force and "\n" not in display_buf and len(display_buf) < 240:
+        if not force and "\n" not in display_buf and len(display_buf) < 64:
             return
+        if not footer_released:
+            footer_released = True
+            # Lines scrolled off a DECSTBM scroll region are discarded by real
+            # terminals instead of entering the scrollback buffer — release the
+            # reserved footer before streaming text so the full conversation is
+            # preserved and the user can scroll all the way to the top.
+            try:
+                _footer_animate_stop()
+            except Exception:
+                pass
+            try:
+                release_footer_for_output()
+            except Exception:
+                pass
         color = t['dim'] if display_color == "reasoning" else t['primary']
         with stdout_lock:
             move_to_scroll_bottom()
@@ -7543,13 +7904,44 @@ def stream_response(resp, cancel_event=None):
                 break
             try:
                 chunk = json.loads(data)
+                _err = _api_error_text(chunk)
+                if _err:
+                    _flush_display(force=True)
+                    with stdout_lock:
+                        sys.stdout.write(RST + SHOW)
+                    return _err
                 usage = chunk.get('usage')
                 if usage:
                     _track_usage(usage)
-                delta = chunk.get('choices', [{}])[0].get('delta', {})
-                content = delta.get('content', '')
-                reasoning = delta.get('reasoning_content', '') or delta.get('reasoning', '')
-                
+                _choices = chunk.get('choices') or []
+                if not _choices:
+                    continue
+                _fr = _choices[0].get('finish_reason')
+                if _fr:
+                    finish_reason = _fr
+                delta = _choices[0].get('delta', {})
+                content = _content_to_text(delta.get('content'))
+                reasoning = _content_to_text(delta.get('reasoning_content')) or _content_to_text(delta.get('reasoning'))
+                if reasoning:
+                    reasoning_seen = True
+
+                # Native tool-call bridge: accumulate tool_calls fragments
+                # (id/name appear once, arguments stream as string chunks).
+                for _tc in delta.get('tool_calls') or []:
+                    _idx = _tc.get('index', 0)
+                    _ent = tool_calls_acc.setdefault(_idx, {'name': '', 'args': []})
+                    _fn = _tc.get('function') or {}
+                    if _fn.get('name'):
+                        _ent['name'] = _fn['name']
+                    if _fn.get('arguments'):
+                        _ent['args'].append(_fn['arguments'])
+                        if not _ent.get('shown'):
+                            _ent['shown'] = True
+                            try:
+                                viz.status(f"tool call: {_ent['name']}(...)", "info")
+                            except Exception:
+                                pass
+
                 if reasoning:
                     _queue_display(reasoning, "reasoning")
                     reasoning_mode = True
@@ -7582,6 +7974,28 @@ def stream_response(resp, cancel_event=None):
                 sys.stdout.write(RST + SHOW)
             return AGENT_CANCELLED_RESPONSE
 
+        # Native tool-call bridge: translate accumulated tool_call fragments
+        # into execute/ask blocks so the standard pipeline picks them up.
+        if tool_calls_acc:
+            _synth_tcs = []
+            for _idx in sorted(tool_calls_acc):
+                _ent = tool_calls_acc[_idx]
+                _synth_tcs.append({'function': {'name': _ent['name'],
+                                                'arguments': ''.join(_ent['args'])}})
+            _blocks_txt = _tool_calls_to_blocks(_synth_tcs)
+            if _blocks_txt:
+                full = (full + "\n" + _blocks_txt).strip()
+
+        # Budget-exhaustion-by-reasoning: the model streamed a long chain of
+        # thought, hit the max_tokens cap mid-reasoning, and never produced a
+        # single character of actual content. Signal the caller so it can
+        # retry with a scaled-up budget instead of reporting 'no response'.
+        if not full.strip() and reasoning_seen:
+            _flush_display(force=True)
+            with stdout_lock:
+                sys.stdout.write(RST + SHOW)
+            return RESPONSE_BUDGET_EXHAUSTED
+
         _queue_display(_filter_visible_content("", final=True), "content")
         _flush_display(force=True)
         with stdout_lock:
@@ -7603,10 +8017,52 @@ def stream_response(resp, cancel_event=None):
             pass
 _RE_TOOL_CALL_NATIVE = re.compile(r'<\|tool_call_begin\|>.*?<\|tool_call_argument_begin\|>\s*(\{.*?\})\s*<\|tool_call_end\|>', re.DOTALL)
 
+def looks_like_announcement(text):
+    """True if a text-only reply reads like an announced action ('Let me verify
+    ...', 'I'll commit the fix:', trailing colon) rather than a final answer.
+    Used to auto-nudge models that announce-then-stop instead of emitting the
+    execute block."""
+    if not text:
+        return False
+    t = strip_ansi(text).strip()
+    if not t:
+        return False
+    if t.endswith(":") or t.endswith("："):
+        return True
+    # 'let me know if...' asks the user a question — not an action
+    if re.search(r"(?i)\blet me know\b", t):
+        return False
+    if re.search(r"(?i)\b(?:i|we)(?:'ll| will| shall|(?: a|' )?m going to)\s+\S", t):
+        return True
+    if re.search(r"(?i)\blet (?:me|us)\s+\S", t):
+        return True
+    return False
+
+def _unclosed_command_fence(text):
+    """True if the response opens a ```execute/```ask block that is never
+    closed — the classic signature of finish_reason=length truncation. The
+    partial block yields no extractable command, the tail text never renders,
+    and (without this check) the turn ends silently as if the agent stopped."""
+    if not text:
+        return False
+    open_tag = None
+    for m in re.finditer(r'```[^\n]*', text):
+        tok = m.group(0).strip().lower()
+        if open_tag is None:
+            if tok.startswith('```execute') or tok.startswith('```ask'):
+                open_tag = tok
+        else:
+            open_tag = None
+    return open_tag is not None
+
 def heal_response(text):
     """Convert non-standard tool-calling formats to proper execute blocks.
     Returns (healed_text, was_healed)."""
     healed = False
+    # Normalize fullwidth kimi/deepseek token spellings first
+    # (<｜tool▁calls▁section▁begin｜> uses U+FF5C pipes and U+2581 blocks) so
+    # every ASCII pattern below also matches those variants.
+    text = text.replace('\uff5c', '|').replace('\u2581', '_')
 
     def _replace_native(m):
         nonlocal healed
@@ -7628,14 +8084,50 @@ def heal_response(text):
     text = re.sub(r'functions\.\w+:\d+', '', text)
 
     if not healed and '```execute' not in text:
-        bare_re = re.compile(r'\{\s*"command"\s*:\s*"((?:[^"\\]|\\.)*)"\s*\}', re.DOTALL)
-        if bare_re.search(text):
-            def _replace_bare(m):
-                nonlocal healed
+        # Anthropic-style XML tool calls:
+        # <invoke name="execute"><parameter name="command">date</parameter></invoke>
+        def _replace_xml(m):
+            nonlocal healed
+            cmd = (m.group(1) or '').strip()
+            if cmd:
                 healed = True
-                cmd = m.group(1).replace('\\"', '"').replace('\\n', '\n')
                 return f"\n```execute\n{cmd}\n```\n"
-            text = bare_re.sub(_replace_bare, text)
+            return m.group(0)
+        text = re.sub(r'<invoke[^>]*>\s*<parameter\s+name\s*=\s*["\']?command["\']?\s*>(.*?)</parameter>.*?</invoke>',
+                      _replace_xml, text, flags=re.DOTALL)
+
+        # OpenAI-style nested tool calls:
+        # {"name": "execute", "arguments": {"command": "du -sh /var"}}
+        def _replace_nested(m):
+            nonlocal healed
+            try:
+                obj = json.loads(m.group(0))
+                args = obj.get('arguments', {})
+                cmd = args.get('command') if isinstance(args, dict) else None
+                if isinstance(cmd, str) and cmd.strip():
+                    healed = True
+                    return f"\n```execute\n{cmd}\n```"
+            except Exception:
+                pass
+            return m.group(0)
+        text = re.sub(r'\{\s*"name"\s*:\s*"[^"]*"\s*,\s*"arguments"\s*:\s*\{[^{}]*\}\s*\}',
+                      _replace_nested, text)
+
+        # Flat JSON objects containing a command key (any position, extra
+        # keys allowed): {"command": "ls -la", "explanation": "..."}
+        def _replace_flat(m):
+            nonlocal healed
+            try:
+                obj = json.loads(m.group(0))
+            except Exception:
+                return m.group(0)
+            if isinstance(obj, dict):
+                cmd = obj.get('command')
+                if isinstance(cmd, str) and cmd.strip():
+                    healed = True
+                    return f"\n```execute\n{cmd}\n```"
+            return m.group(0)
+        text = re.sub(r'\{[^{}]+\}', _replace_flat, text)
 
     return text, healed
 
@@ -7656,15 +8148,17 @@ def extract_blocks(text, tag):
 
 def clean_response(text):
     clean = text
+    # Normalize fullwidth kimi/deepseek token spellings so the ASCII strip
+    # patterns below also match them
+    clean = clean.replace('\uff5c', '|').replace('\u2581', '_')
     # Strip Prism32 execute/ask blocks
     for tag in ('execute', 'ask'):
         clean = re.sub(rf'```{tag}\r?\n.*?```', '', clean, flags=re.DOTALL)
     # Strip non-standard tool-calling formats (GLM, Qwen, etc)
     clean = re.sub(r'<\|tool_calls_section_begin\|>.*?<\|tool_calls_section_end\|>', '', clean, flags=re.DOTALL)
     clean = re.sub(r'<\|tool_call_begin\|>.*?<\|tool_call_end\|>', '', clean, flags=re.DOTALL)
-    clean = re.sub(r'<\|tool_call_argument_begin\|>', '', clean)
-    clean = re.sub(r'<\|tool_calls_section_end\|>', '', clean)
-    clean = re.sub(r'<\|tool_call_end\|>', '', clean)
+    clean = re.sub(r'<\|tool_calls_section_begin\|>|<\|tool_call_argument_begin\|>', '', clean)
+    clean = re.sub(r'<\|tool_calls_section_end\|>|<\|tool_call_end\|>', '', clean)
     clean = re.sub(r'functions\.\w+:\d+', '', clean)
     return clean.strip()
 
@@ -7688,6 +8182,16 @@ def build_context():
     startup_block = f"\nSTARTUP MEMORY ({STARTUP_MEMORY_FILE}):\n{startup_mem}\n" if startup_mem else ""
     harness_block = f"\n{harness_context()}\n"
     evolve_block = f"\n{evolve_context()}\n" if _EVOLVE_MODE else ""
+    # Shared quantum state: subagents get this injected in their system
+    # prompt — the main agent needs it too, or it only sees shared keys
+    # after manually running /quantum (README: "system prompt is rebuilt
+    # mid-task to include the latest quantum state").
+    quantum_block = ""
+    try:
+        if _quantum.was_used():
+            quantum_block = f"\nSHARED QUANTUM CONTEXT (cross-agent state; /quantum to read or write):\n{str(_quantum)}\n"
+    except Exception:
+        pass
     
     # List available plugin commands that the AI can invoke via execute blocks
     plugin_cmds = [cmd.name for cmd in registry.all()
@@ -7701,7 +8205,7 @@ def build_context():
         f"CPU: {info.get('cpu', '')}\nRAM: {info.get('ram', '')}\n"
         f"Disk: {info.get('disk', '')}\nIP: {info.get('ip', '')}\n"
         f"Uptime: {info.get('uptime', '')}\nCWD: {os.getcwd()}\n"
-        f"Memory:{mem}\n{extra}{startup_block}{soul_block}{harness_block}{evolve_block}{plugin_block}\nPROMPTSHARD status: {read_promptshard().get('status', 'active')} | Captain agent delegates using /delegate and /spawn with quantum context syncing."
+        f"Memory:{mem}\n{extra}{startup_block}{soul_block}{quantum_block}{harness_block}{evolve_block}{plugin_block}\nPROMPTSHARD status: {read_promptshard().get('status', 'active')} | Captain agent delegates using /delegate and /spawn with quantum context syncing."
     )
 
 # ── User Interaction (ask / interject) ──────────────────────
@@ -7902,7 +8406,10 @@ def cmd_goal(goal_text, history, cmd_log):
                 box(f"STEP {step} ANALYSIS", clean, "accent")
 
             command_cancelled = False
+            _expanded = []
             for c in commands:
+                _expanded.extend(_split_plugin_block(c))
+            for c in _expanded:
                 c = c.strip()
                 viz.tool_call("execute", c)
                 result = run_cmd(c)
@@ -8614,16 +9121,20 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.9 — MegaDyne Systems")
+        print("Prism32 v6.10.2 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
     Config.load_config()
+    # CLI flag overrides are session-only — never persisted to config.json.
+    # (An interactive command that changes the same field clears protection.)
     if args.model:
         Config.MODEL = args.model
+        Config.SESSION_ONLY_KEYS.add("model")
     if args.api:
         Config.API_BASE = args.api
         Config.CUSTOM_API_BASE = True  # explicit CLI override; protect from provider defaults
+        Config.SESSION_ONLY_KEYS.add("api_base")
     if args.turbo:
         Config.SLOW_CPU = False
         Config.STREAM = True
@@ -8632,11 +9143,39 @@ def main():
         Config.STREAM = False
         Config.AUTO_SAVE_INTERVAL = 0
     if args.api_key:
-        Config.API_KEY = args.api_key
-        Config.save_config()
+        Config.API_KEY = args.api_key.strip() if isinstance(args.api_key, str) else args.api_key
+        Config.SESSION_ONLY_KEYS.add("api_key")
+
+    def _warn_session_only_exit():
+        """Last line of defense against the silent --api-key reversion trap:
+        a valid key set via --api-key works all session, then the NEXT session
+        quietly falls back to the old stored key and every request 401s."""
+        try:
+            protected = [k for k in ("api_key", "model", "api_base") if k in Config.SESSION_ONLY_KEYS]
+            if not protected:
+                return
+            print()
+            if "api_key" in protected:
+                _disk_key = ""
+                try:
+                    with open(Config.CONFIG_FILE, 'r', encoding='utf-8') as f:
+                        _disk_key = (json.load(f) or {}).get("api_key") or ""
+                except Exception:
+                    pass
+                print(f"  {T()['warn']}⚠ --api-key was session-only and was NOT saved.{RST}")
+                if _disk_key:
+                    print(f"  {T()['dim']}Next session will use the stored key: {mask_key(_disk_key)}{RST}")
+                    print(f"  {T()['dim']}To make THIS session's key permanent: /provider key <key>{RST}")
+                else:
+                    print(f"  {T()['dim']}No key is stored — next session will have none. /provider key <key>{RST}")
+            else:
+                print(f"  {T()['dim']}⚠ CLI overrides ({', '.join(protected)}) were session-only and not saved.{RST}")
+        except Exception:
+            pass
+    atexit.register(_warn_session_only_exit)
+
     if args.theme:
         Config.THEME = args.theme
-        Config.save_config()
     if args.temperature is not None:
         Config.TEMPERATURE = args.temperature
     apply_ansi_compat()
@@ -8939,115 +9478,82 @@ def main():
             continue
 
         if cmd in ('providers', 'provider'):
+            # /provider manages the provider REGISTRY (add/fix/remove/list).
+            # Switching models/providers happens in /model — it picks the
+            # provider for you so requests always carry the right base+key.
             if args_str:
-                parts = args_str.split(None, 1)
-                subcmd = parts[0].lower()
-                
+                _p_parts = args_str.split()
+                subcmd = _p_parts[0].lower()
+
                 if subcmd == 'add':
-                    add_parts = args_str.split(None, 4)
-                    if len(add_parts) >= 4:
-                        name = add_parts[1]
-                        api_base = add_parts[2]
-                        model = add_parts[3]
-                        desc = add_parts[4] if len(add_parts) > 4 else "Custom provider"
-                        cmd_provider_add(name, api_base, model, desc)
+                    _a = args_str.split(None, 4)
+                    if len(_a) >= 3:
+                        _name, _base = _a[1], _a[2]
+                        _model = _a[3] if len(_a) > 3 else ""
+                        _desc = _a[4] if len(_a) > 4 else None
+                        Config.set_provider_entry(_name, api_base=_base, model=_model or None)
+                        if _desc:
+                            PROVIDER_REGISTRY[_name]["description"] = _desc
+                        print(f"  {t['bright']}+ Provider added: {_name} → {_base}{RST}")
+                        print(f"  {t['dim']}Optional next: /provider key {_name} <api-key>{RST}")
                     else:
-                        # Interactive prompt
-                        print(f"\n  {t['bright']}Add a new provider:{RST}")
-                        try:
-                            name = input(rl_prompt(f"  Provider name: ")).strip()
-                            if not name:
-                                print(f"  {t['dim']}Cancelled.{RST}")
-                            else:
-                                api_base = input(rl_prompt(f"  API base URL: ")).strip()
-                                if api_base:
-                                    model = input(rl_prompt(f"  Model name: ")).strip()
-                                    if model:
-                                        desc = input(rl_prompt(f"  Description (optional): ")).strip() or "Custom provider"
-                                        cmd_provider_add(name, api_base, model, desc)
-                                    else:
-                                        print(f"  {t['dim']}Cancelled.{RST}")
-                                else:
-                                    print(f"  {t['dim']}Cancelled.{RST}")
-                        except (EOFError, KeyboardInterrupt):
-                            print(f"\n  {t['dim']}Cancelled.{RST}")
+                        print(f"  {t['dim']}Usage: provider add <name> <api-base> [default-model] [description]{RST}")
                 elif subcmd in ('rm', 'remove', 'delete'):
-                    if len(parts) > 1:
-                        cmd_provider_remove(parts[1])
+                    if len(_p_parts) > 1:
+                        cmd_provider_remove(_p_parts[1])
                     else:
-                        print(f"  Usage: provider rm <name>")
+                        print(f"  {t['dim']}Usage: provider rm <name>{RST}")
                 elif subcmd == 'api':
-                    arg = parts[1].strip() if len(parts) > 1 else ""
-                    if arg.lower() in ('reset', 'clear', 'default'):
-                        reset_api_base()
-                    elif arg:
-                        set_custom_api_base(arg)
+                    # /provider api <name> <url>  → fix that provider's base
+                    # /provider api reset         → main base back to provider default
+                    # /provider api <url>         → (legacy) set main custom base
+                    if len(_p_parts) >= 3:
+                        _pname, _purl = _p_parts[1], _p_parts[2]
+                        if _pname in PROVIDER_REGISTRY or True:
+                            Config.set_provider_entry(_pname, api_base=_purl)
+                            print(f"  {t['bright']}+ {_pname} API base: {_purl}{RST}")
                     else:
-                        show_api_base()
-                        print(f"  {t['dim']}Subcommands: {t['bright']}/provider api <url>{RST}{t['dim']} | {t['bright']}/provider api reset{RST}")
+                        _arg = _p_parts[1].strip() if len(_p_parts) > 1 else ""
+                        if _arg.lower() in ('reset', 'clear', 'default'):
+                            reset_api_base()
+                        elif _arg:
+                            set_custom_api_base(_arg)
+                        else:
+                            show_api_base()
+                            print(f"  {t['dim']}Fix a provider: {t['bright']}provider api <name> <url>{RST}"
+                                  f"{t['dim']} | main base: {t['bright']}provider api <url> | reset{RST}")
                 elif subcmd == 'key':
-                    key = parts[1].strip() if len(parts) > 1 else ""
-                    if key:
-                        Config.API_KEY = key
+                    # /provider key <name> <key>  → per-provider key (persisted)
+                    # /provider key <key>         → main key (legacy)
+                    if len(_p_parts) >= 3:
+                        _pname, _pkey = _p_parts[1], _p_parts[2]
+                        Config.set_provider_entry(_pname, api_key=_pkey)
+                        print(f"  {t['bright']}+ {_pname} key set: {mask_key(_pkey)}{RST}")
+                    elif len(_p_parts) == 2:
+                        _pkey = _p_parts[1]
+                        Config.API_KEY = _pkey.strip()
+                        Config.SESSION_ONLY_KEYS.discard("api_key")
                         Config.save_config()
-                        mask = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
-                        print(f"  {t['bright']}+ API key set: {mask}{RST}")
+                        print(f"  {t['bright']}+ Main API key set: {mask_key(_pkey)}{RST}")
                     else:
-                        has_key = bool(Config.API_KEY)
-                        print(f"  API key: {t['bright']}{'<set>' if has_key else '<not set>'}{RST}")
-                        print(f"  Usage: provider key <key>")
+                        print(f"  Main key:   {t['bright']}{mask_key(Config.API_KEY)}{RST}")
+                        _sorted = sorted(PROVIDER_REGISTRY.items())
+                        for _pn, _pr in _sorted:
+                            if _pr.get("default_key"):
+                                print(f"  {_pn:<14} {mask_key(_pr['default_key'])}")
+                        print(f"  {t['dim']}Set: provider key <name> <key>  (per-provider) | provider key <key>  (main){RST}")
                 elif subcmd in ('list', 'ls'):
                     cmd_provider_list()
                 else:
-                    # Treat as provider name to switch to
-                    cmd_provider_set(subcmd)
+                    print(f"  {t['dim']}Provider switching moved to {t['bright']}/model{RST}{t['dim']} — it lists every provider's models")
+                    print(f"  {t['dim']}and assigns the right base+key per pick. /provider manages the registry:{RST}")
+                    print(f"  {t['dim']}  provider add <name> <base> [model]   provider rm <name>{RST}")
+                    print(f"  {t['dim']}  provider api <name> <url>            provider key <name> <key>{RST}")
             else:
-                # No args → interactive provider selector
-                provider_names = sorted(PROVIDER_REGISTRY.keys())
-                print(f"\n  {t['bright']}Select a provider:{RST}")
-                print(f"  {t['dim']}{'─' * 50}{RST}")
-                for i, pname in enumerate(provider_names, 1):
-                    prov = PROVIDER_REGISTRY[pname]
-                    marker = f"{t['bright']}*{RST}" if pname == Config.PROVIDER else " "
-                    label = prov.get('display_name', prov.get('name', pname))
-                    print(f"  {marker} {t['primary']}{i:>2}.{RST} {label}")
-                print(f"  {t['dim']}{'─' * 50}{RST}")
-                print(f"  {t['primary']}  c.{RST} Custom (enter your own)")
-                print(f"  {t['primary']}  q.{RST} Cancel")
-                try:
-                    sel = input(rl_prompt(f"  {t['bright']}choice{RST} {t['primary']}>{RST} ")).strip().lower()
-                    if sel == 'q' or not sel:
-                        print(f"  {t['dim']}Cancelled.{RST}")
-                    elif sel == 'c':
-                        print(f"\n  {t['bright']}Custom provider:{RST}")
-                        cname = input(rl_prompt(f"  Provider name: ")).strip()
-                        if cname:
-                            cbase = input(rl_prompt(f"  API base URL: ")).strip()
-                            if cbase:
-                                cmodel = input(rl_prompt(f"  Model name: ")).strip()
-                                if cmodel:
-                                    cdesc = input(rl_prompt(f"  Description (optional): ")).strip() or "Custom provider"
-                                    cmd_provider_add(cname, cbase, cmodel, cdesc)
-                                    cmd_provider_set(cname)
-                                else:
-                                    print(f"  {t['dim']}Cancelled.{RST}")
-                            else:
-                                print(f"  {t['dim']}Cancelled.{RST}")
-                        else:
-                            print(f"  {t['dim']}Cancelled.{RST}")
-                    else:
-                        try:
-                            idx = int(sel) - 1
-                            if 0 <= idx < len(provider_names):
-                                cmd_provider_set(provider_names[idx])
-                            else:
-                                print(f"  {t['dim']}Invalid choice.{RST}")
-                        except ValueError:
-                            print(f"  {t['dim']}Invalid choice.{RST}")
-                except (EOFError, KeyboardInterrupt):
-                    print(f"\n  {t['dim']}Cancelled.{RST}")
+                cmd_provider_list()
             print()
             continue
+
 
         if cmd == 'session':
             if args_str:
@@ -9066,12 +9572,10 @@ def main():
             continue
 
         if cmd == 'model':
-            if args_str and args_str.lower() not in ('list', 'ls', 'browse', 'select'):
-                Config.MODEL = args_str
-                print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
-                Config.save_config()
-            else:
-                cmd_model_list(history, cmd_log)
+            # Bare /model = full multi-provider browser; /model <text> = the
+            # same browser with search pre-filled. Exact quick-set: /set model <name>.
+            cmd_model_list(history, cmd_log,
+                           search=args_str if args_str and args_str.lower() not in ('list', 'ls', 'browse', 'select') else None)
             continue
 
         if cmd == 'set':
@@ -9079,7 +9583,7 @@ def main():
             set_parts = args_str.split(None, 1) if args_str else []
             set_key = set_parts[0].lower() if set_parts else ""
             set_val = set_parts[1].strip() if len(set_parts) > 1 else ""
-            _set_usage = (f"  {t['dim']}Settings: api_base, model, subagent_model,"
+            _set_usage = (f"  {t['dim']}Settings: api_base, model, subagent_model, subagent_provider,"
                           f" max_context_tokens, context_recent_floor,"
                           f" context_compress_keep, temperature, prompt_caching{RST}")
             if set_key in ('api_base', 'apibase', 'api', 'base', 'url'):
@@ -9100,9 +9604,23 @@ def main():
                     print(f"  {t['bright']}+ Subagent model set to: {set_val}{RST}")
                     print(f"  {t['dim']}Subagents will use this cheaper/faster model instead of the main model.{RST}")
                     Config.save_config()
+            elif set_key == 'subagent_provider':
+                # /set subagent_provider <name> | clear (use main provider)
+                if not set_val or set_val.lower() in ('clear', 'none', 'reset', 'default'):
+                    Config.SUBAGENT_PROVIDER = ""
+                    print(f"  {t['bright']}+ Subagent provider cleared (uses main: {Config.PROVIDER}){RST}")
+                    Config.save_config()
+                    print(f"  {t['dim']}TIP: /model can pick main+subagent models across providers in one place.{RST}")
+                elif set_val in PROVIDER_REGISTRY:
+                    Config.SUBAGENT_PROVIDER = set_val
+                    print(f"  {t['bright']}+ Subagent provider: {set_val} ({PROVIDER_REGISTRY[set_val].get('api_base', '')}){RST}")
+                    Config.save_config()
+                else:
+                    print(f"  {t['dim']}Unknown provider '{set_val}'. Known: {', '.join(sorted(PROVIDER_REGISTRY)[:12])}...{RST}")
             elif set_key == 'model':
                 if set_val:
                     Config.MODEL = set_val
+                    Config.SESSION_ONLY_KEYS.discard("model")
                     print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
                     Config.save_config()
                 else:
@@ -9807,12 +10325,7 @@ def main():
         # ── Subagent commands ──
         if cmd == 'delegate':
             if args_str:
-                task = args_str
-                provider = None
-                if ' --provider ' in task:
-                    parts = task.split(' --provider ', 1)
-                    task = parts[0]
-                    provider = parts[1].strip().split()[0] if parts[1].strip() else None
+                task, provider = _split_task_provider(args_str)
                 sa = SubAgent(task, provider=provider)
                 sa.run()
                 _quantum.put(f"subagent_{sa.id}_result", sa.result)
@@ -9826,14 +10339,9 @@ def main():
 
         if cmd == 'spawn':
             if args_str:
-                task = args_str
-                provider = None
-                if ' --provider ' in task:
-                    parts = task.split(' --provider ', 1)
-                    task = parts[0]
-                    provider = parts[1].strip().split()[0] if parts[1].strip() else None
+                task, provider = _split_task_provider(args_str)
                 sa = SubAgent(task, provider=provider)
-                sa.run_async()
+                sa.run_async(quiet=True)  # banner printed below, once
                 t = T()
                 print(f"  {t['warn']}╭─ SPAWNED [{sa.id}] ASYNC ─────────────────{RST}")
                 print(f"  {t['warn']}│{RST}  {t['bright']}Task:{RST} {task[:80]}")
@@ -9878,9 +10386,10 @@ def main():
             t = T()
             result_text = (sa.result or sa.error or '?')[:2000]
             box(f"SUBAGENT {sid} RESULT", result_text, "primary")
-            # Store result in quantum for other agents
-            _quantum.put(f"subagent:{sid}:result", sa.result or sa.error or "")
-            _quantum.put(f"subagent:{sid}:task", sa.task)
+            # Store result in quantum for other agents (underscore taxonomy,
+            # matching subagent_{id}_result used by /delegate and /spawn)
+            _quantum.put(f"subagent_{sid}_result", sa.result or sa.error or "")
+            _quantum.put(f"subagent_{sid}_task", sa.task)
             history.append({"role": "user",
                 "content": f"[Collected subagent {sid}]\n" + (sa.result or sa.error or '?')[:2000]})
             with _subagent_lock:
@@ -9901,12 +10410,14 @@ def main():
                 kv = args_str.split(':', 1)
                 key = kv[0].strip()
                 val = kv[1].strip() if len(kv) > 1 else ""
-                if val:
+                if not key:
+                    print(f"  Quantum: key name cannot be empty.")
+                elif val:
                     _quantum.put(key, val)
                     print(f"  Quantum: {key} = {val[:80]}")
                 else:
                     v = _quantum.get(key)
-                    print(f"  Quantum: {key} = {str(v)[:80]}" if v is not None else f"  Key '{key}' not found")
+                    print(f"  Quantum: {key} = {str(v)[:80]}" if v is not None else f"  Quantum: nothing set for key '{key}'")
             else:
                 print(f"  Usage: /quantum                    (view all)")
                 print(f"        /quantum <key>:<value>      (set)")
@@ -10110,7 +10621,7 @@ def main():
                 f" Agent name: {Config.AGENT_NAME}",
                  f" Model:      {Config.MODEL}",
                 f" API:        {Config.API_BASE}{' (custom)' if Config.CUSTOM_API_BASE else ''}",
-                f" API Key:    {'<set>' if Config.API_KEY else '<not set>'}",
+                f" API Key:    {mask_key(Config.API_KEY)} (masked)",
                 f" Theme:      {Config.THEME}",
                 f" Provider:   {Config.PROVIDER}{_cheap}",
                 f" Temp:       {Config.TEMPERATURE}",
@@ -10207,6 +10718,9 @@ def main():
         if not (history and isinstance(history[-1].get("content"), list)):
             history.append({"role": "user", "content": user_input})
         max_iter = 9999
+        nudges = 0
+        asks = 0
+        nudge_marks = []  # history indices of announce/nudge exchanges added this turn
 
         for iteration in range(max_iter):
             _ctx = context_pct(history)
@@ -10285,16 +10799,39 @@ def main():
                 if resp.strip():
                     history.append({"role": "assistant", "content": resp})
                 save_current_session(history, cmd_log)
+                # Cap consecutive asks: with stdin at EOF every answer comes
+                # back empty and the model re-asks forever (unbounded API
+                # loop). Give up after 4 unanswered questions.
+                asks += 1
+                if asks > 4:
+                    box("AI KEEPS ASKING",
+                        "The AI asked 4 questions in a row without receiving an answer "
+                        "(stdin may be closed). Ending this turn. Re-send your request "
+                        "or answer the questions in a normal interactive session.", "warn")
+                    break
                 continue
 
             if commands:
+                asks = 0
+                nudges = 0
+                # Compliance achieved: purge the failed announce/nudge exchanges
+                # so future turns aren't contaminated by the model's own
+                # announcements (in-context style matching).
+                if nudge_marks:
+                    for idx in sorted(nudge_marks, reverse=True):
+                        if idx < len(history):
+                            del history[idx]
+                    nudge_marks = []
                 if clean and iteration == 0 and not Config.STREAM:
                     box("AI ANALYSIS", clean, "accent")
                 if resp.strip():
                     history.append({"role": "assistant", "content": resp})
 
                 command_cancelled = False
+                _expanded = []
                 for c in commands:
+                    _expanded.extend(_split_plugin_block(c))
+                for c in _expanded:
                     c = c.strip()
                     viz.tool_call("execute", c)
                     plugin_result = _try_plugin_cmd(c, history=history)
@@ -10336,6 +10873,53 @@ def main():
                 if not clean:
                     box("AI ERROR", "Empty response", "err")
                     break
+                # Announced-action-without-execution: some models say
+                # "Let me verify the files..." / "...and commit the fix:" then
+                # stop with no execute block. Nudge the agent to actually emit
+                # the block instead of silently ending the turn (max 3 per
+                # user turn).
+                truncated_block = _unclosed_command_fence(resp)
+                if truncated_block or looks_like_announcement(clean):
+                    if nudges < 4:
+                        nudges += 1
+                        if truncated_block:
+                            viz.status("Response truncated mid-block — asking the agent to re-emit it", "info")
+                            nudge_text = ("Your last response ended with an UNCLOSED ```execute block — it was cut off "
+                                          "(likely at the max response length). Re-emit the complete ```execute block now, "
+                                          "continuing exactly where you left off. Keep commands short enough to finish.")
+                        elif nudges == 1:
+                            viz.status("Agent announced actions without an execute block — nudging it to act", "info")
+                            nudge_text = "You said you would take action, but you did not emit any ```execute block. If a command is needed, emit the actual ```execute block NOW in your response — act, don't announce. Otherwise give your final answer directly."
+                        else:
+                            viz.status(f"Agent announced again without a block (nudge {nudges}/4) — escalating", "warning")
+                            nudge_text = ("STOP ANNOUNCING. You have described what you will do "
+                                          f"{nudges} times without emitting a single ```execute block. "
+                                          "Your ENTIRE next response must be exactly one ```execute block — "
+                                          "no preamble, no explanation, no plan, no announcement. Copy this shape:\n\n"
+                                          "```execute\n<the first command you keep describing>\n```\n\n"
+                                          "Begin with the very first action you announced. The block ONLY.")
+                        if resp.strip():
+                            history.append({"role": "assistant", "content": resp})
+                            nudge_marks.append(len(history) - 1)
+                        history.append({"role": "user", "content": nudge_text})
+                        nudge_marks.append(len(history) - 1)
+                        continue
+                    # Ladder exhausted: PROTOCOL RESET, no operator intervention.
+                    # Purge the failed announce/nudge exchanges (the model gets
+                    # re-reinforced by its own announcements in context) and
+                    # replay the task with a surgical instruction.
+                    nudges += 1
+                    for idx in sorted(nudge_marks, reverse=True):
+                        if idx < len(history):
+                            del history[idx]
+                    nudge_marks = []
+                    if nudges >= 20:
+                        viz.status("Ending turn after 20 automatic recovery attempts", "error")
+                        break
+                    viz.status("Protocol reset — replaying task without the failed announcements", "warning")
+                    history.append({"role": "user", "content": "PROTOCOL RESET. Your recent replies contained no ```execute block and have been removed from this conversation. Respond now with ONLY the ```execute block for your next action — no prose, no plan, no announcement."})
+                    nudge_marks.append(len(history) - 1)
+                    continue
                 if not Config.STREAM:
                     t2 = T()
                     print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
@@ -10422,9 +11006,91 @@ def normalize_api_base(base):
 
 # ── Model Selector ──────────────────────────────────────────
 
+def mask_key(key):
+    """Masked key for display: first4...last4. Never log full keys."""
+    k = (key or "").strip() if isinstance(key, str) else ""
+    if not k:
+        return "<none>"
+    return (k[:4] + "..." + k[-4:]) if len(k) > 12 else "***"
+
+def resolve_runtime(provider=None, model=None):
+    """Resolve (api_base, api_key, model) for a provider.
+
+    Falls back to the active session config when the provider is unknown
+    or omitted. Per-provider keys (providers.<name>.api_key) win for their
+    own provider; the session key is kept when the provider matches the
+    main one so CLI overrides like --api-key stay honored.
+    """
+    prov = (provider or Config.PROVIDER or "").strip()
+    base = Config.API_BASE
+    key = Config.API_KEY
+    mdl = model or Config.MODEL
+    reg = PROVIDER_REGISTRY.get(prov) if prov else None
+    if prov and reg:
+        base = reg.get("api_base") or base
+        _rk = reg.get("default_key") or ""
+        if isinstance(_rk, str) and _rk.strip():
+            key = _rk.strip()
+        mdl = model or reg.get("model") or mdl
+    return base, key, mdl
+
+
+def check_endpoint_reachable(api_base, timeout=3):
+    """TCP pre-flight for an API base. Returns (ok, detail).
+
+    Catches the classic 'connection refused' before requests burn retry
+    budgets, so dead local servers surface instantly with an actionable
+    message instead of a cryptic errno after the fact.
+    """
+    try:
+        raw = (api_base or "").strip()
+        if not raw:
+            return False, "no API base configured"
+        u = urllib.parse.urlparse(raw if "//" in raw else f"http://{raw}")
+        host = u.hostname
+        if not host:
+            return False, f"cannot parse base {api_base!r}"
+        port = u.port or (443 if u.scheme == "https" else 80)
+        with socket.create_connection((host, port), timeout=timeout):
+            return True, ""
+    except OSError as e:
+        return False, str(e)
+    except Exception as e:
+        return False, str(e)
+
+
+def fetch_models_from(api_base, api_key=None, timeout=15):
+    """Fetch model list from one OpenAI-compatible endpoint.
+    Returns a list of {"id", "pricing"} dicts; raises on HTTP/network error."""
+    _base = normalize_api_base(api_base)
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.9"}
+    _key = api_key if api_key is not None else Config.API_KEY
+    if isinstance(_key, str):
+        _key = _key.strip()
+    if _key:
+        h["Authorization"] = f"Bearer {_key}"
+    req = urllib.request.Request(f"{_base}/v1/models", headers=h)
+    with urlopen_with_ssl(req, timeout=timeout) as resp:
+        data = json.loads(resp.read().decode())
+    models = []
+    if "data" in data and isinstance(data["data"], list):
+        for m in data["data"]:
+            if m.get("id"):
+                models.append({"id": m["id"], "pricing": m.get("pricing") or None})
+    elif "models" in data and isinstance(data["models"], list):
+        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data["models"]]
+    elif isinstance(data, list):
+        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data]
+    elif isinstance(data, dict) and data.get("id"):
+        models = [{"id": data["id"], "pricing": None}]
+    return [m for m in models if m.get("id")]
+
+
 def build_headers(extra=None, api_key=None, api_base=None):
     h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.9"}
     _key = api_key if api_key is not None else Config.API_KEY
+    if isinstance(_key, str):
+        _key = _key.strip()
     if _key:
         h["Authorization"] = f"Bearer {_key}"
     _base = (api_base if api_base is not None else Config.API_BASE).lower()
@@ -10441,28 +11107,7 @@ def fetch_models():
     Returns a list of model IDs/names, or empty list on success but no data.
     Raises Exception on failure so callers can show diagnostics.
     """
-    _base = normalize_api_base(Config.API_BASE)
-    req = urllib.request.Request(
-        f"{_base}/v1/models",
-        headers=build_headers(),
-    )
-    with urlopen_with_ssl(req, timeout=15) as resp:
-        data = json.loads(resp.read().decode())
-
-    models = []
-    if "data" in data and isinstance(data["data"], list):
-        for m in data["data"]:
-            if m.get("id"):
-                pricing = m.get("pricing") or None
-                models.append({"id": m["id"], "pricing": pricing})
-    elif "models" in data and isinstance(data["models"], list):
-        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data["models"]]
-    elif isinstance(data, list):
-        models = [{"id": m.get("name") or m.get("id") or "", "pricing": None} for m in data]
-    elif data.get("id"):
-        models = [{"id": data["id"], "pricing": None}]
-
-    return [m for m in models if m.get("id")]
+    return fetch_models_from(Config.API_BASE, Config.API_KEY)
 
 def _pricing_str(pricing):
     if not pricing or not isinstance(pricing, dict):
@@ -10491,101 +11136,172 @@ def _pricing_str(pricing):
             return f"${val}"
     return f"  {_fmt(prompt)}/{_fmt(completion)}/M"
 
-def cmd_model_list(history=None, cmd_log=None, provider=None):
-    """Interactive model browser. Fetches models, paginates, lets user pick.
-    If provider is given, temporarily switches to that provider for browsing."""
-    t = T()
-    _saved = {}
-    if provider and provider in PROVIDER_REGISTRY:
-        _saved = {"base": Config.API_BASE, "model": Config.MODEL, "key": Config.API_KEY, "custom": Config.CUSTOM_API_BASE}
-        Config.API_BASE = PROVIDER_REGISTRY[provider]["api_base"]
-        Config.CUSTOM_API_BASE = False  # browsing uses the provider's real base
-        if PROVIDER_REGISTRY[provider].get("default_key"):
-            Config.API_KEY = PROVIDER_REGISTRY[provider]["default_key"]
-    
+def _fetch_catalog_entries():
+    """Fetch model lists from every configured provider, in parallel.
+    Returns (entries, failures): entries are {"id", "provider", "pricing"}."""
+    entries, failures = [], []
+
+    def _grab(name, base, key):
+        try:
+            ms = fetch_models_from(base, key, timeout=12)
+            for m in ms:
+                entries.append({"id": m["id"], "provider": name, "pricing": m.get("pricing")})
+        except Exception as e:
+            failures.append((name, str(e)))
+
+    # Scope: ONLY providers the user actually uses — the active provider plus
+    # entries they explicitly configured (config.json providers section).
+    # Built-in registry defaults are NOT polled: their public /v1/models
+    # (e.g. openrouter) floods the list with hundreds of models the user
+    # has no key for and cannot run.
     try:
-        models = fetch_models()
-    except Exception as e:
-        if _saved:
-            Config.API_BASE = _saved["base"]
-            Config.MODEL = _saved["model"]
-            Config.API_KEY = _saved["key"]
-            Config.CUSTOM_API_BASE = _saved["custom"]
-        viz.status(f"Failed to fetch models: {e}", "error")
+        with open(Config.CONFIG_FILE, 'r', encoding='utf-8') as f:
+            _cfg_provs = (json.load(f) or {}).get("providers") or {}
+    except Exception:
+        _cfg_provs = {}
+    _sbase, _skey = (Config.API_BASE or "").rstrip('/'), Config.API_KEY
+    _active = Config.PROVIDER or ""
+    targets = []
+    if _active and Config.API_BASE:
+        # Active provider: prefer its per-provider key, else the session key.
+        _reg = PROVIDER_REGISTRY.get(_active) or {}
+        _akey = (_reg.get("default_key") or "").strip() or _skey
+        targets.append((_active, Config.API_BASE, _akey))
+    for pname, prow in sorted(_cfg_provs.items()):
+        if pname == _active:
+            continue
+        base = prow.get("api_base") or ""
+        if not base:
+            continue
+        if prow.get("api_key"):
+            targets.append((pname, base, prow["api_key"]))
+        elif base.rstrip('/') == _sbase:
+            # Same endpoint as the session (custom-shared base) — session key applies.
+            targets.append((pname, base, _skey))
+        else:
+            targets.append((pname, base, None))
+
+    threads = []
+    for name, base, key in targets:
+        th = threading.Thread(target=_grab, args=(name, base, key), daemon=True)
+        th.start()
+        threads.append(th)
+    for th in threads:
+        th.join(timeout=15)
+
+    # De-dup: same model id from multiple providers stays as separate rows
+    # (users pick the provider explicitly); collapse identical (id, provider).
+    seen = set()
+    unique = []
+    for e in sorted(entries, key=lambda e: (e["id"].lower(), e["provider"])):
+        k = (e["id"], e["provider"])
+        if k not in seen:
+            seen.add(k)
+            unique.append(e)
+    return unique, failures
+
+
+def _apply_model_selection(provider, model_id, role):
+    """Apply a picked (provider, model) to the main or subagent slot."""
+    t = T()
+    reg = PROVIDER_REGISTRY.get(provider) or {}
+    if role == "subagent":
+        Config.SUBAGENT_PROVIDER = provider
+        Config.SUBAGENT_MODEL = model_id
+        Config.save_config()
+        print(f"  {t['bright']}+ Subagent model: {model_id} [{provider}]{RST}")
+        print(f"  {t['dim']}Main agent unchanged ({Config.MODEL} [{Config.PROVIDER}]). Providers can mix.{RST}")
+    else:
+        if provider != Config.PROVIDER or not Config.MODEL:
+            Config.MODEL = model_id
+            Config.PROVIDER = provider
+            base = reg.get("api_base") or Config.API_BASE
+            if base and base != Config.API_BASE:
+                Config.API_BASE = base
+                Config.CUSTOM_API_BASE = False
+            _rk = (reg.get("default_key") or "")
+            if isinstance(_rk, str) and _rk.strip():
+                Config.API_KEY = _rk.strip()
+            Config.SESSION_ONLY_KEYS.discard("api_key")
+            Config.SESSION_ONLY_KEYS.discard("api_base")
+            Config.SESSION_ONLY_KEYS.discard("model")
+            Config.save_config()
+        else:
+            Config.MODEL = model_id
+            Config.SESSION_ONLY_KEYS.discard("model")
+            Config.save_config()
+        print(f"  {t['bright']}+ Main model: {model_id} [{provider}]{RST}")
+        tips = []
+        if reg.get("cheap_model"):
+            tips.append(f"cheap: {reg['cheap_model']}")
+        if tips:
+            print(f"  {t['dim']}{' | '.join(tips)}{RST}")
+    return True
+
+
+def cmd_model_list(history=None, cmd_log=None, provider=None, search=None):
+    """Unified model browser across ALL providers.
+
+    Lists every reachable provider's models with their provider tags, lets
+    you assign any of them to the main or subagent slot — mixing providers
+    (e.g. local qwen subagent + cloud main) is first-class.
+    """
+    t = T()
+    # Legacy provider= argument narrows the fetch instead of switching.
+    viz.status("Fetching model catalogs from all providers...", "info")
+    entries, failures = _fetch_catalog_entries()
+
+    prov_counts = {}
+    for e in entries:
+        prov_counts[e["provider"]] = prov_counts.get(e["provider"], 0) + 1
+    print(f"\n  {t['bright']}{len(entries)} models across {len(prov_counts)} providers{RST}"
+          f"  {t['dim']}({', '.join(f'{p}={c}' for p, c in sorted(prov_counts.items()))}){RST}")
+    for fname, ferr in failures:
+        print(f"  {t['dim']}⚠ {fname}: {ferr[:80]}{RST}")
+
+    if not entries:
+        print(f"  {t['warn']}No models reachable. Check /status and /provider.{RST}")
         return
 
-    if not models:
-        if "openrouter" in Config.API_BASE.lower() and not Config.API_KEY:
-            print(f"\n  {t['warn']}OpenRouter requires an API key.{RST}")
-            print(f"  Set it: {t['bright']}/provider key sk-or-v1-...{RST}")
-            print(f"  Or:     {t['bright']}--api-key sk-or-v1-...{RST}")
-        else:
-            viz.status("No models returned by API. Check connection or API key.", "warning")
-        return
+    if provider:
+        entries = [e for e in entries if e["provider"] == provider]
+        print(f"  {t['dim']}Filtered to provider '{provider}'.{RST}")
 
-    # Cost-saving suggestion: surface the provider's cheap model for subagents.
-    _prov_name_for_tip = provider if provider else Config.PROVIDER
-    _reg_for_tip = PROVIDER_REGISTRY.get(_prov_name_for_tip, {})
-    _cheap_for_tip = _reg_for_tip.get("cheap_model")
-    if _cheap_for_tip and _cheap_for_tip.lower() != (Config.MODEL or "").lower():
-        _cur_in, _cur_out = _get_model_pricing()
-        _ch_in = _ch_out = None
-        _cl = _cheap_for_tip.lower()
-        if _cl in _MODEL_PRICING:
-            _ch_in, _ch_out = _MODEL_PRICING[_cl]
-        else:
-            for _k, _v in _MODEL_PRICING.items():
-                if _k in _cl or _cl in _k:
-                    _ch_in, _ch_out = _v
-                    break
-        _fmt_p = lambda v: "free" if v == 0 else f"${v:.5f}"
-        if _ch_in is not None:
-            _saving = 0.0
-            if (_cur_in + _cur_out) > 0 and (_ch_in + _ch_out) < (_cur_in + _cur_out):
-                try:
-                    _saving = (1.0 - (_ch_in + _ch_out) / (_cur_in + _cur_out)) * 100.0
-                except Exception:
-                    _saving = 0.0
-            _save_txt = f"  {t['dim']}(~{_saving:.0f}% cheaper than current model){RST}" if _saving > 1 else ""
-            print(f"\n  {t['accent']}Cost-saving tip:{RST} use {t['bright']}{_cheap_for_tip}{RST}"
-                  f" {t['dim']}({_fmt_p(_ch_in)}/{_fmt_p(_ch_out)}/1K in/out){RST}{_save_txt}")
-            print(f"  {t['dim']}Assign it to subagents: /set subagent_model {_cheap_for_tip}{RST}")
-
-    models.sort(key=lambda m: m["id"].lower())
-    page_size = 30
-    total_pages = max(1, (len(models) + page_size - 1) // page_size)
+    search_term = (search or "").strip()
     page = 0
-    search_term = ""
+    page_size = 30
+
+    def _filtered():
+        if search_term:
+            return [e for e in entries if search_term.lower() in e["id"].lower()
+                    or search_term.lower() in e["provider"].lower()]
+        return entries
 
     while True:
+        fl = _filtered()
+        total_pages = max(1, (len(fl) + page_size - 1) // page_size)
         start = page * page_size
-        end = min(start + page_size, len(models))
-        page_models = models[start:end]
+        end = min(start + page_size, len(fl))
+        page_rows = fl[start:end]
 
-        if search_term:
-            filtered = [m for m in models if search_term.lower() in m["id"].lower()]
-            filtered_start = page * page_size
-            filtered_end = min(filtered_start + page_size, len(filtered))
-            page_models = filtered[filtered_start:filtered_end]
-            total_pages = max(1, (len(filtered) + page_size - 1) // page_size)
-        else:
-            filtered = models
-            total_pages = max(1, (len(models) + page_size - 1) // page_size)
-
-        prov_name = provider if provider else Config.PROVIDER
-        print(f"\n {t['bright']}MODELS -- {prov_name}{RST}  {t['dim']}(page {page+1}/{total_pages} | {len(filtered)} total){RST}")
+        print(f"\n {t['bright']}MODELS{RST}  {t['dim']}(page {page+1}/{total_pages} | {len(fl)} shown"
+              f"{' | search: ' + search_term if search_term else ''}){RST}")
         print(f" {t['dim']}{'─' * 72}{RST}")
 
-        for i, m in enumerate(page_models, 1):
-            is_current = " ←" if m["id"] == Config.MODEL else ""
+        for i, m in enumerate(page_rows, 1):
+            is_main = " ←main" if (m["id"] == Config.MODEL and m["provider"] == Config.PROVIDER) else ""
+            is_sub = " ←sub" if (m["id"] == Config.SUBAGENT_MODEL and
+                                  m["provider"] == (Config.SUBAGENT_PROVIDER or Config.PROVIDER)) else ""
             pricing = _pricing_str(m.get("pricing"))
-            print(f"  {t['primary']}{start + i:>3}.{RST} {m['id'][:50]}{pricing}{t['bright']}{is_current}{RST}")
+            mark = f"{t['bright']}{is_main}{is_sub}{RST}" if (is_main or is_sub) else ""
+            print(f"  {t['primary']}{start + i:>3}.{RST} {m['id'][:44]}"
+                  f" {t['accent']}[{m['provider']}]{RST}{pricing}{mark}")
 
         print(f" {t['dim']}{'─' * 72}{RST}")
-        print(f"  {t['dim']}n next  p prev  /text{RST}{t['bright']} search  q{RST}{t['dim']}uit{RST}{t['bright']}  <number>{RST}{t['dim']} select  clear{RST}{t['dim']} (default){RST}")
-        thinking_tag = f" {t['dim']}{Config.THINKING_EFFORT}{RST}" if Config.THINKING_EFFORT else ""
+        print(f"  {t['dim']}n next  p prev  /text{RST}{t['bright']} search  q{RST}{t['dim']}uit"
+              f"{t['bright']}  <number>{RST}{t['dim']} select  clear{RST}{t['dim']} (clears search){RST}")
         try:
-            sel = input(rl_prompt(f" {t['bright']}model{RST}{thinking_tag} {t['primary']}>{RST} ")).strip().lower()
+            sel = input(rl_prompt(f" {t['bright']}model{RST} {t['primary']}>{RST} ")).strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -10593,11 +11309,6 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
         if not sel:
             continue
         if sel == 'q':
-            if _saved:
-                Config.API_BASE = _saved["base"]
-                Config.MODEL = _saved["model"]
-                Config.API_KEY = _saved["key"]
-                Config.CUSTOM_API_BASE = _saved["custom"]
             break
         if sel == 'n':
             if page < total_pages - 1:
@@ -10612,165 +11323,75 @@ def cmd_model_list(history=None, cmd_log=None, provider=None):
             page = 0
             continue
         if sel == 'clear':
-            if Config.PROVIDER in PROVIDER_REGISTRY:
-                Config.MODEL = PROVIDER_REGISTRY[Config.PROVIDER].get("model", Config.MODEL)
-            Config.save_config()
-            print(f"  {t['bright']}+ Model reset to provider default: {Config.MODEL}{RST}")
-            break
-        if sel == '*':
             search_term = ""
             page = 0
             continue
 
         try:
             idx = int(sel) - 1
-            if 0 <= idx < len(filtered):
-                chosen = filtered[idx]["id"]
-                Config.MODEL = chosen
-                if _saved:
-                    Config.PROVIDER = provider
-                    if PROVIDER_REGISTRY.get(provider, {}).get("default_key"):
-                        Config.API_KEY = PROVIDER_REGISTRY[provider]["default_key"]
-                Config.save_config()
-                print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
-                if _saved:
-                    print(f"  {t['dim']}  Switched provider to: {provider}{RST}")
+            if 0 <= idx < len(fl):
+                entry = fl[idx]
+                print(f"\n  {t['bright']}Selected: {entry['id']} [{entry['provider']}]{RST}")
+                try:
+                    role = input(rl_prompt(
+                        f"  Assign: {t['bright']}1{RST}{t['dim']}) main agent  {RST}{t['bright']}2{RST}{t['dim']}) subagent"
+                        f"  {t['dim']}(Enter=1, q=cancel) {t['primary']}>{RST} ")).strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    break
+                if role == 'q':
+                    continue
+                if role in ('2', 's', 'sub', 'subagent'):
+                    _apply_model_selection(entry["provider"], entry["id"], "subagent")
+                else:
+                    _apply_model_selection(entry["provider"], entry["id"], "main")
                 break
             else:
-                viz.status("Invalid number", "warning")
+                print(f"  {t['dim']}Out of range.{RST}")
         except ValueError:
-            pass
+            print(f"  {t['dim']}Not a valid choice.{RST}")
 
-# ── Provider Commands ────────────────────────────────────────────
 
-def set_custom_api_base(url):
-    """Explicitly set a custom API base URL and mark it as user-overridden.
 
-    A custom URL is preserved across provider switches until cleared with
-    reset_api_base() (via '/provider api reset' or '/set api_base reset').
-    """
-    t = T()
-    url = (url or "").strip()
-    if not url:
-        viz.status("No URL provided. Usage: /set api_base <url>", "error")
-        return False
-    Config.API_BASE = url
-    Config.CUSTOM_API_BASE = True
-    Config.save_config()
-    print(f"  {t['bright']}+ API base set to: {url}{RST}")
-    print(f"  {t['dim']}This custom URL is preserved when switching providers.{RST}")
-    print(f"  {t['dim']}Reset to a provider default with: {t['bright']}/provider api reset{RST}")
-    return True
 
-def reset_api_base():
-    """Clear a user-set custom API base URL and revert to the current provider's default."""
-    t = T()
-    prov = PROVIDER_REGISTRY.get(Config.PROVIDER, {})
-    default_base = prov.get("api_base", Config.API_BASE)
-    Config.API_BASE = default_base
-    Config.CUSTOM_API_BASE = False
-    Config.save_config()
-    print(f"  {t['bright']}+ Custom API base cleared.{RST}")
-    print(f"  {t['dim']}Reverted to {Config.PROVIDER} default: {default_base}{RST}")
-    return True
-
-def show_api_base():
-    """Display the current API base URL and whether it's a custom override."""
-    t = T()
-    tag = f" {t['bright']}(custom){RST}" if Config.CUSTOM_API_BASE else ""
-    print(f"  API base: {t['bright']}{Config.API_BASE}{RST}{tag}")
-    if Config.CUSTOM_API_BASE:
-        print(f"  {t['dim']}Provider: {Config.PROVIDER} (custom URL overrides provider default){RST}")
-    else:
-        print(f"  {t['dim']}Provider: {Config.PROVIDER}{RST}")
-    print(f"  {t['dim']}Usage: /set api_base <url>  |  /set api_base reset{RST}")
-    return True
 
 def cmd_provider_list():
-    """List all available providers."""
+    """List all configured providers."""
     t = T()
     print(f"\n {t['bright']}MODEL PROVIDERS{RST}")
     print(f" {t['dim']}{'─' * 60}{RST}")
-    
+
     for key, prov in PROVIDER_REGISTRY.items():
         marker = f"{t['bright']}*{RST}" if key == Config.PROVIDER else " "
         print(f" {marker} {t['primary']}{key:<12}{RST} {t['dim']}{prov.get('display_name', prov.get('name', ''))}{RST}")
-        print(f"   {t['dim']}{prov.get('description', '')}{RST}")
-        print(f"   {t['dim']}API: {prov.get('api_base', '')}{RST}")
+        key_state = mask_key(prov.get("default_key")) if prov.get("default_key") else "(no stored key)"
+        print(f"   {t['dim']}Key: {key_state}   API: {prov.get('api_base', '')}{RST}")
         print(f"   {t['dim']}Model: {prov.get('model', '')[:40]}{RST}")
         print()
-    
+
     print(f" {t['dim']}{'─' * 60}{RST}")
-    print(f" {t['dim']}* = current provider{RST}")
-
-def cmd_provider_set(provider_name):
-    """Switch to a different provider."""
-    t = T()
-    
-    if provider_name not in PROVIDER_REGISTRY:
-        viz.status(f"Unknown provider: {provider_name}", "error")
-        print(f"   {t['dim']}Use 'providers' to see available options{RST}")
-        return False
-    
-    prov = PROVIDER_REGISTRY[provider_name]
-    switching = provider_name != Config.PROVIDER
-    Config.PROVIDER = provider_name
-    # Preserve a user-set custom API base URL; do NOT let provider defaults clobber it.
-    if Config.CUSTOM_API_BASE:
-        if switching:
-            label = prov.get('display_name', prov.get('name', ''))
-            viz.status(f"Switched to: {label} (custom API base preserved)", "success")
-            print(f"   {t['dim']}API: {t['bright']}{Config.API_BASE}{RST} {t['bright']}(custom){RST}")
-            print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
-            print(f"   {t['dim']}To use {label}'s default API: {t['bright']}/provider api reset{RST}")
-        # else: re-selecting current provider, custom URL stays as-is
-    else:
-        Config.API_BASE = prov.get("api_base", Config.API_BASE)
-        viz.status(f"Switched to: {prov.get('display_name', prov.get('name', ''))}", "success")
-        print(f"   {t['dim']}API: {Config.API_BASE}{RST}")
-        print(f"   {t['dim']}Model: {Config.MODEL}{RST}")
-    # Only suggest a default model if user hasn't set one; never overwrite their choice
-    if not Config.MODEL:
-        Config.MODEL = prov.get("model", Config.MODEL)
-    Config.save_config()
-    
-    needs_key = not Config.API_KEY and not prov.get("default_key")
-    if needs_key:
-        print(f"   {t['warn']}This provider may require an API key.{RST}")
-        try:
-            key = input(rl_prompt(f"   API key (or Enter to skip): ")).strip()
-            if key:
-                Config.API_KEY = key
-                Config.save_config()
-                print(f"   {t['bright']}+ API key set.{RST}")
-        except (EOFError, KeyboardInterrupt):
-            print()
-    return True
-
-def cmd_provider_add(name, api_base, model, description="Custom provider"):
-    """Add a custom provider."""
-    t = T()
-    PROVIDER_REGISTRY[name] = {
-        "name": name.replace("_", " ").title(),
-        "api_base": api_base,
-        "model": model,
-        "description": description
-    }
-    viz.status(f"Added provider: {name}", "success")
+    print(f" {t['dim']}* = current provider  |  Pick models (main/subagent) with {t['bright']}/model{RST}")
+    print()
+    print(f" {t['bright']}How to configure providers:{RST}")
+    print(f"  {t['dim']}Switch model/provider ......... {t['bright']}/model{RST}{t['dim']} (numbered picker, assigns main or subagent){RST}")
+    print(f"  {t['dim']}Add a provider ............... {t['bright']}/provider add <name> <api-base> [model]{RST}")
+    print(f"  {t['dim']}Fix a provider's URL ......... {t['bright']}/provider api <name> <url>{RST}")
+    print(f"  {t['dim']}Set a provider's API key ...... {t['bright']}/provider key <name> <key>{RST}")
+    print(f"  {t['dim']}Remove a provider ............ {t['bright']}/provider rm <name>{RST}")
 
 def cmd_provider_remove(name):
-    """Remove a provider."""
+    """Remove a provider from the registry and config.json."""
     t = T()
-    if name in PROVIDER_REGISTRY:
-        if name == "local":
-            viz.status("Cannot remove built-in 'local' provider", "error")
-            return
-        del PROVIDER_REGISTRY[name]
-        viz.status(f"Removed provider: {name}", "success")
-    else:
-        viz.status(f"Provider not found: {name}", "error")
+    if name in ("local", "ollama"):
+        viz.status("Built-in local providers can't be removed", "warning")
+        return
+    was_current = (name == Config.PROVIDER)
+    Config.remove_provider_entry(name)
+    if was_current:
+        Config.PROVIDER = ""
+        print(f"   {t['warn']}Removed your active provider — pick a model via /model{RST}")
+    viz.status(f"Provider removed: {name}", "success")
 
-# ── Image / Multimodal Input ──────────────────────────────────
 
 def cmd_image(args_str):
     """Load an image from file or URL and return multimodal content list.

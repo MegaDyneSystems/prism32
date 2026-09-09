@@ -34,55 +34,6 @@ scoop install prism32
 
 ---
 
-## Packaged / Ready (Needs Credentials)
-
-### AUR (Arch Linux)
-**Status:** PKGBUILD ready, NOT published  
-**Install after publish:** `yay -S prism32`  
-**Package Dir:** `packages/aur/`  
-**To publish:**
-1. Register at https://aur.archlinux.org/
-2. Add SSH key `~/.ssh/aur_prism32.pub` to your AUR account
-3. ```bash
-   cd packages/aur
-   git init
-   git remote add origin ssh://aur@aur.archlinux.org/prism32.git
-   git add .
-   git commit -m "prism32 6.9.0"
-   git push origin main
-   ```
-
-### Chocolatey (Windows)
-**Status:** .nuspec ready, NOT published  
-**Install after publish:** `choco install prism32`  
-**Package Dir:** `packages/chocolatey/`  
-**To publish:**
-```powershell
-cd packages/chocolatey
-choco pack
-choco push prism32.6.9.0.nupkg --source https://push.chocolatey.org/ --api-key YOUR_KEY
-```
-
-### Snap (Ubuntu, Linux)
-**Status:** snapcraft.yaml ready, NOT published  
-**Install after publish:** `sudo snap install prism32`  
-**Package Dir:** `packages/snap/`  
-**To publish:**
-```bash
-cd packages/snap
-snapcraft          # builds .snap
-snapcraft login    # Ubuntu One account
-snapcraft upload --release=stable prism32_6.9.0_amd64.snap
-```
-
-### pkgsrc (NetBSD, DragonFly, Illumos, etc.)
-**Status:** Makefile ready, NOT submitted  
-**Package Dir:** `packages/pkgsrc/`  
-**To publish:** Submit to pkgsrc-wip or create a private pkgsrc tree.
-**Note:** Tag `v6.9.0` exists on GitHub, so the tarball source URL works.
-
----
-
 ## Automated Publishing (GitHub Actions)
 
 The `.github/workflows/publish.yml` workflow automatically handles:
