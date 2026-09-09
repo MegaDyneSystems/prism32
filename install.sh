@@ -12,8 +12,17 @@ LOW_RAM=0
 _INSTALL_TMPFILES=""
 trap 'rm -f $_INSTALL_TMPFILES 2>/dev/null || true' EXIT INT TERM HUP
 
-# Pre-create runtime dir so log() works before Step 1
-mkdir -p "$HOME/.prism32" 2>/dev/null || true
+# Pre-create runtime dir so log() works before Step 1. A nonexistent home
+# (e.g. Synology DSM users without an /var/services/homes entry) must fall
+# back to /tmp/prism32 — same rule prism32.py applies at runtime.
+RUNTIME_BASE=""
+if mkdir -p "$HOME/.prism32" 2>/dev/null && [ -w "$HOME/.prism32" ]; then
+  RUNTIME_BASE="$HOME/.prism32"
+else
+  RUNTIME_BASE="/tmp/prism32"
+  mkdir -p "$RUNTIME_BASE" 2>/dev/null || true
+  echo "  ! Home not usable ($HOME) — runtime dir: $RUNTIME_BASE"
+fi
 
 NAME="prism32"
 # Resolve SRC_DIR from this script's location (works whether cloned to
@@ -23,7 +32,7 @@ SRC_DIR="$SCRIPT_DIR"
 SRC_FILE="$SRC_DIR/prism32.py"
 BIN="${PREFIX:-/usr/local}/bin/$NAME"
 BIN_BACKUP="${PREFIX:-/usr/local}/bin/$NAME.bak.$(date +%s).$$"
-RUNTIME_DIR="$HOME/.prism32"
+RUNTIME_DIR="$RUNTIME_BASE"
 SESSIONS_DIR="$RUNTIME_DIR/sessions"
 SKILLS_DIR="$RUNTIME_DIR/skills"
 PLUGINS_DIR="$RUNTIME_DIR/plugins"
@@ -52,7 +61,7 @@ if ! command -v python3 &>/dev/null; then
     case "$_os" in
       Darwin)  echo "Python 3 not found. Install via: brew install python3" ;;
       FreeBSD) echo "Python 3 not found. Install via: sudo pkg install python3" ;;
-      NetBSD)  echo "Python 3 not found. Install via: pkgin install python311" ;;
+      NetBSD)  echo "Python 3 not found. Install via: pkgin install python312" ;;
       OpenBSD) echo "Python 3 not found. Install via: pkg_add python3" ;;
       Linux)   echo "Python 3 not found. Install via your package manager (apt/pacman/dnf/yum)" ;;
       *)       echo "Python 3 not found. Install from https://python.org" ;;
@@ -148,7 +157,11 @@ _RAM_KB=0
 if [ -r /proc/meminfo ]; then
   _RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
 elif command -v sysctl >/dev/null 2>&1; then
-  _RAM_KB=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}' || echo 0)
+  case "$(uname -s)" in
+    NetBSD) _MEM=$(sysctl -n hw.physmem 2>/dev/null || echo 0) ;;
+    *) _MEM=$(sysctl -n hw.memsize 2>/dev/null || echo 0) ;;
+  esac
+  _RAM_KB=$(echo "$_MEM" | awk '{print int($1/1024)}')
 fi
 if [ "$_RAM_KB" -gt 0 ] && [ "$_RAM_KB" -lt 65536 ]; then
   LOW_RAM=1
@@ -204,7 +217,12 @@ root() {
 header "Step 3/9 - Backing Up"
 
 backups=0
-if [ -f "$BIN" ] || [ -L "$BIN" ]; then
+if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
+  # root() no-ops in auto mode without credentials — don't claim backups
+  # that were never made; leave existing files untouched and let the
+  # per-user path take over.
+  ok "Auto mode, no root credentials — leaving system paths untouched"
+elif [ -f "$BIN" ] || [ -l "$BIN" ]; then
   if root cp -P "$BIN" "$BIN_BACKUP"; then
     ok "Backed up $BIN"
     backups=$((backups+1))
@@ -242,11 +260,37 @@ WRAP
 }
 
 if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
-  LOCAL_BIN="${HOME}/.local/bin"
-  mkdir -p "$LOCAL_BIN"
-  _install_wrapper "$LOCAL_BIN/$NAME"
-  ok "Wrapper: $LOCAL_BIN/$NAME"
-  export PATH="$LOCAL_BIN:$PATH"
+  # Prefer ~/.local/bin; on unusable homes (NAS DSM) fall back beside the
+  # runtime dir so a broken $HOME never aborts the install.
+  if mkdir -p "${HOME}/.local/bin" 2>/dev/null && [ -w "${HOME}/.local/bin" ]; then
+    LOCAL_BIN="${HOME}/.local/bin"
+  else
+    LOCAL_BIN="${RUNTIME_BASE}/bin"
+    mkdir -p "$LOCAL_BIN"
+    # noexec /tmp (Synology DSM): a wrapper there can't run — verify first
+    printf '#!/bin/sh\nexit 0\n' > "$LOCAL_BIN/.exectest.$$"
+    chmod +x "$LOCAL_BIN/.exectest.$$" 2>/dev/null
+    if "$LOCAL_BIN/.exectest.$$" 2>/dev/null; then
+      rm -f "$LOCAL_BIN/.exectest.$$"
+    else
+      rm -f "$LOCAL_BIN/.exectest.$$"
+      warn "Local bin dir is noexec — skipping wrapper"
+      warn "Run prism32 via: $RUNTIME_DIR/prism32.py"
+      unset LOCAL_BIN
+    fi
+  fi
+  if [ -n "${LOCAL_BIN:-}" ]; then
+    _install_wrapper "$LOCAL_BIN/$NAME"
+    ok "Wrapper: $LOCAL_BIN/$NAME"
+    export PATH="$LOCAL_BIN:$PATH"
+  else
+    _install_wrapper_runonly=1
+    mkdir -p "$RUNTIME_DIR"
+    cp "$SRC_FILE" "$RUNTIME_DIR/prism32.py" && ok "Copied prism32.py to $RUNTIME_DIR"
+    if [ "$LOW_RAM" != "1" ]; then
+      "$PY3" -c "import py_compile, sys; py_compile.compile(sys.argv[1], doraise=True)" "$RUNTIME_DIR/prism32.py" 2>/dev/null && ok "Generated .pyc bytecode" || true
+    fi
+  fi
 elif [ "$NEED_ROOT" = "1" ]; then
   mkdir -p "$RUNTIME_DIR"
   cp "$SRC_FILE" "$RUNTIME_DIR/prism32.py" 2>/dev/null || true

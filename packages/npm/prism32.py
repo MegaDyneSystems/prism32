@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.11.0 - MegaDyne Systems Terminal Agent
+Prism32 v6.11.1 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6244,7 +6244,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.11.0 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.11.1 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6255,12 +6255,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.11.0 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.11.1 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.11.0 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.11.1 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7034,6 +7034,7 @@ class SubAgent:
         # Resolve provider credentials once; pass explicitly to ask_ai so
         # parallel subagents never mutate Config globals (race condition fix).
         _prov = self.provider or Config.SUBAGENT_PROVIDER or Config.PROVIDER
+        self.resolved_provider = _prov
         if _prov and _prov not in PROVIDER_REGISTRY:
             viz.status(f"Unknown provider '{_prov}' for {self.id} — using main provider ({Config.PROVIDER})",
                        "warning")
@@ -7187,7 +7188,8 @@ class SubAgent:
             t = T()
             print(f"\n  {t['primary']}╭─ SUBAGENT [{self.id}] ─────────────────────{RST}")
             print(f"  {t['primary']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
-            prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
+            _rp = getattr(self, 'resolved_provider', None) or self.provider
+            prov_info = f"  {t['dim']}Provider:{RST} {_rp}" if (_rp and _rp != Config.PROVIDER) else ""
             print(f"  {t['primary']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
             print(f"  {t['primary']}╰{'─' * 50}{RST}")
         spin = SpinnerThread(f"subagent {self.id}")
@@ -7219,7 +7221,8 @@ class SubAgent:
             with stdout_lock:
                 print(f"\n  {T()['warn']}╭─ SPAWNED SUBAGENT [{self.id}] ASYNC ─────────────────{RST}")
                 print(f"  {T()['warn']}│{RST}  {t['bright']}Task:{RST} {self.task[:80]}")
-                prov_info = f"  {t['dim']}Provider:{RST} {self.provider}" if self.provider else ""
+                _rp = getattr(self, 'resolved_provider', None) or self.provider
+                prov_info = f"  {t['dim']}Provider:{RST} {_rp}" if (_rp and _rp != Config.PROVIDER) else ""
                 print(f"  {T()['warn']}│{RST}  {t['dim']}Model:{RST} {self.model[:40]}{prov_info}")
                 print(f"  {T()['warn']}╰{'─' * 50}{RST}")
         return self.id
@@ -8415,6 +8418,7 @@ def cmd_goal(goal_text, history, cmd_log):
         return
 
     max_steps = Config.GOAL_MAX_STEPS
+    consecutive_idle = 0
     set_active_goal(goal_text)
     goal_msg = _get_goal_prompt(goal_text, max_steps)
 
@@ -8522,12 +8526,28 @@ def cmd_goal(goal_text, history, cmd_log):
                 commands = extract_blocks(resp, 'execute')
                 viz.status("Tool call format healed", "info")
         
+        # Responses with no commands and no pending work accumulate toward
+        # organic completion: models that summarize with 'Task complete...'
+        # (rather than the literal 'GOAL COMPLETE' phrase) used to run the
+        # loop to max steps for nothing.
+        if not commands and not extract_blocks(resp, 'ask'):
+            consecutive_idle += 1
+        else:
+            consecutive_idle = 0
+
         if 'GOAL COMPLETE' in resp.upper() and step > 1 and len(commands) == 0:
             # Only accept GOAL COMPLETE if we've actually done some work
             completed = True
             clean = clean_response(resp)
             box("GOAL COMPLETE", clean, "bright")
             history.append({"role": "assistant", "content": resp})
+            break
+        elif consecutive_idle >= 3 and step > 2 and len(commands) == 0:
+            completed = True
+            clean = clean_response(resp)
+            box("GOAL COMPLETE", clean or resp, "bright")
+            history.append({"role": "assistant", "content": resp})
+            viz.status("No further commands after 3 consecutive final-style responses — treating as complete", "info")
             break
         elif 'GOAL COMPLETE' in resp.upper() and step <= 1:
             # Model is hallucinating - force it to run commands
@@ -9255,7 +9275,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.11.0 — MegaDyne Systems")
+        print("Prism32 v6.11.1 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -10632,9 +10652,15 @@ def main():
                     v = _quantum.get(key)
                     print(f"  Quantum: {key} = {str(v)[:80]}" if v is not None else f"  Quantum: nothing set for key '{key}'")
             else:
-                print(f"  Usage: /quantum                    (view all)")
-                print(f"        /quantum <key>:<value>      (set)")
-                print(f"        /quantum <key>:             (get)")
+                # Bare '/quantum <key>' (no colon): treat as a read of the key
+                _bk = args_str.strip()
+                _bv = _quantum.get(_bk)
+                if _bv is not None:
+                    print(f"  Quantum: {_bk} = {str(_bv)[:120]}")
+                else:
+                    print(f"  Usage: /quantum                    (view all)")
+                    print(f"        /quantum <key>:<value>      (set)")
+                    print(f"        /quantum <key>:             (get)")
             print()
             continue
 
@@ -11243,8 +11269,8 @@ def resolve_runtime(provider=None, model=None):
         reg_base = (reg.get("api_base") or "").strip()
         _rk = reg.get("default_key") or ""
         _rk = _rk.strip() if isinstance(_rk, str) else ""
-        if reg_base:
-            # Properly configured provider: its base wins.
+        if reg_base and prov != Config.PROVIDER:
+            # A different provider: its registered base wins.
             base = reg_base
             # Its key wins too — but ONLY if it actually has one; a session
             # key from --api-key / /provider key must not be cross-inherited

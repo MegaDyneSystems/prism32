@@ -73,8 +73,10 @@ echo -e "  ${DIM}Arch:${RST}  $ARCH"
 
 # Find Python 3
 PY3=""
-for py in python3 python3.11 python3.10 python3.9 python3.8 python3.7; do
-  if command -v "$py" >/dev/null 2>&1; then
+for py in python3 python3.11 python3.10 python3.9 python3.8 python3.7 \
+         /usr/pkg/bin/python3 /usr/pkg/bin/python3.12 /usr/pkg/bin/python3.11 \
+         /usr/local/bin/python3 /usr/local/bin/python3.11; do
+  if command -v "$py" >/dev/null 2>&1 && [ -x "$py" ]; then
     PY3="$py"
     break
   fi
@@ -310,14 +312,28 @@ fi
 if [ "$OS" = "FreeBSD" ] || [ "$OS" = "OpenBSD" ] || [ "$OS" = "NetBSD" ] || [ "$OS" = "DragonFly" ]; then
   ok "Platform: BSD ($OS)"
   if [ -z "$PY3" ]; then
-    if command -v pkg >/dev/null 2>&1; then
-      sudo pkg install -y python3 git
-    elif command -v pkgin >/dev/null 2>&1; then
-      sudo pkgin install python3 git
-    elif command -v pkg_add >/dev/null 2>&1; then
-      sudo pkg_add python3 git
+    # Privilege strategy: sudo when present, root runs directly, and
+    # try su -c as a last resort (NetBSD boxes often have no sudo; a
+    # failed install must not kill the script under set -e).
+    _as_root=""
+    if command -v sudo >/dev/null 2>&1; then _as_root="sudo"
+    elif [ "$(id -u)" = "0" ]; then _as_root=""
+    elif command -v su >/dev/null 2>&1; then _as_root="__su__"
     fi
-    PY3="python3"
+    if command -v pkg >/dev/null 2>&1; then
+      if [ "$_as_root" = "__su__" ]; then su -c "pkg install -y python3 git" || warn "pkg install failed — install python3 manually and rerun"
+      elif [ -z "$_as_root" ]; then pkg install -y python3 git || warn "pkg install failed — install python3 manually and rerun"
+      else sudo pkg install -y python3 git || warn "pkg install failed — install python3 manually and rerun"; fi
+    elif command -v pkgin >/dev/null 2>&1; then
+      if [ "$_as_root" = "__su__" ]; then su -c "pkgin -y install python3 git" || warn "pkgin install failed — install python3 manually and rerun"
+      elif [ -z "$_as_root" ]; then pkgin -y install python3 git || warn "pkgin install failed — install python3 manually and rerun"
+      else sudo pkgin install python3 git || warn "pkgin install failed — install python3 manually and rerun"; fi
+    elif command -v pkg_add >/dev/null 2>&1; then
+      if [ "$_as_root" = "__su__" ]; then su -c "pkg_add python3 git" || warn "pkg_add failed — install python3 manually and rerun"
+      elif [ -z "$_as_root" ]; then pkg_add python3 git || warn "pkg_add failed — install python3 manually and rerun"
+      else sudo pkg_add python3 git || warn "pkg_add failed — install python3 manually and rerun"; fi
+    fi
+    PY3="${PY3:-python3}"
   fi
   CLONE_DIR="$HOME/prism32"
   if [ -d "$CLONE_DIR/.git" ]; then
