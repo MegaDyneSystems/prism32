@@ -148,7 +148,7 @@ if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
     git clone --depth 1 "$REPO" "$CLONE_DIR"
   fi
   cd "$CLONE_DIR"
-  sh install.sh -y
+  bash install.sh -y
   exit 0
 fi
 
@@ -217,7 +217,7 @@ if [ "$OS" = "Darwin" ]; then
     git clone --depth 1 "$REPO" "$CLONE_DIR"
   fi
   cd "$CLONE_DIR"
-  sh install.sh -y
+  bash install.sh -y
   exit 0
 fi
 
@@ -250,7 +250,7 @@ if [ "$OS" = "Linux" ]; then
     else
       fail "No recognized package manager found."
       echo -e "  ${DIM}Install Python 3.7+ and git manually, then run:${RST}"
-      echo -e "  ${DIM}git clone $REPO ~/prism32 && cd ~/prism32 && sh install.sh -y${RST}"
+      echo -e "  ${DIM}git clone $REPO ~/prism32 && cd ~/prism32 && bash install.sh -y${RST}"
       exit 1
     fi
     PY3="python3"
@@ -274,7 +274,7 @@ if [ "$OS" = "Linux" ]; then
       git clone --depth 1 "$REPO" "$CLONE_DIR"
     fi
     cd "$CLONE_DIR"
-    sh install.sh -y
+    bash install.sh -y
   else
     # No git — download prism32.py + install.sh directly
     warn "git not available. Downloading files directly..."
@@ -301,7 +301,7 @@ if [ "$OS" = "Linux" ]; then
       fi
     done
     cd "$CLONE_DIR"
-    sh install.sh -y
+    bash install.sh -y
   fi
   exit 0
 fi
@@ -326,7 +326,7 @@ if [ "$OS" = "FreeBSD" ] || [ "$OS" = "OpenBSD" ] || [ "$OS" = "NetBSD" ] || [ "
     git clone --depth 1 "$REPO" "$CLONE_DIR"
   fi
   cd "$CLONE_DIR"
-  sh install.sh -y
+  bash install.sh -y
   exit 0
 fi
 

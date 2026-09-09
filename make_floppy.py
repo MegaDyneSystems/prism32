@@ -114,7 +114,7 @@ for p in "$SRC/"*.PY; do
     [ -f "$p" ] && [ "$(basename "$p")" != "PRISM32.PY" ] && cp "$p" ~/.prism32/plugins/ 2>/dev/null
 done
 if [ -f install.sh ]; then
-    sh install.sh
+    bash install.sh
 else
     mkdir -p ~/.local/bin
     cp "$SRC/prism32.py" ~/.prism32/prism32.py

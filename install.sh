@@ -141,6 +141,21 @@ fi
 ok "Source file: $SRC_FILE"
 chmod +x "$SRC_FILE" && ok "Made executable"
 
+# Detect RAM BEFORE the syntax check — a 32-64MB device must not run
+# py_compile (the very OOM LOW_RAM mode exists to prevent); this block
+# used to live in Step 2, after the check.
+_RAM_KB=0
+if [ -r /proc/meminfo ]; then
+  _RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+elif command -v sysctl >/dev/null 2>&1; then
+  _RAM_KB=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}' || echo 0)
+fi
+if [ "$_RAM_KB" -gt 0 ] && [ "$_RAM_KB" -lt 65536 ]; then
+  LOW_RAM=1
+  warn "Low RAM detected (~$((_RAM_KB / 1024)) MB). Parser may OOM on first run."
+  sub "Tip: compile to .pyc on a host with more RAM and copy prism32.pyc here."
+fi
+
 if [ "$LOW_RAM" = "1" ]; then
   warn "Skipping py_compile syntax check to avoid OOM on low-RAM system."
 else
@@ -159,21 +174,6 @@ header "Step 2/9 - Platform Check"
 echo -e "  ${DIM}OS:${RST}     $(uname -s)  $(uname -m)"
 echo -e "  ${DIM}Python:${RST}  $("$PY3" --version 2>&1)"
 echo -e "  ${DIM}User:${RST}    $(whoami)"
-
-# Detect RAM (Linux/BSD /proc fallback; Darwin sysctl)
-_RAM_KB=0
-# Detect RAM (Linux /proc; BSD/macOS sysctl; unknown = 0)
-_RAM_KB=0
-if [ -r /proc/meminfo ]; then
-  _RAM_KB=$(awk '/MemTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
-elif command -v sysctl >/dev/null 2>&1; then
-  _RAM_KB=$(sysctl -n hw.memsize 2>/dev/null | awk '{print int($1/1024)}' || echo 0)
-fi
-if [ "$_RAM_KB" -gt 0 ] && [ "$_RAM_KB" -lt 65536 ]; then
-  LOW_RAM=1
-  warn "Low RAM detected (~$((_RAM_KB / 1024)) MB). Parser may OOM on first run."
-  sub "Tip: compile to .pyc on a host with more RAM and copy prism32.pyc here."
-fi
 
 if [ ! -w "${PREFIX:-/usr/local}/bin" ]; then
   NEED_ROOT=1
@@ -290,7 +290,14 @@ if [ "$AUTO" = "1" ] && [ -f "$CONFIG_FILE" ]; then
   # Load current values from config so Steps 6-9 have them
   eval "$("$PY3" -c "
 import json, sys
-c = json.load(open(sys.argv[1]))
+try:
+    c = json.load(open(sys.argv[1]))
+except Exception:
+    # Unparsable config: fall back loudly rather than eval'ing empty output
+    # (empty eval returns 0 and silently starves the {defaults} guard of
+    # set -u downstream)
+    print('PROV=local'); print('MODEL='); print('API_BASE=http://127.0.0.1:8080')
+    sys.exit(1)
 print(f'PROV=\"{c.get(\"provider\",\"local\")}\"')
 print(f'MODEL=\"{c.get(\"model\",\"\")}\"')
 print(f'API_BASE=\"{c.get(\"api_base\",\"\")}\"')
@@ -499,9 +506,11 @@ except Exception:
 c['provider'] = prov
 c['model'] = model
 c['api_base'] = base
-c['providers'] = json.loads(allp)
+c.setdefault('providers', {}).update(json.loads(allp))
 k = (c.get('providers') or {}).get(prov, {}).get('api_key', '')
-if k and not c.get('api_key'):
+if k:
+    # switching providers — the ACTIVE provider's key must reach
+    # top-level api_key or the old provider's key 401s after reinstall
     c['api_key'] = k
 json.dump(c, open(path, 'w'), indent=2)
 " "$CONFIG_FILE" "$PROV" "$MODEL" "$API_BASE" "$ALL_PROVIDERS" \
