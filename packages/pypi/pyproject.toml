@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "prism32"
-version = "6.11.1"
+version = "6.12.0"
 description = "Self-extending, self-repairing, self-evolving polymorphic AI super-agent. One Python file, stdlib-only. Cross-platform terminal harness with multi-model subagents, plugin self-generation, and autonomous goal execution."
 readme = "README.md"
 license = "Apache-2.0"

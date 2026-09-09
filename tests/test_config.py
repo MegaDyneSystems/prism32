@@ -165,3 +165,37 @@ def test_save_config_preserves_providers_section():
         Config.API_KEY, Config.MODEL = old_key, old_model
         Config.SESSION_ONLY_KEYS.clear()
         Config.SESSION_ONLY_KEYS.update(old_keys)
+
+def test_mission_tree_ordering_and_completion():
+    """Tesseract-port contract: siblings dispatch in parallel once parents
+    are done; completion is structural (all leaves terminal)."""
+    from prism32 import Mission
+    m = Mission("test the box")
+    m.todos["root"].state = "done"
+    a = m.add_todo("audit", "root")
+    b = m.add_todo("clean", "root")
+    c = m.add_todo("report", a)
+    ready = m.next_ready()
+    assert {t.id for t in ready} == {a, b}          # siblings parallel
+    assert all(t.id != c for t in ready)            # child waits
+    m.todos[a].state = "done"
+    ready2 = m.next_ready()
+    assert {t.id for t in ready2} == {b, c}         # child unblocked, sibling still ready
+    m.todos[b].state = "done"
+    assert not m.leaves_terminal()
+    m.todos[c].state = "failed"
+    assert m.leaves_terminal()                     # failed leaf is terminal
+    assert not m.any_running()
+
+def test_mission_context_renders_reports():
+    from prism32 import Mission
+    m = Mission("ship it")
+    m.todos["root"].state = "done"
+    tid = m.add_todo("step2", "root")
+    m.reports.append(("step1", "found 3 files"))
+    m.notes.append("user: prioritize speed")
+    ctx = m.render_context(m.todos[tid])
+    assert "MISSION CONTEXT:" in ctx and "ship it" in ctx
+    assert "step1 => found 3 files" in ctx
+    assert "user: prioritize speed" in ctx
+    assert "Focus ONLY on your assigned step" in ctx

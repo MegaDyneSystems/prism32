@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v6.11.1 - MegaDyne Systems Terminal Agent
+Prism32 v6.12.0 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6244,7 +6244,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v6.11.1 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v6.12.0 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6255,12 +6255,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v6.11.1 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v6.12.0 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v6.11.1 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v6.12.0 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7337,7 +7337,7 @@ Commands you can use inside execute blocks:
 - /memory path, /memory paths (locate memory files).
 - /json <file> [--key <path>] [--compact] (read JSON files with pretty-printing, smart summary for large files, key path navigation).
 - Any plugin-registered command listed in context (see Available plugin commands).
-Operator-only commands (do NOT work from execute blocks): /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, /cost, /usage, /debug, /log, /arch, /sysinfo, /procs, /net, /ports, /ls, /find, /grep, /git, /cat, /edit, /history, /export, /goal, /maxsteps, /thinking, /memctx, /subagent-model, /find, /spawn (operator-side), /collect (operator-side).
+Operator-only commands (do NOT work from execute blocks): /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, /cost, /usage, /debug, /log, /arch, /sysinfo, /procs, /net, /ports, /ls, /find, /grep, /git, /cat, /edit, /history, /export, /mission, /maxsteps, /thinking, /memctx, /subagent-model, /find, /spawn (operator-side), /collect (operator-side).
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
@@ -8369,7 +8369,7 @@ def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_a
         return (resp, False) if return_asked else resp
     
     if goal_mode or not allow_input:
-        # In goal mode, don't ask questions - strip them and continue
+        # In missions, don't ask questions - strip them and continue
         cleaned = clean_ask_blocks(resp)
         if not cleaned:
             if allow_input:
@@ -8379,7 +8379,7 @@ def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_a
                 joined = " | ".join(q.strip() for q in questions if q.strip())
                 cleaned = f"[SUBAGENT NEEDS INPUT] {joined}" if joined else "[SUBAGENT NEEDS INPUT]"
         if goal_mode:
-            viz.status("Stripped question blocks in goal mode", "warning")
+            viz.status("Stripped question blocks in mission mode", "warning")
         return (cleaned, True) if return_asked else cleaned
     
     for q in questions:
@@ -8391,235 +8391,243 @@ def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_a
 
 # ── Goal Mode ────────────────────────────────────────────────
 
-def _get_goal_prompt(goal, max_steps):
-    return f"""GOAL: {goal}
+# ═══ Mission system — ported from Tesseract (blueprint-2026-09-05.json,
+# prompt.txt, tesseract.py Captain/TodoTree/QuantumContext) ═══
+#
+# Architecture: /mission decomposes the goal into a todo TREE (planner
+# prompt), dispatches every ready todo (parent chain done) as a parallel
+# subagent shard, injects mission-scoped shared context (completed steps,
+# team notes) into each shard, and completes STRUCTURALLY when all leaves
+# are done — no magic completion phrase. The REPL stays live: take
+# returns instantly, shards run in threads, reports advance the tree.
 
-You are in GOAL MODE. You MUST run commands to accomplish this goal.
-DO NOT claim completion without evidence. DO NOT hallucinate results.
+_MISSION_LOCK = threading.Lock()
+_ACTIVE_MISSION = None
 
-REQUIRED WORKFLOW:
-1. Run commands using ```execute blocks to investigate
-2. Analyze actual command output
-3. Only claim GOAL COMPLETE after you have run commands and verified results
+class MissionTodo:
+    __slots__ = ("id", "label", "state", "parent", "children", "result", "attempts", "shard")
+    def __init__(self, tid, label, parent=None):
+        self.id = tid
+        self.label = label
+        self.state = "pending"     # pending | running | done | failed
+        self.parent = parent
+        self.children = []
+        self.result = ""
+        self.attempts = 0
+        self.shard = None          # live SubAgent reference
 
-NEVER say "GOAL COMPLETE" on your first response. You must execute at least 3 commands first.
+class Mission:
+    """A decomposed goal running as a tree of subagent shards."""
+    MAX_TODO_STEPS = 25           # per-todo subagent step budget
+    MAX_RETRY = 2                 # failed-todo re-dispatch attempts
 
-Use ```execute``` for each step. Chain commands when logical.
-Use ```ask``` ONLY if truly stuck.
+    def __init__(self, goal):
+        import uuid
+        self.id = uuid.uuid4().hex[:12]
+        self.goal = goal
+        self.todos = {}
+        self.root_id = "root"
+        self.todos[self.root_id] = MissionTodo(self.root_id, goal, None)
+        self.todos[self.root_id].state = "done"   # root done ⇒ branches eligible
+        self.state = "active"      # active | complete
+        self.paused = False
+        self.notes = []            # team/user notes, injected into next shards
+        self.reports = []          # [(label, output)] completed-step log
+        self.created = time.time()
+        self._monitor = None
 
-Max steps: {max_steps}. Be efficient. When the goal is achieved, summarize what was done and verified."""
+    # ── tree ops (tesseract.py:1562-1578 next_ready semantics) ──
+    def add_todo(self, label, parent_id=None):
+        tid = f"t{len(self.todos)}_{int(time.time() * 1000) % 100000}"
+        todo = MissionTodo(tid, label, parent_id or self.root_id)
+        self.todos[todo.parent].children.append(tid)
+        self.todos[tid] = todo
+        return tid
 
-def cmd_goal(goal_text, history, cmd_log):
-    global _INTERJECTION_RESULT
-    t = T()
-    if not goal_text:
-        print(f"  Usage: goal <describe what to accomplish>")
-        print(f"  Example: goal install nginx and configure it as a reverse proxy")
-        return
+    def _parent_chain_done(self, todo):
+        cur = todo.parent
+        while cur:
+            if self.todos[cur].state != "done":
+                return False
+            cur = self.todos[cur].parent
+        return True
 
-    max_steps = Config.GOAL_MAX_STEPS
-    consecutive_idle = 0
-    set_active_goal(goal_text)
-    goal_msg = _get_goal_prompt(goal_text, max_steps)
+    def next_ready(self):
+        """All pending todos whose parent chain is fully done — siblings
+        dispatch in parallel; children wait for their parents."""
+        return [t for t in self.todos.values()
+                if t.state == "pending" and self._parent_chain_done(t)]
 
-    print(f"\n{t['bright']}{'='*62}{RST}")
-    print(f" {t['bright']}GOAL MODE ACTIVATED{RST}")
-    print(f" {t['dim']}{goal_text}{RST}")
-    print(f" {t['dim']}Max steps: {max_steps}{RST}")
-    print(f"{t['bright']}{'='*62}{RST}\n")
+    def leaves(self):
+        return [t for t in self.todos.values() if not t.children]
 
-    history.append({"role": "user", "content": goal_msg})
-    completed = False
-    cancelled = False
-    goal_session_id = datetime.now().strftime("goal_%Y%m%d_%H%M%S")
+    def leaves_terminal(self):
+        return all(t.state in ("done", "failed") for t in self.leaves())
 
-    step = 0
-    while step < max_steps:
-        step += 1
-        # Proactive context management: trim at 75% to stay ahead
-        _ctx = context_pct(history)
-        if _ctx >= 75:
-            viz.status(f"Context at {_ctx}% — compressing with intelligent summary", "warning")
-            history[:] = trim_history(history, Config.resolve_context_window())
-        # Auto-save every 3 steps for crash recovery
-        if step > 1 and step % 3 == 1:
-            try:
-                save_session(goal_session_id, history, cmd_log, {"type": "goal", "goal": goal_text, "step": step})
-            except Exception:
-                pass
-        step_header(step, max_steps, goal_text)
-        spin = None
-        try:
-            if Config.STREAM:
-                if not _footer_reserved:
-                    set_scroll_region()
-                _footer_animate_start(state="streaming", history=history)
-                move_to_scroll_bottom()
-                _interjection_start()
-                resp = ask_ai(history)
-                print()
-            else:
-                resp = ask_ai_cancelable(history, history=history)
-        except KeyboardInterrupt:
-            resp = None
-        finally:
-            if spin is not None:
-                spin.stop()
-            _footer_animate_stop()
-            _interjection_stop()
-        if _INTERJECTION_RESULT is not None:
-            inj = _INTERJECTION_RESULT
-            _INTERJECTION_RESULT = None
-            clear_agent_cancel()
-            if resp:
-                history.append({"role": "assistant", "content": resp + "\n\n[Step interrupted by user interjection]"})
-            history.append({"role": "user", "content": inj})
-            move_to_scroll_bottom()
-            print(f" {t['primary']}You:{RST} {inj}")
-            try:
-                save_session(goal_session_id, history, cmd_log, {"type": "goal", "goal": goal_text, "step": step})
-            except Exception:
-                pass
-            step -= 1
-            continue
-        if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
-            msg = agent_cancel_message()
-            clear_agent_cancel()
-            box("STOPPED", msg, "warn")
-            cancelled = True
-            break
-        if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
-            if len(history) > 5:
-                history[:] = history[:-4]
-            viz.status("API error, trimming history and retrying...", "warning")
-            resp = ask_ai_cancelable(history, history=history)
-        if resp and (resp.startswith('[HTTP ERROR 400]') or resp.startswith('[HTTP ERROR 413]')):
-            # Second failure - strip back to just system + goal, retry once more
-            history[:] = history[:2]
-            viz.status("API error again, stripping history to system+goal...", "warning")
-            resp = ask_ai_cancelable(history, history=history)
-        if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
-            msg = agent_cancel_message()
-            clear_agent_cancel()
-            box("STOPPED", msg, "warn")
-            cancelled = True
-            break
-        if resp is None:
-            break
-        if not resp:
-            viz.status("No response from AI — retrying step in 2s...", "warning")
-            time.sleep(2)
-            step -= 1
-            continue
-        if resp.startswith('[HTTP ERROR') or resp.startswith('[NETWORK ERROR') or resp.startswith('[ERROR]'):
-            box("AI ERROR", resp, "err")
-            break
+    def any_running(self):
+        return any(t.state == "running" for t in self.todos.values())
 
-        resp = handle_ask_blocks(resp, history, goal_mode=True)
-
-        commands = extract_blocks(resp, 'execute')
-        
-        # Heal non-standard tool-call formats
-        if not commands:
-            resp, was_healed = heal_response(resp)
-            if was_healed:
-                commands = extract_blocks(resp, 'execute')
-                viz.status("Tool call format healed", "info")
-        
-        # Responses with no commands and no pending work accumulate toward
-        # organic completion: models that summarize with 'Task complete...'
-        # (rather than the literal 'GOAL COMPLETE' phrase) used to run the
-        # loop to max steps for nothing.
-        if not commands and not extract_blocks(resp, 'ask'):
-            consecutive_idle += 1
+    # ── mission-scoped shared context (tesseract.py:2208-2223 verbatim shape) ──
+    def render_context(self, for_todo):
+        lines = ["MISSION CONTEXT:", f"Goal: {self.goal}"]
+        if self.reports:
+            lines.append("Completed steps so far:")
+            for label, output in self.reports[-10:]:
+                lines.append(f"- {label} => {output[:600]}")
         else:
-            consecutive_idle = 0
+            lines.append("No steps completed yet - you may be the first.")
+        if self.notes:
+            lines.append("Team notes:")
+            for note in self.notes[-10:]:
+                lines.append(f"- {note}")
+        lines.append(f"Focus ONLY on your assigned step: {for_todo.label}")
+        lines.append("Use prior results, do not redo them. Complete THIS step, then give your final answer as plain text.")
+        return "\n".join(lines)
 
-        if 'GOAL COMPLETE' in resp.upper() and step > 1 and len(commands) == 0:
-            # Only accept GOAL COMPLETE if we've actually done some work
-            completed = True
-            clean = clean_response(resp)
-            box("GOAL COMPLETE", clean, "bright")
-            history.append({"role": "assistant", "content": resp})
-            break
-        elif consecutive_idle >= 3 and step > 2 and len(commands) == 0:
-            completed = True
-            clean = clean_response(resp)
-            box("GOAL COMPLETE", clean or resp, "bright")
-            history.append({"role": "assistant", "content": resp})
-            viz.status("No further commands after 3 consecutive final-style responses — treating as complete", "info")
-            break
-        elif 'GOAL COMPLETE' in resp.upper() and step <= 1:
-            # Model is hallucinating - force it to run commands
-            resp = "You claimed GOAL COMPLETE without running any commands. You MUST execute commands using ```execute blocks to investigate the system first. Start with: ```execute\ndf -h\n```"
-            commands = extract_blocks(resp, 'execute')
+    def step_prompt(self, todo):
+        return (f"{self.render_context(todo)}\n\n"
+                f"YOUR ASSIGNED STEP: {todo.label}\n\n"
+                f"Use ```execute blocks for each command you need. When your step is done, "
+                f"reply with ONLY the final answer as plain text (no commands).")
 
-        if commands:
-            clean = clean_response(resp)
-            if clean:
-                box(f"STEP {step} ANALYSIS", clean, "accent")
+    # ── status rendering ──
+    def render(self):
+        t = T()
+        lines = [f"MISSION {self.id} [{self.state}{' paused' if self.paused else ''}]: {self.goal}"]
+        def _walk(tid, depth):
+            todo = self.todos[tid]
+            marks = {"pending": "·", "running": "▶", "done": "✓", "failed": "✗"}
+            lines.append(f"  {'  ' * depth}{marks.get(todo.state, '?')} {todo.label[:70]}"
+                         f"{t['dim']} [{todo.state}]{RST}")
+            for child in todo.children:
+                _walk(child, depth + 1)
+        for child in self.todos[self.root_id].children:
+            _walk(child, 0)
+        if self.notes:
+            lines.append(f"  {t['dim']}notes: {'; '.join(self.notes[-3:])}{RST}")
+        return "\n".join(lines)
 
-            command_cancelled = False
-            _expanded = []
-            for c in commands:
-                _expanded.extend(_split_plugin_block(c))
-            for c in _expanded:
-                c = c.strip()
-                viz.tool_call("execute", c)
-                result = run_cmd(c)
-                command_cancelled = agent_cancel_requested() or (result or "").startswith("[CANCELLED]")
-                success = _cmd_succeeded(result)
-                viz.tool_result(success, result[:100])
-                cmd_result(c, result, success)
-                learn_command(c, success=success)
-                cmd_log.append(("goal", c))
-                viz.progress(step, max_steps, f"step {step}/{max_steps}")
 
-                exec_msg = f"Executed: {c}\nResult:\n{result[:_CMD_RESULT_CAP]}"
-                continuation = f"Command succeeded={success}. Continue toward goal or report completion."
-                if exec_msg.strip():
-                    history.append({"role": "user", "content": f"{exec_msg}\n\n{continuation}"})
-                else:
-                    history.append({"role": "user", "content": continuation})
-                if command_cancelled:
-                    msg = agent_cancel_message()
-                    clear_agent_cancel()
-                    box("STOPPED", msg, "warn")
-                    cancelled = True
+def _mission_plan(goal):
+    """Decompose a goal into 3-6 steps via the main model (tesseract.py:2128
+    LLMPlanner) with a heuristic fallback split."""
+    prompt = ("Decompose this goal into 3 to 6 short imperative steps. "
+              "One per line, no numbering, no extra text:\n" + goal)
+    labels = []
+    try:
+        resp = ask_ai([{"role": "user", "content": prompt}], stream=False)
+        if resp and not resp.startswith(("[ERROR", "[HTTP ERROR", "[NETWORK ERROR", "[CANCELLED")):
+            for ln in resp.splitlines():
+                ln = ln.strip().lstrip("-*.").strip()
+                if ln and len(ln) > 3 and len(ln) < 200:
+                    labels.append(ln)
+    except Exception:
+        pass
+    labels = labels[:6]
+    if len(labels) < 2:
+        parts = [p.strip() for p in re.split(r"(?:,| and then | then |;| and )", goal) if p.strip()]
+        labels = parts[:6] if len(parts) >= 2 else [goal]
+    return labels
+
+
+def _mission_report(mission, todo, ok, output):
+    """Completion callback — mirrors Captain.report: advance the tree."""
+    todo.shard = None
+    if ok:
+        todo.state = "done"
+        todo.result = output
+        mission.reports.append((todo.label, output))
+        with stdout_lock:
+            t = T()
+            print(f"  {t['bright']}✓ mission step done:{RST} {todo.label[:70]}")
+    else:
+        todo.attempts += 1
+        if todo.attempts < Mission.MAX_RETRY:
+            todo.state = "pending"   # requeue once
+            with stdout_lock:
+                viz.status(f"mission step failed, requeueing ({todo.attempts}/{Mission.MAX_RETRY}): {todo.label[:60]}", "warning")
+        else:
+            todo.state = "failed"
+            todo.result = output
+            with stdout_lock:
+                print(f"  {T()['warn']}✗ mission step FAILED:{RST} {todo.label[:70]}")
+
+
+def _mission_monitor(mission):
+    """Background dispatch loop (tesseractd.py:1678 async take semantics):
+    dispatch ready todos, harvest finished shards, complete structurally."""
+    try:
+        while mission.state == "active":
+            if mission.paused:
+                time.sleep(0.5)
+                continue
+            with _MISSION_LOCK:
+                for todo in mission.next_ready():
+                    todo.state = "running"
+                    sa = SubAgent(mission.step_prompt(todo),
+                                  max_steps=min(Config.GOAL_MAX_STEPS, Mission.MAX_TODO_STEPS))
+                    todo.shard = sa
+                    sa.run_async(quiet=True)
+                    with stdout_lock:
+                        t = T()
+                        print(f"  {t['accent']}▶ mission step dispatched [{sa.id}]:{RST} {todo.label[:64]}")
+                # harvest
+                for todo in list(mission.todos.values()):
+                    if todo.state == "running" and todo.shard is not None and todo.shard.done:
+                        ok = bool(todo.shard.result) and not todo.shard.error
+                        _mission_report(mission, todo, ok, todo.shard.result or todo.shard.error or "")
+                if mission.leaves_terminal() and not mission.any_running() and not mission.next_ready():
+                    mission.state = "complete"
                     break
-            if command_cancelled:
-                break
-        else:
-            clean = clean_response(resp)
-            if not resp or not resp.strip():
-                resp = "Continuing toward goal."
-                clean = "Continuing toward goal."
-            box(f"STEP {step} RESPONSE", clean, "bright")
-            history.append({"role": "assistant", "content": resp})
+            time.sleep(0.5)
+        # completion summary (tesseract.py:1618 structural completion)
+        failed = [t for t in mission.leaves() if t.state == "failed"]
+        summary_lines = [f"Goal: {mission.goal}"]
+        for label, output in mission.reports:
+            summary_lines.append(f"✓ {label} => {output[:300]}")
+        for todo in failed:
+            summary_lines.append(f"✗ {todo.label} => {todo.result[:300]}")
+        summary = "\n".join(summary_lines)
+        box("MISSION COMPLETE" if not failed else "MISSION COMPLETE (with failures)", summary, "bright")
+        _quantum.put(f"mission_{mission.id}_result", summary)
+        _quantum.put("mission_result", f"[Mission {mission.id}] {mission.goal[:80]}: complete"
+                     + (f" ({len(failed)} failed steps)" if failed else ""))
+        clear_active_goal()
+        global _ACTIVE_MISSION
+        with _MISSION_LOCK:
+            if _ACTIVE_MISSION is mission:
+                _ACTIVE_MISSION = None
+    except Exception as e:
+        viz.status(f"mission monitor failed: {e}", "error")
 
-        # Trim history if approaching context limit
-        if step > 3 and len(history) > 10:
-            history[:] = trim_history(history)
-        
-        time.sleep(Config.GOAL_STEP_DELAY)
 
-    if not completed and not cancelled:
-        print(f"\n{t['warn']} Reached max steps ({max_steps}). Goal may be incomplete.{RST}")
+def mission_take(goal, wait=False):
+    """Captain.take: create the mission, plan, dispatch, return instantly."""
+    global _ACTIVE_MISSION
+    t = T()
+    with _MISSION_LOCK:
+        if _ACTIVE_MISSION and _ACTIVE_MISSION.state == "active":
+            print(f"  {t['warn']}A mission is already active. /mission status | pause | interject | wait.{RST}")
+            return None
+        mission = Mission(goal)
+        _ACTIVE_MISSION = mission
+    labels = _mission_plan(goal)
+    for label in labels:
+        mission.add_todo(label)
+    set_active_goal(goal)
+    box("MISSION STARTED",
+        f"Goal: {goal}\nSteps ({len(labels)}):\n" +
+        "\n".join(f"  {i + 1}. {l}" for i, l in enumerate(labels)) +
+        "\n\nShards dispatch in parallel; completion is structural (all leaves done).",
+        "accent")
+    mission._monitor = threading.Thread(target=_mission_monitor, args=(mission,), daemon=True)
+    mission._monitor.start()
+    if wait:
+        while mission.state == "active":
+            time.sleep(0.5)
+    return mission
 
-    learn_session(len(history), len(cmd_log), goal_mode=True)
-    clear_active_goal()
-    print(f"\n{t['bright']}{'='*62}{RST}")
-    print(f" {t['bright']}GOAL SESSION END{RST}")
-    print(f" {t['dim']}Steps used: {step}/{max_steps}{RST}")
-    print(f" {t['dim']}Commands run: {len([c for c in cmd_log if c[0] == 'goal'])}{RST}")
-    print(f"{t['bright']}{'='*62}{RST}\n")
 
-    if len(history) > Config.MAX_HISTORY:
-        history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
-
-# ── Built-in Commands ────────────────────────────────────────
-
-# ── Dynamic command names ──────────────────────────────────
 def get_cmd_help():
     bold = "\x1b[1m"
     reset = "\x1b[0m"
@@ -8628,7 +8636,8 @@ def get_cmd_help():
 
  {bold}AI Interaction{reset}
    <anything>           Talk to AI - it runs commands automatically
-   /goal <task>         Autonomous multi-step goal mode
+   /mission <goal>      Orchestrated missions: plan decomposes the goal into steps,
+                        shards run as parallel subagents, completes structurally
    /extend <goal>       AI-generate/load a temporary plugin
    /extend permanent <g> AI-generate/load persistent plugin
 
@@ -8647,7 +8656,7 @@ def get_cmd_help():
    /autosave <sec>      Set auto-save interval (>=10s)
    /maxhistory <n>      Set max conversation history length
    /maxtokens <n>       Override max context tokens (>=10000)
-    /maxsteps <n>        Set max goal-mode steps
+    /maxsteps <n>        Set max mission steps (per-todo budget)
     /subagent-model [m]  Show/set default subagent model (/sam <m>)
     /rootpass <pw>       Set root password ($ROOT_PASS env for su/sudo)
     /verify-ssl [on|off] Toggle HTTPS certificate verification
@@ -9266,7 +9275,7 @@ def main():
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
     parser.add_argument("--version", "-V", action="store_true", help="Show version and exit")
     parser.add_argument("--temperature", type=float, help="AI temperature (0.0-2.0)")
-    parser.add_argument("--goal", "-g", help="Run in goal mode and exit")
+    parser.add_argument("--goal", "--mission", "-g", help="Run a mission headless and exit on completion")
     parser.add_argument("--set-timeout", type=int, help="Set command timeout in seconds and exit")
     parser.add_argument("--update", help="Update prism32 from a URL or file path and exit")
     parser.add_argument("--setup-runtime", action="store_true", help="Refresh startup memory, harness scan, and evolve baseline, then exit")
@@ -9275,7 +9284,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v6.11.1 — MegaDyne Systems")
+        print("Prism32 v6.12.0 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9391,12 +9400,14 @@ def main():
     cmd_log = []
 
     if args.goal:
-        cmd_goal(args.goal, history, cmd_log)
+        # Headless --goal: run the mission synchronously and exit on
+        # structural completion (all todo leaves done).
+        m = mission_take(args.goal, wait=True)
         print(SHOW)
         return
 
     print(f"  {t['dim']}Prism32 MDS terminal ready. Type /help for commands. Talk to the AI naturally.{RST}")
-    print(f"  {t['dim']}Prism32 by MegaDyne Systems. Use /goal <task> for autonomous multi-step work.{RST}\n")
+    print(f"  {t['dim']}Prism32 by MegaDyne Systems. Use /mission <goal> for orchestrated autonomous work.{RST}\n")
 
     # Set up persistent footer using terminal scroll regions
     update_terminal_size()
@@ -9956,8 +9967,44 @@ def main():
             print(f"  {t['bright']}+ Theme: {Config.THEME}{RST}\n")
             continue
 
-        if cmd == 'goal':
-            cmd_goal(args_str, history, cmd_log)
+        if cmd in ('mission', 'goal'):
+            # /mission — Tesseract-style orchestration: plan → parallel
+            # subagent shards → structural completion. REPL stays live.
+            _mparts = args_str.split(None, 1) if args_str else []
+            _sub = (_mparts[0].lower() if _mparts else "")
+            with _MISSION_LOCK:
+                _am = _ACTIVE_MISSION
+            if not args_str or _sub in ("status", "tree"):
+                if _am:
+                    print(_am.render())
+                else:
+                    print(f"  {t['dim']}No active mission. Start one: /mission <goal>{RST}")
+            elif _sub == "pause":
+                if _am:
+                    _am.paused = True
+                    print(f"  {t['bright']}+ Mission paused (running shards finish; new dispatch waits).{RST}")
+            elif _sub == "resume":
+                if _am:
+                    _am.paused = False
+                    print(f"  {t['bright']}+ Mission resumed.{RST}")
+            elif _sub == "interject" and len(_mparts) > 1:
+                if _am:
+                    _am.notes.append(f"user: {' '.join(_mparts[1:])[:300]}")
+                    print(f"  {t['bright']}+ Note added — it reaches the next dispatched shards.{RST}")
+                else:
+                    print(f"  {t['dim']}No active mission to interject into.{RST}")
+            elif _sub == "wait":
+                if _am:
+                    print(f"  {t['dim']}Blocking until mission {_am.id} completes...{RST}")
+                    while _am.state == "active":
+                        time.sleep(0.5)
+                    print(_am.render())
+            else:
+                if _am:
+                    print(f"  {t['warn']}Mission already active — /mission status first.{RST}")
+                else:
+                    mission_take(args_str)
+            print()
             continue
 
         if cmd == 'autosave':
