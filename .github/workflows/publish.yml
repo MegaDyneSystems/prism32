@@ -33,6 +33,7 @@ jobs:
 
   npm:
     name: Publish to npm
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +55,7 @@ jobs:
 
   homebrew:
     name: Update Homebrew tap
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -90,6 +92,7 @@ jobs:
 
   scoop:
     name: Update Scoop bucket
+    continue-on-error: true
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -121,3 +124,33 @@ jobs:
           git add .
           git diff --cached --quiet || git commit -m "prism32 ${VERSION}"
           git push
+
+  summary:
+    name: Release summary
+    runs-on: ubuntu-latest
+    needs: [pypi, npm, homebrew, scoop]
+    if: always()
+    steps:
+      - name: Report channel status
+        run: |
+          echo "pypi:     ${{ needs.pypi.result }}"
+          echo "npm:      ${{ needs.npm.result }}"
+          echo "homebrew: ${{ needs.homebrew.result }}"
+          echo "scoop:    ${{ needs.scoop.result }}"
+          if [ "${{ needs.pypi.result }}" != "success" ]; then
+            echo
+            echo "::error::PyPI publish failed — configure trusted publishing at"
+            echo "  pypi.org > prism32 project > Publishing > Add trusted publisher:"
+            echo "    owner: MegaDyneSystems  repo: prism32"
+            echo "    workflow: .github/workflows/publish.yml (or publish.yml)"
+            echo "    environment: release"
+          fi
+          if [ "${{ needs.npm.result }}" != "success" ]; then
+            echo
+            echo "::warning::npm publish failed — add the NPM_TOKEN repo secret."
+          fi
+          if [ "${{ needs.homebrew.result }}" != "success" ] || [ "${{ needs.scoop.result }}" != "success" ]; then
+            echo
+            echo "::warning::homebrew/scoop tap push failed — add the GH_PAT repo secret"
+            echo "  (contents:write on MegaDyneSystems/homebrew-prism32 + scoop-prism32)."
+          fi
