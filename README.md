@@ -7,13 +7,27 @@ It is designed for modern PC's and older machines: no Node.js, no browser runtim
 
 This README is the full operator guide. The GitHub front page shows the same document.
 
+## What's New In 7.1
+
+Prism32 v7.1.0 rebuilds `/provider` as a fully interactive provider manager. Upgrading from 7.0 is seamless — config, sessions, memory, and provider keys carry over.
+
+**`/provider` is now a numbered picker.** Every provider — built-in, user-added, and *live-detected local servers* — appears in one numbered list with its key state and URL. Select a number to act on it: **switch** (makes it the active provider, fetching a model from its catalog if none is saved), **use for subagents**, **edit**, **test**, or **remove/reset**. No more memorizing subcommand syntax.
+
+**Local server auto-detection.** Opening `/provider` TCP-probes the standard ports for llama.cpp (8080), Ollama (11434), LM Studio (1234), vLLM (8000), and Jan (1337). A server found there that isn't already configured shows up as `● detected — not configured yet`; selecting it and pressing Enter configures it *and* switches to it. Probes are short-timeout, so nothing running means nothing shows and the menu stays instant.
+
+**Prefilled edit wizard.** Editing a provider prompts `1/3 API base URL [current]` → `2/3 API key [pySk…f9Qw]` → `3/3 Default model [current]` — **Enter keeps each value**, typing replaces it, `-` clears the key. Built-ins are edited as overrides; removing one resets it to factory defaults instead of deleting it.
+
+**Template add wizard.** `/provider add` (no args) now starts from a numbered template list (llama.cpp, Ollama, LM Studio, vLLM, Jan, custom) with prefilled URLs — a live local server matching the template wins as the default — then key, live test, default-model pick, and an optional immediate switch.
+
+`/provider <name>` jumps straight to that provider's action menu. The direct subcommands (`add <name> <base> [model]`, `api <name> <url>`, `key <name> <key>`, `test [name]`, `rm <name>`, `list`) all still work.
+
 ## What's New In 7.0
 
 Prism32 v7.0.0 is the multi-provider + mission release. Upgrading from 6.x is seamless — config, sessions, memory, and provider keys carry over.
 
 **Unified multi-provider `/model`.** `/model` now fetches every configured provider's catalog into one browseable list. Models are tagged `[provider]`, and a numbered pick assigns the model to the **main agent** or the **subagent** slot. Mixing providers is first-class: run a cloud reasoning model as your main agent and a local qwen as your subagent, picked from the same screen.
 
-**`/provider` manages the registry.** Provider switching moved into `/model`; `/provider` handles configuration only: `add <name> <base> [model]` (no args = interactive wizard: base → key → live reachability/auth test → model pick), `rm <name>`, `api <name> <url>` (fix a provider's base), `key <name> <key>` (per-provider keys, persisted under `providers.<name>.api_key`), `test [name]` (3-step diagnostic: reachability → auth → model-in-catalog), and `list`. A new built-in `llamacpp-remote` provider targets remote llama.cpp servers (no default host — point it with `/provider api`). Round out subagent routing with `/set subagent_provider` and `/set subagent_model`.
+**`/provider` manages the registry.** Direct subcommands for configuration: `add <name> <base> [model]` (no args = template wizard), `rm <name>`, `api <name> <url>` (fix a provider's base), `key <name> <key>` (per-provider keys, persisted under `providers.<name>.api_key`), `test [name]` (3-step diagnostic: reachability → auth → model-in-catalog), and `list`. A built-in `llamacpp-remote` provider targets remote llama.cpp servers (no default host — point it with `/provider api`). Round out subagent routing with `/set subagent_provider` and `/set subagent_model`.
 
 **`/mission` replaces `/goal`.** A planner decomposes your goal into 3-6 steps, and each ready step runs as a PARALLEL subagent shard — siblings run concurrently, children wait for parents. If the goal is ambiguous, the planner first asks the operator 1-3 clarifying questions. Completion is STRUCTURAL: all leaf steps done (failed steps requeue once, then the leaf fails and the mission continues) — no more `GOAL COMPLETE` magic phrase. Every shard receives mission context (completed steps + team notes). The REPL stays live — `/mission` returns instantly, with `/mission status | pause | resume | interject <note> | wait` for control. Results land in quantum context (`mission_<id>_result`). `--goal`/`--mission` runs headless, `/maxsteps` sets the per-todo step budget, and `/goal` still works as an alias.
 
@@ -125,8 +139,8 @@ Most-used first commands inside Prism32:
 
 ```text
 /help                 Show all commands
-/provider list        Show configured providers
-/provider add         Add a provider (interactive wizard)
+/provider             Interactive provider manager (switch/edit/test by number)
+/provider add         Add a provider (template wizard with live detection)
 /provider key <name> <key>
                       Set a provider's API key (persisted)
 /model                Browse every provider's models; assign main/subagent
@@ -639,8 +653,8 @@ All package managers install the same `prism32` command. After installation, run
 Recommended first commands:
 
 ```text
-/provider list        Show configured providers and their keys/bases
-/provider add         Interactive add wizard: base → key → live test → model pick
+/provider             Interactive manager: pick by number → switch/edit/test
+/provider add         Template wizard: preset → name → key → live test → model
 /model                Browse every provider's models; assign main/subagent
 /config               Show active config
 /memory path

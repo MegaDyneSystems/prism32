@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.0.0 - MegaDyne Systems Terminal Agent
+Prism32 v7.1.0 - MegaDyne Systems Terminal Agent
 Green phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -4278,6 +4278,10 @@ class Config:
             })
             if entry.get("api_key"):
                 PROVIDER_REGISTRY[name]["default_key"] = entry["api_key"]
+            elif api_key is not None:
+                # Explicitly set (possibly empty) key: an empty value means
+                # "cleared" — drop the stale in-memory key too.
+                PROVIDER_REGISTRY[name].pop("default_key", None)
             return True
         except Exception as e:
             print(f"  Provider save failed: {e}")
@@ -4853,6 +4857,39 @@ register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https
 register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-chat", cheap_model="deepseek-chat", description="DeepSeek V3 / R1 (requires API key)", cache_support="deepseek_auto")
 register_provider("llamacpp-remote", display_name="llama.cpp (remote server)", api_base="", model="", description="Remote llama.cpp server (OpenAI-compatible). Set its address first: /provider api llamacpp-remote http://<host>:8080/v1", cache_support=None)
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
+
+# Factory defaults for every built-in provider, snapshotted AFTER registrations
+# above. /provider uses this to (a) render the "built-in" badge and (b) make
+# "remove" on a built-in mean "reset my edits back to factory" instead of
+# deleting it from the picker.
+_BUILTIN_PROVIDER_DEFAULTS = {
+    _pid: dict(_cfg) for _pid, _cfg in PROVIDER_REGISTRY.items()
+}
+
+# Local OpenAI-compatible servers auto-detected by /provider. Short TCP
+# timeouts keep a dead port at ~0.3s per probe, so opening the picker with
+# nothing running stays instant.
+LOCAL_SERVER_PROBES = [
+    ("llamacpp", "llama.cpp server", "http://127.0.0.1:8080/v1"),
+    ("ollama", "Ollama", "http://127.0.0.1:11434/v1"),
+    ("lmstudio", "LM Studio", "http://127.0.0.1:1234/v1"),
+    ("vllm", "vLLM", "http://127.0.0.1:8000/v1"),
+    ("jan", "Jan", "http://127.0.0.1:1337/v1"),
+]
+
+def detect_local_servers(timeout=0.35, probes=None):
+    """Quickly TCP-probe common local OpenAI-compatible servers.
+
+    Returns a list of {"suggest", "label", "api_base"} dicts for every port
+    that accepts a connection. Pure socket check — no HTTP, no keys — so it
+    works against any server type and costs nothing when nothing listens.
+    """
+    out = []
+    for suggest, label, base in (probes if probes is not None else LOCAL_SERVER_PROBES):
+        ok, _why = check_endpoint_reachable(base, timeout=timeout)
+        if ok:
+            out.append({"suggest": suggest, "label": label, "api_base": base})
+    return out
 
 
 _T_CACHE = {}
@@ -6244,7 +6281,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.0.0 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.1.0 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6255,12 +6292,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.0.0 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.1.0 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.0.0 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.1.0 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -8700,7 +8737,8 @@ def get_cmd_help():
 
  {bold}Configuration{reset}
    /agentname <name>    Set the name shown before assistant responses
-   /provider           Manage providers (add wizard | api | key | test | rm | list)
+   /provider           Provider manager: pick by number → switch/edit/test
+                       (also: add | api | key | test | rm | list)
     /set api_base <url>  Set a custom API base URL (preserved when switching providers)
     /set api_base reset  Revert API base to the current provider's default
     /set subagent_model <m>  Use a cheaper/faster model for subagents (clear = main)
@@ -9341,7 +9379,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.0.0 — MegaDyne Systems")
+        print("Prism32 v7.1.0 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9700,9 +9738,8 @@ def main():
             continue
 
         if cmd in ('providers', 'provider'):
-            # /provider manages the provider REGISTRY (add/fix/remove/list).
-            # Switching models/providers happens in /model — it picks the
-            # provider for you so requests always carry the right base+key.
+            # /provider: interactive manager (numbered picker → switch /
+            # edit / test / remove) plus direct subcommands for muscle memory.
             if args_str:
                 _p_parts = args_str.split()
                 subcmd = _p_parts[0].lower()
@@ -9719,84 +9756,13 @@ def main():
                         print(f"  {t['bright']}+ Provider added: {_name} → {_base}{RST}")
                         print(f"  {t['dim']}Optional next: /provider key {_name} <api-key>{RST}")
                     else:
-                        # Interactive wizard: name → base → key → live test →
-                        # model pick. One flow replaces three commands.
-                        print(f"\n  {t['bright']}Add a provider (wizard):{RST}")
-                        try:
-                            _w_name = input(rl_prompt("  Provider name (e.g. myserver): ")).strip()
-                            if not _w_name:
-                                raise KeyboardInterrupt
-                            _w_base = input(rl_prompt("  API base URL (http://host:port/v1): ")).strip()
-                            if not _w_base:
-                                raise KeyboardInterrupt
-                            Config.set_provider_entry(_w_name, api_base=_w_base)
-                            print(f"  {t['bright']}+ Saved: {_w_name} → {_w_base}{RST}")
-                            _w_key = input(rl_prompt("  API key (Enter to skip): ")).strip()
-                            if _w_key:
-                                Config.set_provider_entry(_w_name, api_key=_w_key)
-                                print(f"  {t['bright']}+ Key stored: {mask_key(_w_key)}{RST}")
-                            # Verify live: TCP + auth + catalog fetch
-                            _tprov = PROVIDER_REGISTRY.get(_w_name, {})
-                            _base, _key, _ = resolve_runtime(_w_name)
-                            print(f"  {t['dim']}Testing {_w_base} ...{RST}")
-                            _ok, _why = check_endpoint_reachable(_base, timeout=5)
-                            if not _ok:
-                                print(f"  {t['warn']}⚠ Reachability: FAILED ({_why}){RST}")
-                                print(f"  {t['dim']}Saved anyway — retest later with: /provider test {_w_name}{RST}")
-                            else:
-                                print(f"  {t['dim']}Reachability: OK{RST}")
-                                try:
-                                    _ms = fetch_models_from(_base, _key, timeout=15)
-                                    print(f"  {t['bright']}+ Auth + models: OK ({len(_ms)} models){RST}")
-                                    if _ms:
-                                        for _i, _m in enumerate(_ms[:10], 1):
-                                            print(f"    {t['primary']}{_i:>2}.{RST} {_m['id']}")
-                                        if len(_ms) > 10:
-                                            print(f"    {t['dim']}… and {len(_ms) - 10} more (see /model){RST}")
-                                        _pick = input(rl_prompt(f"  Default model (1-{min(10, len(_ms))}, Enter=skip): ")).strip()
-                                        if _pick.isdigit() and 1 <= int(_pick) <= min(10, len(_ms)):
-                                            Config.set_provider_entry(_w_name, model=_ms[int(_pick) - 1]["id"])
-                                            print(f"  {t['bright']}+ Default model: {_ms[int(_pick) - 1]['id']}{RST}")
-                                except Exception as _e:
-                                    print(f"  {t['warn']}⚠ Model list failed: {str(_e)[:100]}{RST}")
-                                    print(f"  {t['dim']}If 401: /provider key {_w_name} <key>{RST}")
-                            print(f"  {t['dim']}Models are picked per-slot with /model{RST}")
-                        except (EOFError, KeyboardInterrupt):
-                            print(f"\n  {t['dim']}Cancelled.{RST}")
+                        # Template wizard: numbered presets with prefilled
+                        # URLs, live local detection, key, default-model pick.
+                        cmd_provider_add_interactive()
                 elif subcmd == 'test':
                     # /provider test [name] — full connectivity diagnostic
                     _tname = _p_parts[1] if len(_p_parts) > 1 else Config.PROVIDER
-                    _base, _key, _mdl = resolve_runtime(_tname)
-                    print(f"\n  {t['bright']}Provider test: {_tname}{RST}")
-                    print(f"  Base: {_base}   Key: {mask_key(_key)}   Model: {_mdl}")
-                    if not _base:
-                        print(f"  {t['warn']}No API base set for '{_tname}'. Fix: /provider api {_tname} <url>{RST}")
-                        continue
-                    _ok, _why = check_endpoint_reachable(_base, timeout=5)
-                    if not _ok:
-                        print(f"  1. Reachability: {t['warn']}FAIL — {_why}{RST}")
-                        print(f"  {t['dim']}Is the server running? For remote llama.cpp: /provider api {_tname} http://<host>:8080/v1{RST}")
-                        continue
-                    print(f"  1. Reachability: {t['bright']}OK{RST}")
-                    try:
-                        _ms = fetch_models_from(_base, _key, timeout=15)
-                        print(f"  2. Auth + models: {t['bright']}OK ({len(_ms)} models){RST}")
-                        _has_cur = any(m["id"] == _mdl for m in _ms) if _mdl else None
-                        if _mdl and not _has_cur:
-                            print(f"  3. Model check: {t['warn']}'{_mdl}' not in catalog{RST}")
-                            print(f"  {t['dim']}Pick a real one: /model{RST}")
-                        elif _mdl:
-                            print(f"  3. Model check: {t['bright']}OK{RST}")
-                        else:
-                            print(f"  3. Model check: {t['dim']}(no model set){RST}")
-                    except urllib.error.HTTPError as _he:
-                        print(f"  2. Auth + models: {t['warn']}HTTP {_he.code}{RST}")
-                        if _he.code == 401:
-                            print(f"  {t['dim']}Key rejected (sent: {mask_key(_key)}). Fix: /provider key {_tname} <key>{RST}")
-                        else:
-                            print(f"  {t['dim']}{_he.read().decode(errors='replace')[:120]}{RST}")
-                    except Exception as _e:
-                        print(f"  2. Auth + models: {t['warn']}{str(_e)[:100]}{RST}")
+                    cmd_provider_test(_tname)
                 elif subcmd in ('rm', 'remove', 'delete'):
                     if len(_p_parts) > 1:
                         cmd_provider_remove(_p_parts[1])
@@ -9810,7 +9776,7 @@ def main():
                         _pname, _purl = _p_parts[1], _p_parts[2]
                         if not _pname:
                             print(f"  {t['dim']}Usage: provider api <name> <url>{RST}")
-                        elif True:
+                        else:
                             Config.set_provider_entry(_pname, api_base=_purl)
                             print(f"  {t['bright']}+ {_pname} API base: {_purl}{RST}")
                     else:
@@ -9845,13 +9811,15 @@ def main():
                         print(f"  {t['dim']}Set: provider key <name> <key>  (per-provider) | provider key <key>  (main){RST}")
                 elif subcmd in ('list', 'ls'):
                     cmd_provider_list()
+                elif subcmd in PROVIDER_REGISTRY:
+                    # /provider <name> — jump straight to that provider's menu
+                    _provider_detail(subcmd)
                 else:
-                    print(f"  {t['dim']}Provider switching moved to {t['bright']}/model{RST}{t['dim']} — it lists every provider's models")
-                    print(f"  {t['dim']}and assigns the right base+key per pick. /provider manages the registry:{RST}")
-                    print(f"  {t['dim']}  provider add <name> <base> [model]   provider rm <name>{RST}")
-                    print(f"  {t['dim']}  provider api <name> <url>            provider key <name> <key>{RST}")
+                    print(f"  {t['dim']}No provider or subcommand '{subcmd}'.{RST}")
+                    print(f"  {t['dim']}Pick by number, switch, edit, test: {t['bright']}/provider{RST}")
+                    print(f"  {t['dim']}  provider add | api <name> <url> | key <name> <key> | test | rm | list{RST}")
             else:
-                cmd_provider_list()
+                cmd_provider_menu()
             print()
             continue
 
@@ -11781,18 +11749,38 @@ def cmd_provider_list():
     print(f" {t['dim']}{'─' * 60}{RST}")
     print(f" {t['dim']}* = current provider  |  Pick models (main/subagent) with {t['bright']}/model{RST}")
     print()
-    print(f" {t['bright']}How to configure providers:{RST}")
-    print(f"  {t['dim']}Switch model/provider ......... {t['bright']}/model{RST}{t['dim']} (numbered picker, assigns main or subagent){RST}")
-    print(f"  {t['dim']}Add a provider ............... {t['bright']}/provider add <name> <api-base> [model]{RST}")
-    print(f"  {t['dim']}Fix a provider's URL ......... {t['bright']}/provider api <name> <url>{RST}")
-    print(f"  {t['dim']}Set a provider's API key ...... {t['bright']}/provider key <name> <key>{RST}")
-    print(f"  {t['dim']}Remove a provider ............ {t['bright']}/provider rm <name>{RST}")
+    print(f" {t['bright']}The interactive manager does all of this by number:{RST}")
+    print(f"  {t['dim']}Switch / edit / test / remove . {t['bright']}/provider{RST}{t['dim']} (Enter picks, s=switch, e=edit){RST}")
+    print(f"  {t['dim']}Add a provider (wizard) ....... {t['bright']}/provider add{RST}")
+    print(f"  {t['dim']}Direct: /provider add <name> <api-base> [model] | api <name> <url> |"
+          f" key <name> <key>{RST}")
+    print(f"  {t['dim']}        /provider test <name> | rm <name> | <name> (open its menu){RST}")
 
 def cmd_provider_remove(name):
-    """Remove a provider from the registry and config.json."""
+    """Remove a provider — or, for built-ins, reset edits to factory defaults."""
     t = T()
-    if name in ("local", "ollama"):
-        viz.status("Built-in local providers can't be removed", "warning")
+    if name not in PROVIDER_REGISTRY:
+        viz.status(f"Unknown provider: {name}", "warning")
+        return
+    if name in _BUILTIN_PROVIDER_DEFAULTS:
+        # Built-in: the entry itself stays; drop the user's saved override
+        # and restore the factory registration.
+        Config.remove_provider_entry(name)
+        PROVIDER_REGISTRY[name] = dict(_BUILTIN_PROVIDER_DEFAULTS[name])
+        if Config.SUBAGENT_PROVIDER == name:
+            Config.SUBAGENT_PROVIDER = ""
+        if name == Config.PROVIDER:
+            # Active provider: its base/key revert to factory values too.
+            reg = PROVIDER_REGISTRY[name]
+            base = reg.get("api_base") or ""
+            if base:
+                Config.API_BASE = base
+                Config.CUSTOM_API_BASE = False
+            _rk = (reg.get("default_key") or "").strip()
+            if _rk:
+                Config.API_KEY = _rk
+            Config.save_config()
+        viz.status(f"{name}: edits reset to built-in defaults", "success")
         return
     was_current = (name == Config.PROVIDER)
     Config.remove_provider_entry(name)
@@ -11800,6 +11788,362 @@ def cmd_provider_remove(name):
         Config.PROVIDER = ""
         print(f"   {t['warn']}Removed your active provider — pick a model via /model{RST}")
     viz.status(f"Provider removed: {name}", "success")
+
+
+def _switch_main_provider(name):
+    """Make `name` the active provider, wiring base+key the same way /model does."""
+    t = T()
+    reg = PROVIDER_REGISTRY.get(name) or {}
+    model = (reg.get("model") or "").strip()
+    if not model:
+        # No default model on record — try the live catalog so switching
+        # never lands the user on a provider with nothing selected.
+        base, key, _m = resolve_runtime(name)
+        try:
+            _ms = fetch_models_from(base, key, timeout=10)
+            if _ms:
+                model = _ms[0]["id"]
+                print(f"  {t['dim']}No saved model for {name} — taking first from catalog: {model}{RST}")
+        except Exception:
+            pass
+    if model:
+        _apply_model_selection(name, model, "main")
+    else:
+        # Server unreachable AND no saved model: still switch the wiring,
+        # the model gets picked once it's up (via /model).
+        Config.PROVIDER = name
+        base = reg.get("api_base") or ""
+        if base and base != Config.API_BASE:
+            Config.API_BASE = base
+            Config.CUSTOM_API_BASE = False
+        _rk = (reg.get("default_key") or "").strip()
+        if _rk:
+            Config.API_KEY = _rk
+            Config.SESSION_ONLY_KEYS.discard("api_key")
+        Config.save_config()
+        print(f"  {t['bright']}+ Provider switched: {name}{RST}")
+        print(f"  {t['warn']}Its catalog is unreachable — pick a model with /model once it's up.{RST}")
+
+
+def _dedupe_provider_name(base_name):
+    """Return base_name, or base_name2/3/… if that key is already taken."""
+    if base_name not in PROVIDER_REGISTRY:
+        return base_name
+    i = 2
+    while f"{base_name}{i}" in PROVIDER_REGISTRY:
+        i += 1
+    return f"{base_name}{i}"
+
+
+def cmd_provider_test(name):
+    """Full connectivity diagnostic for one provider (shared by menu + CLI)."""
+    t = T()
+    _base, _key, _mdl = resolve_runtime(name)
+    print(f"\n  {t['bright']}Provider test: {name}{RST}")
+    print(f"  Base: {_base}   Key: {mask_key(_key)}   Model: {_mdl}")
+    if not _base:
+        print(f"  {t['warn']}No API base set for '{name}'. Fix: /provider → edit{RST}")
+        return
+    _ok, _why = check_endpoint_reachable(_base, timeout=5)
+    if not _ok:
+        print(f"  1. Reachability: {t['warn']}FAIL — {_why}{RST}")
+        print(f"  {t['dim']}Is the server running? Start it, then /provider → test again.{RST}")
+        return
+    print(f"  1. Reachability: {t['bright']}OK{RST}")
+    try:
+        _ms = fetch_models_from(_base, _key, timeout=15)
+        print(f"  2. Auth + models: {t['bright']}OK ({len(_ms)} models){RST}")
+        _has_cur = any(m["id"] == _mdl for m in _ms) if _mdl else None
+        if _mdl and not _has_cur:
+            print(f"  3. Model check: {t['warn']}'{_mdl}' not in catalog{RST}")
+        elif _mdl:
+            print(f"  3. Model check: {t['bright']}OK{RST}")
+        else:
+            print(f"  3. Model check: {t['dim']}(no model set){RST}")
+    except urllib.error.HTTPError as _he:
+        print(f"  2. Auth + models: {t['warn']}HTTP {_he.code}{RST}")
+        if _he.code == 401:
+            print(f"  {t['dim']}Key rejected (sent: {mask_key(_key)}). Fix: /provider → edit{RST}")
+        else:
+            print(f"  {t['dim']}{_he.read().decode(errors='replace')[:120]}{RST}")
+    except Exception as _e:
+        print(f"  2. Auth + models: {t['warn']}{str(_e)[:100]}{RST}")
+
+
+def cmd_provider_edit(name, input_fn=input):
+    """Prefilled edit wizard: every prompt shows the current value in
+    [brackets]; Enter keeps it, typing replaces it, '-' clears (key only)."""
+    t = T()
+    reg = PROVIDER_REGISTRY.get(name) or {}
+    base = (reg.get("api_base") or "").strip()
+    key = (reg.get("default_key") or "").strip()
+    model = (reg.get("model") or "").strip()
+    builtin = name in _BUILTIN_PROVIDER_DEFAULTS
+
+    print(f"\n  {t['bright']}Edit provider: {name}{RST}"
+          + (f" {t['dim']}(built-in — edits are saved as an override){RST}" if builtin else ""))
+    print(f"  {t['dim']}Enter keeps the [bracketed] value. Type to replace. Key: '-' clears.{RST}")
+    try:
+        nb = input_fn(rl_prompt(f"  1/3 API base URL [{base or 'unset'}]: ")).strip()
+        if nb and nb != base:
+            base = nb
+
+        nk = input_fn(rl_prompt(
+            f"  2/3 API key [{mask_key(key) if key else 'unset'}]: ")).strip()
+        key_changed = bool(nk)
+        if nk == "-":
+            key = ""
+        elif nk:
+            key = nk
+
+        nm = input_fn(rl_prompt(f"  3/3 Default model [{model or 'unset'}]: ")).strip()
+        if nm and nm != model:
+            model = nm
+
+        Config.set_provider_entry(name,
+                                  api_base=base or None,
+                                  model=model or None,
+                                  api_key=key if key_changed else None)
+        print(f"  {t['bright']}+ Saved: {name}{RST}")
+        print(f"    {t['dim']}base={base or 'unset'}  key={mask_key(key) if key else 'none'}"
+              f"  model={model or 'unset'}{RST}")
+        _test = input_fn(rl_prompt("  Test now? [Y/n]: ")).strip().lower()
+        if _test in ("", "y", "yes"):
+            cmd_provider_test(name)
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {t['dim']}Cancelled — nothing saved.{RST}")
+
+
+def cmd_provider_add_interactive(input_fn=input):
+    """Add wizard: pick a template by number, confirm the prefilled
+    name / URL / key (Enter keeps defaults), test, pick default model."""
+    t = T()
+    presets = [
+        ("llama.cpp (local or LAN)", "llamacpp", "http://127.0.0.1:8080/v1", ""),
+        ("Ollama", "ollama", "http://127.0.0.1:11434/v1", ""),
+        ("LM Studio", "lmstudio", "http://127.0.0.1:1234/v1", ""),
+        ("vLLM", "vllm", "http://127.0.0.1:8000/v1", ""),
+        ("Jan", "jan", "http://127.0.0.1:1337/v1", ""),
+        ("OpenAI-compatible (custom URL)", "custom", "http://localhost:8080/v1", ""),
+    ]
+    print(f"\n  {t['bright']}Add a provider — pick a template:{RST}")
+    for _i, (_label, _sug, _url, _mdl) in enumerate(presets, 1):
+        print(f"   {t['primary']}{_i}.{RST} {_label:<34} {t['dim']}{_url}{RST}")
+    try:
+        _pick = input_fn(rl_prompt(f"  Template 1-{len(presets)} (Enter=1): ")).strip()
+        if not _pick:
+            _pick = "1"
+        if not (_pick.isdigit() and 1 <= int(_pick) <= len(presets)):
+            print(f"  {t['dim']}Cancelled.{RST}")
+            return
+        _label, _sug, _url, _mdl = presets[int(_pick) - 1]
+
+        # A live local server matching this template wins as the default URL.
+        _det = detect_local_servers()
+        _live = next((d["api_base"] for d in _det
+                      if d["suggest"] == _sug), "")
+        _default_url = _live or _url
+        if _live:
+            print(f"  {t['bright']}+ Detected a live {_label} at {_live}{RST}")
+
+        _name = _dedupe_provider_name(_sug)
+        _name = input_fn(rl_prompt(f"  Provider name [{_name}]: ")).strip() or _name
+        _url = input_fn(rl_prompt(f"  API base URL [{_default_url}]: ")).strip() or _default_url
+        _key = input_fn(rl_prompt("  API key (Enter to skip): ")).strip()
+        Config.set_provider_entry(_name, api_base=_url, model=_mdl or None,
+                                  api_key=_key or None)
+        print(f"  {t['bright']}+ Saved: {_name} → {_url}{RST}")
+
+        # Live check + default model pick
+        _ok, _why = check_endpoint_reachable(_url, timeout=5)
+        if not _ok:
+            print(f"  {t['warn']}⚠ Server not reachable ({_why}){RST}")
+            print(f"  {t['dim']}Saved anyway — /provider → test once it's up.{RST}")
+        else:
+            try:
+                _ms = fetch_models_from(_url, _key or None, timeout=15)
+                print(f"  {t['bright']}+ Auth + models: OK ({len(_ms)} models){RST}")
+                _choice = ""
+                if _ms:
+                    for _i, _m in enumerate(_ms[:10], 1):
+                        print(f"    {t['primary']}{_i:>2}.{RST} {_m['id']}")
+                    if len(_ms) > 10:
+                        print(f"    {t['dim']}… and {len(_ms) - 10} more{RST}")
+                    _choice = input_fn(rl_prompt(
+                        f"  Default model (1-{min(10, len(_ms))}, Enter={_ms[0]['id']}): ")).strip()
+                    if _choice.isdigit() and 1 <= int(_choice) <= min(10, len(_ms)):
+                        _mdl = _ms[int(_choice) - 1]["id"]
+                    else:
+                        _mdl = _ms[0]["id"]
+                    Config.set_provider_entry(_name, model=_mdl)
+                    print(f"  {t['bright']}+ Default model: {_mdl}{RST}")
+            except Exception as _e:
+                print(f"  {t['warn']}⚠ Model list failed: {str(_e)[:100]}{RST}")
+                print(f"  {t['dim']}If 401: /provider → edit → set the key{RST}")
+
+        _sw = input_fn(rl_prompt(f"  Switch to {_name} now? [Y/n]: ")).strip().lower()
+        if _sw in ("", "y", "yes"):
+            _switch_main_provider(_name)
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {t['dim']}Cancelled.{RST}")
+
+
+def _base_endpoint(url):
+    """Comparable (host, port) for an API base. localhost / 127.0.0.1 / ::1
+    normalize to the same host so a detection never duplicates a registry
+    entry that spell the loop address differently."""
+    try:
+        u = urllib.parse.urlparse(url if "//" in url else f"http://{url}")
+        host = (u.hostname or "127.0.0.1").lower()
+        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            host = "127.0.0.1"
+        return (host, u.port or (443 if u.scheme == "https" else 80))
+    except Exception:
+        return (url, None)
+
+
+def _provider_menu_rows(detected=None):
+    """Rows for the /provider picker: every registry entry first (active
+    highlighted), then detected-but-unregistered local servers."""
+    rows = []
+    for name in sorted(PROVIDER_REGISTRY):
+        reg = PROVIDER_REGISTRY[name] or {}
+        rows.append({
+            "name": name,
+            "label": reg.get("display_name") or name,
+            "base": (reg.get("api_base") or "").strip(),
+            "key": (reg.get("default_key") or ""),
+            "model": (reg.get("model") or ""),
+            "builtin": name in _BUILTIN_PROVIDER_DEFAULTS,
+            "current": name == Config.PROVIDER,
+            "detected_new": False,
+        })
+    seen_bases = {_base_endpoint(r["base"]) for r in rows if r["base"]}
+    for d in (detected or []):
+        if _base_endpoint(d["api_base"]) in seen_bases:
+            continue  # already configurable through a registry entry
+        seen_bases.add(_base_endpoint(d["api_base"]))
+        rows.append({
+            "name": d["suggest"],
+            "label": f"{d['label']} @ {normalize_api_base(d['api_base'])}",
+            "base": d["api_base"],
+            "key": "", "model": "", "builtin": False,
+            "current": False, "detected_new": True,
+            "suggest": _dedupe_provider_name(d["suggest"]),
+        })
+    return rows
+
+
+def _provider_detail(name, input_fn=input):
+    """Action menu for one selected provider."""
+    t = T()
+    while True:
+        reg = PROVIDER_REGISTRY.get(name) or {}
+        if not reg and name not in PROVIDER_REGISTRY:
+            return  # removed along the way
+        base = (reg.get("api_base") or "").strip()
+        key = (reg.get("default_key") or "")
+        model = (reg.get("model") or "")
+        cur = "  " if name != Config.PROVIDER else f"{t['bright']}→{RST}"
+        print(f"\n  {t['bright']}{name}{RST} {t['dim']}— {reg.get('display_name', '')}{RST} {cur}")
+        print(f"    {t['dim']}base: {base or 'unset'}   key: {mask_key(key) if key else 'none'}"
+              f"   model: {model or 'none'}"
+              f"{'   [built-in]' if name in _BUILTIN_PROVIDER_DEFAULTS else ''}{RST}")
+        try:
+            c = input_fn(rl_prompt(
+                "  [s]witch to it  [u]se for subagents  [e]dit  [t]est  "
+                "[r]emove/reset  [b]ack: ")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if c in ("b", "q", ""):
+            return
+        if c == "s":
+            _switch_main_provider(name)
+            return
+        if c == "u":
+            _mdl = (reg.get("model") or "").strip()
+            if not _mdl:
+                try:
+                    _b, _k, _ = resolve_runtime(name)
+                    _ms = fetch_models_from(_b, _k, timeout=10)
+                    if _ms:
+                        _mdl = _ms[0]["id"]
+                except Exception:
+                    pass
+            if _mdl:
+                _apply_model_selection(name, _mdl, "subagent")
+            else:
+                Config.SUBAGENT_PROVIDER = name
+                Config.save_config()
+                print(f"  {t['bright']}+ Subagent provider: {name}{RST}")
+                print(f"  {t['warn']}No model known yet — /model to pick one.{RST}")
+            return
+        if c == "e":
+            cmd_provider_edit(name, input_fn=input_fn)
+        elif c == "t":
+            cmd_provider_test(name)
+        elif c == "r":
+            cmd_provider_remove(name)
+            if name not in PROVIDER_REGISTRY:
+                return  # deleted — fall back to the picker
+
+
+def cmd_provider_menu(input_fn=input, detect_fn=detect_local_servers):
+    """Interactive /provider: pick by number, then switch / edit / test /
+    remove. Local servers are auto-detected and offered for one-keystroke
+    setup."""
+    t = T()
+    while True:
+        detected = []
+        try:
+            detected = detect_fn() or []
+        except Exception:
+            pass
+        rows = _provider_menu_rows(detected)
+        print(f"\n {t['bright']}MODEL PROVIDERS{RST}"
+              f" {t['dim']}— current: {Config.PROVIDER or 'none'}{RST}")
+        print(f" {'─' * 62}")
+        for _i, r in enumerate(rows, 1):
+            cur = f"{t['bright']}*{RST}" if r["current"] else " "
+            extra = ""
+            if r.get("detected_new"):
+                extra = f"  {t['warn']}● detected — not configured yet{RST}"
+            elif r["builtin"]:
+                extra = f"  {t['dim']}[built-in]{RST}"
+            keystate = mask_key(r["key"]) if r["key"] else "-"
+            print(f" {cur} {t['primary']}{_i:>2}.{RST} {t['bright']}{r['name']:<14}{RST}"
+                  f" {t['dim']}{keystate:>11}  {r['base'] or '(no url)'}{RST}{extra}")
+        print(f" {'─' * 62}")
+        try:
+            c = input_fn(rl_prompt(
+                f"  Select 1-{len(rows)}, [a]dd, [r]escan, [q]uit: ")).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if c in ("q", "quit", ""):
+            return
+        if c == "a":
+            cmd_provider_add_interactive(input_fn=input_fn)
+            continue
+        if c == "r":
+            continue  # loop re-probes
+        if not c.isdigit() or not (1 <= int(c) <= len(rows)):
+            print(f"  {t['dim']}Choose a number 1-{len(rows)}, a, r, or q.{RST}")
+            continue
+        row = rows[int(c) - 1]
+        if row.get("detected_new"):
+            _name = row["suggest"]
+            print(f"\n  {t['bright']}{row['label']}{RST}")
+            try:
+                _ans = input_fn(rl_prompt(
+                    "  Configure & switch to it now? [Y/n]: ")).strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                continue
+            if _ans in ("", "y", "yes"):
+                Config.set_provider_entry(_name, api_base=row["base"])
+                _switch_main_provider(_name)
+            continue
+        _provider_detail(row["name"], input_fn=input_fn)
 
 
 def cmd_image(args_str):
