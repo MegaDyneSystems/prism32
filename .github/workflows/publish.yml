@@ -27,9 +27,18 @@ jobs:
         run: python -m build packages/pypi/
 
       - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          packages-dir: packages/pypi/dist/
+        env:
+          PYPI_API_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          if [ -n "$PYPI_API_TOKEN" ]; then
+            pip install --quiet twine
+            python -m twine upload --non-interactive --skip-existing \
+              --username __token__ --password "$PYPI_API_TOKEN" \
+              packages/pypi/dist/*
+          else
+            echo "::error::PYPI_API_TOKEN secret is not set."
+            exit 1
+          fi
 
   npm:
     name: Publish to npm
