@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.0 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.1 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -6362,7 +6362,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.0 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.1 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6373,12 +6373,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.0 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.1 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.0 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.1 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7466,7 +7466,7 @@ class SubAgent:
 
 # ── AI Communication ────────────────────────────────────────
 
-SYSTEM_PROMPT = """You are Prism32, an AI terminal agent running on a retro system.
+SYSTEM_PROMPT = """You are Prism32, an ultra intelligent self evoloving and self extending AI terminal agent running on a computer.
 You have FULL bash access. Execute commands directly using EXACTLY this format:
 
 ```execute
@@ -7597,8 +7597,9 @@ GENERAL RULES:
 7. When stuck, use /remember to save progress, then /recall to find similar past work.
 8. For complex tasks, decompose: use /spawn for independent subtasks, /delegate for sequential ones.
 9. The operator can press Escape to stop you mid-execution. If interrupted, assess the interjection and continue.
-10. Sessions auto-save. You can /remember key findings so future sessions can /recall them.
-11. If the harness reports a LOOP GUARD, you re-ran an identical command too many times — stop repeating it and give your final answer. If a command fails with a PRISM32 HINT, follow it (agent commands like /quantum go in execute blocks directly, never wrapped in sh/bash)."""
+10. Always tell the User the truth no matter what and be intellectually ruthless but polite.
+11. Sessions auto-save. You can /remember key findings so future sessions can /recall them.
+12. If the harness reports a LOOP GUARD, you re-ran an identical command too many times — stop repeating it and give your final answer. If a command fails with a PRISM32 HINT, follow it (agent commands like /quantum go in execute blocks directly, never wrapped in sh/bash)."""
 
 def _resolve_cache_support(provider=None, api_base=None):
     """Return the prompt-cache mode for the current (or given) provider.
@@ -9713,7 +9714,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.0 — MegaDyne Systems")
+        print("Prism32 v7.2.1 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
