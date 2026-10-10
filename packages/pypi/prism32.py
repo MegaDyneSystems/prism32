@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.1.0 - MegaDyne Systems Terminal Agent
-Green phosphor vibes. Pure terminal energy.
+Prism32 v7.2.0 - MegaDyne Systems Terminal Agent
+Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
 import urllib.error
@@ -45,6 +45,16 @@ except ImportError:
 try:
     import readline
 except ImportError:
+    pass
+
+# Multi-line paste (GNU readline >= 8.1): enable-bracketed-paste makes the
+# terminal wrap pasted text in ESC[200~...ESC[201~, so readline inserts
+# pasted newlines literally instead of submitting on the first one. Only a
+# real Enter key submits. No-op on older readlines/libedit — behavior there
+# is unchanged (paste submits per line, as before).
+try:
+    readline.parse_and_bind("set enable-bracketed-paste on")
+except Exception:
     pass
 
 # ── Low-RAM Detection ───────────────────────────────────────
@@ -6281,7 +6291,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.1.0 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.0 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6292,12 +6302,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.1.0 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.0 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.1.0 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.0 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -6504,7 +6514,7 @@ def _split_plugin_block(block):
         return lines
     return [block] if (block or '').strip() else []
 
-def _try_plugin_cmd(c, history=None):
+def _try_plugin_cmd(c, history=None, who=None):
     """Check if c is a plugin command and dispatch it, returning result or None."""
     c_stripped = c.strip()
     if not c_stripped:
@@ -6531,6 +6541,57 @@ def _try_plugin_cmd(c, history=None):
             # — a normal quantum miss is not a command failure
             return f"Quantum: {key} = {v}" if v is not None else f"Quantum: nothing set for key '{key}'"
         return f"Usage: /quantum <key>:<value> or /quantum <key>:"
+    if cmd_name in ('/board', 'board'):
+        # Mission-scoped shared info board (expires at mission completion)
+        arg = cmd_args.strip()
+        if not arg:
+            return mission_board_read()
+        if arg.lower() in ("clear", "reset"):
+            m = _ACTIVE_MISSION
+            if not m or m.state != "active":
+                return "Board: no active mission."
+            try:
+                with _MISSION_WS_LOCK:
+                    with open(mission_board_path(m.id), "w", encoding="utf-8") as f:
+                        f.write("# (board cleared)\n")
+                return "Board: cleared."
+            except OSError as e:
+                return f"Board: clear failed ({e})."
+        return mission_board_append(arg, who=(who or "agent"))
+    # Long-term memory from execute blocks — the SYSTEM_PROMPT advertises
+    # /remember /recall /memories /forget as agent-usable; without routing
+    # here they fell through to the shell (subagent audit finding).
+    if cmd_name in ('/remember', 'remember'):
+        if cmd_args:
+            rest = cmd_args
+            tags = []
+            if ' --tag ' in rest:
+                parts = rest.split(' --tag ', 1)
+                rest = parts[0]
+                tags = [t.strip() for t in parts[1].split(',') if t.strip()]
+            mid = ltm_store(rest, source="agent", tags=tags)
+            return f"Remembered as mem_{mid:07d} ({len(rest)} chars)."
+        return "Usage: /remember <text> [--tag t1,t2]"
+    if cmd_name in ('/recall', 'recall'):
+        if cmd_args:
+            results = ltm_search(cmd_args)
+            if not results:
+                return f"No memories matching '{cmd_args}'"
+            return "\n".join(f"mem_{int(r['id']):07d} [{r['score']}] {r['content'][:120]}"
+                             for r in results)
+        return "Usage: /recall <query>"
+    if cmd_name in ('/memories', 'memories'):
+        results = ltm_list(25)
+        if not results:
+            return "No long-term memories stored yet."
+        return "\n".join(f"mem_{int(r['id']):07d} {r['timestamp'][:19]} {r['summary'][:70]}"
+                         for r in results)
+    if cmd_name in ('/forget', 'forget'):
+        try:
+            mid = int(cmd_args.strip().replace('mem_', ''))
+            return f"Deleted mem_{mid:07d}." if ltm_delete(mid) else f"mem_{mid:07d} not found."
+        except ValueError:
+            return "Usage: /forget <id>  (e.g. /forget 42)"
     if cmd_name in ('/harness', 'harness'):
         sub = cmd_args.split(None, 1)[0].lower() if cmd_args else "show"
         if sub == "scan":
@@ -7038,6 +7099,54 @@ Detected external AI harnesses are listed in context. If useful, inspect their h
 When your task is complete, give a concise summary of what you did and what you found. This summary becomes your result, which the main agent will read.
 """
 
+_MAIN_REPEAT_GUARD = None  # created in main(); reset per user turn
+
+
+class _RepeatGuard:
+    """Breaks degenerate agent loops: the same execute-block command,
+    re-emitted unchanged round after round, must not burn the entire
+    step budget (RL training surfaces this constantly). Nudges after
+    NUDGE_AT identical runs, force-stops the agent after STOP_AT."""
+    NUDGE_AT = 3
+    STOP_AT = 5
+
+    def __init__(self):
+        self.last = None
+        self.count = 0
+
+    def reset(self):
+        self.last = None
+        self.count = 0
+
+    def note(self, cmd):
+        """Record a command execution; return its consecutive run count."""
+        if cmd == self.last:
+            self.count += 1
+        else:
+            self.last = cmd
+            self.count = 1
+        return self.count
+
+
+# Regex for "agent command shell-wrapped" detection: /quantum et al. passed
+# through sh -c (or as arguments) instead of standing alone in the block.
+_RE_AGENT_CMD = re.compile(r"\B/(?:quantum|board|remember|recall|memories|forget|delegate|spawn|collect|subagents|skill-list|skill-load|auto|json|memory)\b")
+
+def _shell_wrap_hint(result, cmd):
+    """If a command failed with 'not found' but references an agent
+    command, tell the model HOW to run it — the bare command is the
+    execute block, not a shell invocation. Self-healing guidance for
+    the most common agent mistake (audit round-2 finding)."""
+    if not result:
+        return result
+    low = (result or "").lower()
+    if ("no such file" in low or "not found" in low) and _RE_AGENT_CMD.search(cmd or ""):
+        result += ("\n[PRISM32 HINT] '/quantum', '/board', '/remember' etc. are Prism32 "
+                   "agent commands, not shell programs. Put the bare command as the "
+                   "entire line of an ```execute block — do not wrap it in sh/bash.")
+    return result
+
+
 class SubAgent:
     def __init__(self, task, model=None, max_steps=1000, provider=None):
         global _next_sa_id
@@ -7054,6 +7163,7 @@ class SubAgent:
         self._step = 0
         self._history = []
         self._thread = None
+        self._repeat_guard = _RepeatGuard()
 
     def _build_history(self):
         ctx = build_context()
@@ -7148,16 +7258,28 @@ class SubAgent:
                             self.done = True
                             return
                         c = c.strip()
-                        plugin_result = _try_plugin_cmd(c, history=self._history)
+                        # Loop guard: identical re-emitted command must not
+                        # burn the whole budget (degenerate model loops).
+                        _rc = self._repeat_guard.note(c)
+                        if _rc >= _RepeatGuard.STOP_AT:
+                            self.result = (f"[SUBAGENT LOOP GUARD] identical command repeated "
+                                           f"{_rc} times: {c[:100]}. Refusing to run it again.")
+                            self.done = True
+                            return
+                        plugin_result = _try_plugin_cmd(c, history=self._history, who=f'shard_{self.id}')
                         if plugin_result is not None:
                             result = plugin_result.strip()
                         else:
                             result = run_cmd(c)
+                        result = _shell_wrap_hint(result, c)
                         success = _cmd_succeeded(result)
                         cmd_result(c, result, success)
                         msg = f"Executed: {c}\nResult:\n{result[:_CMD_RESULT_CAP]}"
                         continuation = f"Command succeeded={success}. Continue with task or give final answer."
-                        if was_healed:
+                        if _rc >= _RepeatGuard.NUDGE_AT:
+                            continuation = (f"Command succeeded={success}. You have run this IDENTICAL "
+                                            f"command {_rc} times — do NOT repeat it. Give your final answer now.")
+                        elif was_healed:
                             continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
                         self._history.append({"role": "user", "content": f"{msg}\n\n{continuation}"})
                         if agent_cancel_requested() or (result or "").startswith("[CANCELLED]"):
@@ -7311,7 +7433,7 @@ You can delegate work to subagents. Subagents run autonomously with their own ex
 - /collect <id> — retrieve async subagent results.
 - /subagents — list running/completed subagents.
 Add --provider <name> to use a different provider for a subagent (e.g. /delegate scan ports --provider groq).
-Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, deepseek.
+Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, deepseek, llamacpp-remote.
 Use /spawn + /collect for parallel work: spawn multiple subagents for independent subtasks, then collect results.
 Subagents can spawn their own subagents — use this for recursive decomposition of complex tasks.
 
@@ -7321,6 +7443,12 @@ QUANTUM CONTEXT:
 - /quantum <key>:<value> — write a value.
 - /quantum <key>: — read a specific key.
 Use /quantum to pass findings between agents: one subagent discovers data, another uses it.
+
+MISSION INFO BOARD (mission shards only):
+When your context contains a MISSION CONTEXT block, you are one shard of a larger mission. All shards share a mission info board:
+- /board <text> — post a finding (paths, names, states, discoveries). It reaches every other shard instantly.
+- /board — read everything posted so far.
+Post anything another step might need; do not keep discoveries to yourself. The board expires when the mission completes.
 
 LONG-TERM MEMORY:
 - /remember <text> — store findings in long-term memory (persists across sessions, shared by all agents).
@@ -7358,6 +7486,7 @@ Prism32 automatically manages conversation context. When context gets large (>75
 Commands you can use inside execute blocks:
 - Any shell command (the normal path).
 - /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
+- /board <text>, /board (mission info board — post/read shared findings).
 - /delegate <task> [--provider <name>] (synchronous subagent).
 - /spawn <task> [--provider <name>] (async subagent).
 - /collect <id> (retrieve async results).
@@ -7374,7 +7503,7 @@ Commands you can use inside execute blocks:
 - /memory path, /memory paths (locate memory files).
 - /json <file> [--key <path>] [--compact] (read JSON files with pretty-printing, smart summary for large files, key path navigation).
 - Any plugin-registered command listed in context (see Available plugin commands).
-Operator-only commands (do NOT work from execute blocks): /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, /cost, /usage, /debug, /log, /arch, /sysinfo, /procs, /net, /ports, /ls, /find, /grep, /git, /cat, /edit, /history, /export, /mission, /maxsteps, /thinking, /memctx, /subagent-model, /find, /spawn (operator-side), /collect (operator-side).
+Operator-only commands (do NOT work from execute blocks): /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, /cost, /usage, /debug, /log, /arch, /sysinfo, /procs, /net, /ports, /ls, /find, /grep, /git, /cat, /edit, /history, /export, /mission, /maxsteps, /thinking, /memctx, /subagent-model, /spawn (operator-side), /collect (operator-side).
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
@@ -7397,7 +7526,8 @@ GENERAL RULES:
 7. When stuck, use /remember to save progress, then /recall to find similar past work.
 8. For complex tasks, decompose: use /spawn for independent subtasks, /delegate for sequential ones.
 9. The operator can press Escape to stop you mid-execution. If interrupted, assess the interjection and continue.
-10. Sessions auto-save. You can /remember key findings so future sessions can /recall them."""
+10. Sessions auto-save. You can /remember key findings so future sessions can /recall them.
+11. If the harness reports a LOOP GUARD, you re-ran an identical command too many times — stop repeating it and give your final answer. If a command fails with a PRISM32 HINT, follow it (agent commands like /quantum go in execute blocks directly, never wrapped in sh/bash)."""
 
 def _resolve_cache_support(provider=None, api_base=None):
     """Return the prompt-cache mode for the current (or given) provider.
@@ -8453,6 +8583,109 @@ class MissionTodo:
         self.attempts = 0
         self.shard = None          # live SubAgent reference
 
+# ── Mission workspace: shared, mission-scoped, self-expiring files ──
+# Every mission gets exactly two temporary files under
+# ~/.prism32/missions/<id>/:
+#   board.md — shared info board: any agent (shard, subagent, operator)
+#              appends findings with /board <text>; every shard's context
+#              includes the latest board tail so discoveries propagate.
+#   goals.md — mission context: the goal plus the live step tree state,
+#              rewritten as steps advance.
+# Both expire (directory deleted) the moment the mission completes — they
+# are scratch space, not durable state. Orphaned dirs from crashed runs
+# are wiped on startup (missions do not survive process death).
+MISSIONS_DIR = os.path.join(_PRISM32_HOME, "missions")
+_MISSION_WS_LOCK = threading.Lock()
+
+def mission_board_path(mission_id):
+    return os.path.join(MISSIONS_DIR, mission_id, "board.md")
+
+def mission_goals_path(mission_id):
+    return os.path.join(MISSIONS_DIR, mission_id, "goals.md")
+
+def _mission_ws_init(mission):
+    """Create the mission's board + goals files."""
+    try:
+        os.makedirs(os.path.dirname(mission_board_path(mission.id)), exist_ok=True)
+        with open(mission_goals_path(mission.id), "w", encoding="utf-8") as f:
+            f.write(f"# Mission {mission.id}\n\nGoal: {mission.goal}\n\n"
+                    f"Started: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        with open(mission_board_path(mission.id), "w", encoding="utf-8") as f:
+            f.write(f"# Shared info board — mission {mission.id}\n"
+                    f"# Append findings: /board <text>   Read: /board\n"
+                    f"# This board expires when the mission completes.\n")
+    except OSError:
+        pass
+
+def _mission_ws_sync(mission):
+    """Rewrite goals.md with the current step tree (called on state changes)."""
+    try:
+        lines = [f"# Mission {mission.id}", "", f"Goal: {mission.goal}", ""]
+        def _walk(tid, depth):
+            todo = mission.todos[tid]
+            marks = {"pending": "[ ]", "running": "[~]", "done": "[x]", "failed": "[!]"}
+            lines.append(f"{'  ' * depth}{marks.get(todo.state, '[?]')} {todo.label}")
+            for child in todo.children:
+                _walk(child, depth + 1)
+        for child in mission.todos[mission.root_id].children:
+            _walk(child, 0)
+        tmp = mission_goals_path(mission.id) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines) + "\n")
+        os.replace(tmp, mission_goals_path(mission.id))
+    except OSError:
+        pass
+
+def mission_board_append(text, who="agent"):
+    """Append one finding to the ACTIVE mission's board. Returns a status
+    string suitable for execute-block output."""
+    m = _ACTIVE_MISSION
+    if not m or m.state != "active":
+        return "Board: no active mission. Boards exist only during missions (/mission <goal>)."
+    try:
+        with _MISSION_WS_LOCK:
+            with open(mission_board_path(m.id), "a", encoding="utf-8") as f:
+                f.write(f"\n[{time.strftime('%H:%M:%S')} {who}] {text}\n")
+        return f"Board: noted ({len(text)} chars)."
+    except OSError as e:
+        return f"Board: append failed ({e})."
+
+def mission_board_read(tail=40):
+    """Return the ACTIVE mission's board tail (or a not-active message)."""
+    m = _ACTIVE_MISSION
+    if not m or m.state != "active":
+        return "Board: no active mission. Boards exist only during missions (/mission <goal>)."
+    try:
+        with open(mission_board_path(m.id), "r", encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        if not lines:
+            return "Board: (empty)"
+        return "\n".join(lines[-tail:])
+    except OSError:
+        return "Board: (no board file yet)"
+
+def _mission_ws_expire(mission):
+    """Delete the mission's workspace — findings expire at completion."""
+    try:
+        import shutil
+        shutil.rmtree(os.path.join(MISSIONS_DIR, mission.id), ignore_errors=True)
+    except Exception:
+        pass
+
+def _mission_ws_cleanup_orphans():
+    """Remove leftover mission dirs (e.g. from crashed runs). Called at
+    startup — no mission can be running yet at that point."""
+    try:
+        if not os.path.isdir(MISSIONS_DIR):
+            return
+        for name in os.listdir(MISSIONS_DIR):
+            import shutil
+            shutil.rmtree(os.path.join(MISSIONS_DIR, name), ignore_errors=True)
+    except Exception:
+        pass
+
+
+
 class Mission:
     """A decomposed goal running as a tree of subagent shards."""
     MAX_TODO_STEPS = 25           # per-todo subagent step budget
@@ -8472,6 +8705,7 @@ class Mission:
         self.reports = []          # [(label, output)] completed-step log
         self.created = time.time()
         self._monitor = None
+        _mission_ws_init(self)     # shared board.md + goals.md (expire on completion)
 
     # ── tree ops (tesseract.py:1562-1578 next_ready semantics) ──
     def add_todo(self, label, parent_id=None):
@@ -8517,8 +8751,19 @@ class Mission:
             lines.append("Team notes:")
             for note in self.notes[-10:]:
                 lines.append(f"- {note}")
+        # Shared info board: mission-scoped findings every shard can read
+        # and append. Included here so discoveries propagate without polling.
+        try:
+            with open(mission_board_path(self.id), "r", encoding="utf-8") as f:
+                board_lines = [ln for ln in f.read().splitlines() if ln.strip()]
+            if len(board_lines) > 3:   # beyond the file's own header
+                lines.append("SHARED INFO BOARD (append with: /board <finding>):")
+                lines.extend(board_lines[-15:])
+        except OSError:
+            pass
         lines.append(f"Focus ONLY on your assigned step: {for_todo.label}")
-        lines.append("Use prior results, do not redo them. Complete THIS step, then give your final answer as plain text.")
+        lines.append("Use prior results, do not redo them. Post useful discoveries to the board (/board <text>) so other steps benefit.")
+        lines.append("Complete THIS step, then give your final answer as plain text.")
         return "\n".join(lines)
 
     def step_prompt(self, todo):
@@ -8641,6 +8886,7 @@ def _mission_report(mission, todo, ok, output):
             todo.result = output
             with stdout_lock:
                 print(f"  {T()['warn']}✗ mission step FAILED:{RST} {todo.label[:70]}")
+    _mission_ws_sync(mission)   # goals.md mirrors the live tree state
 
 
 def _mission_monitor(mission):
@@ -8679,12 +8925,21 @@ def _mission_monitor(mission):
             summary_lines.append(f"✓ {label} => {output[:300]}")
         for todo in failed:
             summary_lines.append(f"✗ {todo.label} => {todo.result[:300]}")
+        # Final board snapshot before the workspace expires: the board's
+        # last findings are folded into the summary so nothing is lost the
+        # instant the files are deleted.
+        board_tail = mission_board_read(tail=10)
+        if not board_tail.startswith("Board:"):
+            summary_lines.append("Board highlights:\n" + board_tail)
         summary = "\n".join(summary_lines)
         box("MISSION COMPLETE" if not failed else "MISSION COMPLETE (with failures)", summary, "bright")
         _quantum.put(f"mission_{mission.id}_result", summary)
         _quantum.put("mission_result", f"[Mission {mission.id}] {mission.goal[:80]}: complete"
                      + (f" ({len(failed)} failed steps)" if failed else ""))
         clear_active_goal()
+        # Workspace expiry: the shared board + goals files existed only for
+        # this mission. Final content is preserved in the summary above.
+        _mission_ws_expire(mission)
         global _ACTIVE_MISSION
         with _MISSION_LOCK:
             if _ACTIVE_MISSION is mission:
@@ -8708,10 +8963,13 @@ def mission_take(goal, wait=False):
     labels = _mission_plan(goal)
     for label in labels:
         mission.add_todo(label)
+    _mission_ws_sync(mission)      # goals.md now lists every planned step
     set_active_goal(goal)
     box("MISSION STARTED",
         f"Goal: {goal}\nSteps ({len(labels)}):\n" +
         "\n".join(f"  {i + 1}. {l}" for i, l in enumerate(labels)) +
+        f"\n\nShared board: {mission_board_path(mission.id)}\n"
+        f"Shards append findings with /board <text>; it is injected into every shard context."
         "\n\nShards dispatch in parallel; completion is structural (all leaves done).",
         "accent")
     mission._monitor = threading.Thread(target=_mission_monitor, args=(mission,), daemon=True)
@@ -9332,7 +9590,11 @@ def cmd_extend(args_str, history, cmd_log):
 # ── Main Loop ────────────────────────────────────────────────
 
 def main():
-    global _shutdown_flag, _LAST_INTERJECT, _INTERJECTION_RESULT, _CURRENT_SESSION_ID
+    global _shutdown_flag, _LAST_INTERJECT, _INTERJECTION_RESULT, _CURRENT_SESSION_ID, _MAIN_REPEAT_GUARD
+    # Mission workspaces (board.md/goals.md) expire with their mission;
+    # orphaned dirs from crashed runs are gone by definition — missions
+    # do not survive process death. Clean slate every start.
+    _mission_ws_cleanup_orphans()
     
     def _on_resize(sig, frame):
         try:
@@ -9379,7 +9641,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.1.0 — MegaDyne Systems")
+        print("Prism32 v7.2.0 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9513,6 +9775,9 @@ def main():
             set_scroll_region()
         try:
             user_input = read_footer_input(build_status_bar(history=history))
+            if _MAIN_REPEAT_GUARD is None:
+                _MAIN_REPEAT_GUARD = _RepeatGuard()
+            _MAIN_REPEAT_GUARD.reset()   # a new user turn breaks any repeat loop
         except (EOFError, KeyboardInterrupt):
             print()
             reset_scroll_region()
@@ -10016,6 +10281,14 @@ def main():
                     print(f"  {t['bright']}+ Mission resumed.{RST}")
                 else:
                     print(f"  {t['dim']}No active mission to resume.{RST}")
+            elif _sub == "board" and not args_str.lower().startswith("board "):
+                # bare "/mission board" shows the active mission's shared board
+                if _am:
+                    print(f"\n{mission_board_read()}")
+                    print(f"\n  {t['dim']}File: {mission_board_path(_am.id)} | Goals: {mission_goals_path(_am.id)}{RST}")
+                    print(f"  {t['dim']}Agents append with: /board <text>  — expires at mission completion.{RST}")
+                else:
+                    print(f"  {t['dim']}No active mission. Start one: /mission <goal>{RST}")
             elif _sub == "interject" and len(_mparts) > 1:
                 if _am:
                     _am.notes.append(f"user: {' '.join(_mparts[1:])[:300]}")
@@ -10714,6 +10987,17 @@ def main():
                     del _SUBAGENTS[sid]
             continue
 
+        if cmd == 'board':
+            # Operator-side /board — same shared info board agents use from
+            # execute blocks. Without this, a typed /board falls through to
+            # the AI as a chat message (smoketest finding).
+            if args_str:
+                print(f"  {mission_board_append(args_str, who='operator')}")
+            else:
+                print(f"\n{mission_board_read()}")
+                print(f"\n  {t['dim']}Post with: /board <text> — expires at mission completion.{RST}")
+            continue
+
         if cmd == 'quantum':
             parts = args_str.split(None, 1)
             if not args_str:
@@ -11018,7 +11302,7 @@ def main():
                         for c in commands:
                             c = c.strip()
                             print(f"\n  {T()['warn']}>{c}{RST}")
-                            plugin_result = _try_plugin_cmd(c, history=history)
+                            plugin_result = _try_plugin_cmd(c, history=history, who='main')
                             if plugin_result is not None:
                                 result = plugin_result.strip()
                             else:
@@ -11156,12 +11440,20 @@ def main():
                     _expanded.extend(_split_plugin_block(c))
                 for c in _expanded:
                     c = c.strip()
+                    # Loop guard (degenerate repeats) + shell-wrap hint
+                    _rc = _MAIN_REPEAT_GUARD.note(c)
+                    if _rc >= _RepeatGuard.STOP_AT:
+                        history.append({"role": "user", "content":
+                            "LOOP GUARD: you have run this identical command "
+                            f"{_rc} times. It will not run again. Give your final answer now."})
+                        break
                     viz.tool_call("execute", c)
-                    plugin_result = _try_plugin_cmd(c, history=history)
+                    plugin_result = _try_plugin_cmd(c, history=history, who='main')
                     if plugin_result is not None:
                         result = plugin_result.strip()
                     else:
                         result = run_cmd(c)
+                        result = _shell_wrap_hint(result, c)
                     command_cancelled = agent_cancel_requested() or (result or "").startswith("[CANCELLED]")
                     success = _cmd_succeeded(result)
                     viz.tool_result(success, result[:100])

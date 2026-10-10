@@ -7,6 +7,24 @@ It is designed for modern PC's and older machines: no Node.js, no browser runtim
 
 This README is the full operator guide. The GitHub front page shows the same document.
 
+## What's New In 7.2
+
+Prism32 v7.2.0 hardens the agent harness — the release goal is "flawless for RL": a model learning to drive Prism32 must never be lied to by the prompt, never wedge in a loop, and never lose a paste. Upgrading is seamless — config, sessions, memory, and provider keys carry over.
+
+**Multi-line paste fixed.** Pasting multi-paragraph text used to submit on the first pasted newline (each paragraph became its own message). GNU readline's bracketed-paste mode is now enabled: pasted text lands as literal buffer content and **only a real Enter submits** — a 10-paragraph paste arrives as one message.
+
+**Mission info board — shared, mission-scoped, self-expiring.** Every mission now gets exactly two temporary files under `~/.prism32/missions/<id>/`: `board.md` (shared info board — any shard appends findings with `/board <text>`, and every shard's context includes the live board tail, so discoveries propagate without polling) and `goals.md` (the goal plus the live step tree, rewritten as steps advance). Both **expire the instant the mission completes** — final board highlights are folded into the completion summary first. Orphaned dirs from crashed runs are wiped on startup. `who` attribution on every entry (operator / main / shard id) shows exactly who posted what.
+
+**Agent commands verified against the code.** A subagent audit found `/remember`, `/recall`, `/memories`, `/forget` advertised in the system prompt but falling through to the shell — the prompt was lying to the agent. All four now route in execute blocks, and a new test (`tests/test_agent_commands.py`) fails the build if any advertised agent command ever goes dead again.
+
+**Degenerate-loop guard.** A model re-emitting the identical execute block every round used to burn its entire step budget (1000 steps of the same command). The loop guard nudges after 3 identical runs and force-stops after 5 — `[SUBAGENT LOOP GUARD]` — and applies to both the main agent and subagents.
+
+**Shell-wrap self-healing.** Agents that wrap agent commands in `sh -c '/quantum ...'` get an actionable `[PRISM32 HINT]` appended to the not-found error instead of an opaque shell failure.
+
+**Smoketests.** `python3 smoketests.py` runs 24 end-to-end checks against an in-process mock provider — REPL commands, chat + execute-block protocol, agent LTM routing, subagent delegation, full mission lifecycle (board + expiry), bracketed paste (real pty), and the loop guard. Hermetic: no network, no keys, exits non-zero on any failure.
+
+**System prompt sync.** Provider list refreshed (llamacpp-remote), duplicate `/find` pruned from the operator-only list, mission board documented for shards, and loop-guard/hint behavior added to the general rules.
+
 ## What's New In 7.1
 
 Prism32 v7.1.0 rebuilds `/provider` as a fully interactive provider manager. Upgrading from 7.0 is seamless — config, sessions, memory, and provider keys carry over.
