@@ -7,25 +7,31 @@ exec(open('prism32.py').read().split('if __name__')[0])
 
 def test_platform_bsd_detection_logic():
     """Test BSD detection logic for various platforms."""
-    # Simulate NetBSD
-    sys.platform = 'netbsd10.1'
-    bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
-    assert bsd_check == True, "NetBSD should be detected as BSD"
-    
-    # Simulate FreeBSD
-    sys.platform = 'freebsd14.0'
-    bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
-    assert bsd_check == True, "FreeBSD should be detected as BSD"
-    
-    # Simulate OpenBSD
-    sys.platform = 'openbsd7.5'
-    bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
-    assert bsd_check == True, "OpenBSD should be detected as BSD"
-    
-    # Simulate Linux
-    sys.platform = 'linux'
-    bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
-    assert bsd_check == False, "Linux should NOT be detected as BSD"
+    # Mutating sys.platform is global and permanent for the process —
+    # restore it or every later test (on macOS/NetBSD runs) sees Linux.
+    _orig_platform = sys.platform
+    try:
+        # Simulate NetBSD
+        sys.platform = 'netbsd10.1'
+        bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
+        assert bsd_check == True, "NetBSD should be detected as BSD"
+
+        # Simulate FreeBSD
+        sys.platform = 'freebsd14.0'
+        bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
+        assert bsd_check == True, "FreeBSD should be detected as BSD"
+
+        # Simulate OpenBSD
+        sys.platform = 'openbsd7.5'
+        bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
+        assert bsd_check == True, "OpenBSD should be detected as BSD"
+
+        # Simulate Linux
+        sys.platform = 'linux'
+        bsd_check = 'bsd' in sys.platform.lower() or sys.platform.lower().startswith('netbsd')
+        assert bsd_check == False, "Linux should NOT be detected as BSD"
+    finally:
+        sys.platform = _orig_platform
 
 def test_run_cmd_bsd_wrapping_logic():
     """Test that BSD wrapping logic works correctly."""

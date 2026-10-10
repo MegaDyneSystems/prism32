@@ -21,7 +21,11 @@ Prism32 v7.2.0 hardens the agent harness — the release goal is "flawless for R
 
 **Shell-wrap self-healing.** Agents that wrap agent commands in `sh -c '/quantum ...'` get an actionable `[PRISM32 HINT]` appended to the not-found error instead of an opaque shell failure.
 
-**Smoketests.** `python3 smoketests.py` runs 24 end-to-end checks against an in-process mock provider — REPL commands, chat + execute-block protocol, agent LTM routing, subagent delegation, full mission lifecycle (board + expiry), bracketed paste (real pty), and the loop guard. Hermetic: no network, no keys, exits non-zero on any failure.
+**Multi-remote llama.cpp providers + LAN scan.** One machine serves one model (MTP), so real setups run several llama.cpp/vLLM boxes on the LAN. `/provider` → `l` scans the local /24 for OpenAI-compatible servers (llama.cpp :8080, Ollama :11434, LM Studio :1234, vLLM :8000, Jan :1337) in a few seconds; every found server appears as a `● detected` row — select it and press Enter to configure **and** switch in one step, with a host-derived name (`llamacpp-106`). The add wizard loops ("Add another?") so a multi-server fleet becomes providers in one pass, and offers live servers (local + LAN-scanned) as numbered picks before manual URL entry. Each server's model is fetched from its live catalog at switch time.
+
+**macOS validated.** The full battery runs green on macOS 12 (x86_64, system Python 3.9/libedit): 164 tests + 24 smoketests. The Mac run itself caught three bugs — a test that poisoned `sys.platform` process-wide (invisible on Linux), an Arch-hardcoded package-manager assertion, and a paste smoketest that simulated terminals incorrectly. Bracketed paste needs GNU readline ≥ 8.1 (Linux/Termux); on libedit systems the terminal never sends paste markers, so paste degrades to per-line submission — a documented platform limitation, verified clean.
+
+**Smoketests.** `python3 smoketests.py` runs 24 end-to-end checks against an in-process mock provider — REPL commands, chat + execute-block protocol, agent LTM routing, subagent delegation, full mission lifecycle (board + expiry), bracketed paste (real pty, handshake-aware), and the loop guard. Hermetic: no network, no keys, exits non-zero on any failure.
 
 **System prompt sync.** Provider list refreshed (llamacpp-remote), duplicate `/find` pruned from the operator-only list, mission board documented for shards, and loop-guard/hint behavior added to the general rules.
 

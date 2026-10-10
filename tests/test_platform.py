@@ -7,7 +7,12 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 exec(open('prism32.py').read().split('if __name__')[0])
 
 def test_platform_linux():
-    """Linux should be detected on this system."""
+    """Linux should be detected on a Linux system (skipped elsewhere —
+    the Mac/NetBSD bug-test runs execute this suite too)."""
+    import sys as _sys
+    if _sys.platform != "linux":
+        import pytest
+        pytest.skip(f"not a Linux system ({_sys.platform})")
     assert Platform.LINUX == True
     assert Platform.MACOS == False
     assert Platform.WINDOWS == False
@@ -54,10 +59,10 @@ def test_platform_uptime():
     assert len(uptime) > 0
 
 def test_platform_package_manager():
-    """get_package_manager() should detect pacman on Arch."""
+    """get_package_manager() returns a manager name, or None where none
+    exists (e.g. a CLT-only macOS) — both are valid."""
     pm = Platform.get_package_manager()
-    assert pm is not None  # Arch Linux has pacman
-    assert isinstance(pm, str)
+    assert pm is None or (isinstance(pm, str) and len(pm) > 0)
 
 def test_platform_install_command():
     """get_install_command() should return a valid command."""

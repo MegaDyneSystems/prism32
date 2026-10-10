@@ -15,6 +15,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import prism32
+import prism32
 from prism32 import (
     Config,
     PROVIDER_REGISTRY,
@@ -24,9 +25,9 @@ from prism32 import (
     cmd_provider_edit,
     cmd_provider_menu,
     cmd_provider_remove,
+    detect_lan_servers,
     detect_local_servers,
 )
-
 
 def _listener():
     s = socket.socket()
@@ -200,3 +201,79 @@ def test_builtin_snapshot_matches_registry_on_fresh_load():
     # must exist in the live registry (user entries may add more)
     for pid in _BUILTIN_PROVIDER_DEFAULTS:
         assert pid in PROVIDER_REGISTRY
+
+
+# ── LAN scan (multi-remote llama.cpp support) ────────────────────────
+
+def test_detect_lan_servers_finds_listener_in_subnet():
+    srv, port = _listener()
+    try:
+        # hermetic "LAN": the loopback /24 with our ephemeral port kind
+        found = detect_lan_servers(
+            subnet_prefix="127.0.0",
+            ports=[(port, "testkind", "Test Server")],
+            timeout=0.3)
+        assert found, "listener not found in subnet scan"
+        assert found[0]["api_base"] == f"http://127.0.0.1:{port}/v1"
+        assert found[0]["suggest"] == "testkind-1"   # host-derived name
+        assert "127.0.0.1" in found[0]["label"]
+    finally:
+        srv.close()
+
+
+def test_detect_lan_servers_skips_own_ip():
+    srv, port = _listener()
+    try:
+        # claim the listener's host IS this machine → probe must skip it
+        orig = prism32._local_ip
+        prism32._local_ip = lambda: "127.0.0.1"
+        try:
+            found = detect_lan_servers(
+                subnet_prefix="127.0.0",
+                ports=[(port, "testkind", "Test Server")],
+                timeout=0.3)
+            assert not found, "own-IP host must be skipped (local probes cover it)"
+        finally:
+            prism32._local_ip = orig
+    finally:
+        srv.close()
+
+
+def test_menu_rows_merge_lan_servers_deduped():
+    srv, port = _listener()
+    try:
+        base = f"http://127.0.0.1:{port}/v1"
+        rows = _provider_menu_rows([{"suggest": "llamacpp-1",
+                                     "label": f"llama.cpp @ 127.0.0.1:{port} (LAN)",
+                                     "api_base": base}])
+        lan_rows = [r for r in rows if r.get("detected_new")]
+        assert len(lan_rows) == 1
+        assert lan_rows[0]["suggest"] == "llamacpp-1"
+        # same endpoint twice → one row
+        rows2 = _provider_menu_rows([
+            {"suggest": "a", "label": "x", "api_base": base},
+            {"suggest": "b", "label": "y", "api_base": base}])
+        assert len([r for r in rows2 if r.get("detected_new")]) == 1
+    finally:
+        srv.close()
+
+
+def test_menu_lan_action_lists_servers():
+    srv, port = _listener()
+    try:
+        base = f"http://127.0.0.1:{port}/v1"
+        det = [{"suggest": "llamacpp-1", "label": f"llama.cpp @ 127.0.0.1:{port} (LAN)",
+                "api_base": base}]
+        si = ScriptedInput(["l", "q"])   # scan LAN, then quit
+        orig_prefix = prism32._local_subnet_prefix
+        prism32._local_subnet_prefix = lambda: "127.0.0"
+        orig_scan = prism32.detect_lan_servers
+        prism32.detect_lan_servers = lambda *a, **k: det
+        try:
+            cmd_provider_menu(input_fn=si, detect_fn=lambda: [])
+        finally:
+            prism32.detect_lan_servers = orig_scan
+            prism32._local_subnet_prefix = orig_prefix
+        # 'q' quits after the LAN rows are rendered — no exception = pass
+    finally:
+        srv.close()

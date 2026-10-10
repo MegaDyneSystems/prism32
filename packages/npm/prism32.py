@@ -4902,6 +4902,77 @@ def detect_local_servers(timeout=0.35, probes=None):
     return out
 
 
+# LAN discovery: one machine serves one model (MTP), so real setups have
+# SEVERAL llama.cpp/ollama boxes on the network — each becomes its own
+# provider. Ports → (kind, label) mapping matches LOCAL_SERVER_PROBES kinds.
+LAN_SERVER_PORTS = [
+    (8080, "llamacpp", "llama.cpp server"),
+    (11434, "ollama", "Ollama"),
+    (1234, "lmstudio", "LM Studio"),
+    (8000, "vllm", "vLLM"),
+    (1337, "jan", "Jan"),
+]
+
+def _local_ip():
+    """This machine's primary LAN IP (routing-table trick via UDP connect —
+    no packets leave the machine). None when offline."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+        finally:
+            s.close()
+    except Exception:
+        return None
+
+def _local_subnet_prefix():
+    ip = _local_ip()
+    if not ip:
+        return None
+    parts = ip.rsplit(".", 1)
+    if len(parts) == 2 and parts[0] and parts[1] != "0":
+        return parts[0]
+    return None
+
+def detect_lan_servers(subnet_prefix=None, ports=None, timeout=0.35, workers=128):
+    """Scan a /24 subnet for OpenAI-compatible servers (llama.cpp, Ollama,
+    LM Studio, vLLM, Jan) on their standard ports. Threaded so a full scan
+    of 254 hosts x N ports completes in a few seconds; silent hosts cost
+    one short TCP timeout each. Returns {"suggest", "label", "api_base"}
+    rows like detect_local_servers, with host-derived suggest names
+    (llamacpp-244) so several servers can coexist as distinct providers."""
+    prefix = subnet_prefix if subnet_prefix is not None else _local_subnet_prefix()
+    if not prefix:
+        return []
+    port_kinds = ports if ports is not None else LAN_SERVER_PORTS
+    own_ip = _local_ip()
+    found = []
+
+    def _probe(host):
+        if host == own_ip:
+            return []   # this machine — local probes already cover it
+        hits = []
+        for port, kind, label in port_kinds:
+            ok, _why = check_endpoint_reachable(f"http://{host}:{port}", timeout=timeout)
+            if ok:
+                hits.append({"suggest": f"{kind}-{host.rsplit('.', 1)[-1]}",
+                             "label": f"{label} @ {host}:{port} (LAN)",
+                             "api_base": f"http://{host}:{port}/v1"})
+        return hits
+
+    try:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            for hits in ex.map(_probe, [f"{prefix}.{i}" for i in range(1, 255)]):
+                found.extend(hits)
+    except Exception:
+        # No ThreadPoolExecutor (ancient interpreter): serial fallback
+        for i in range(1, 255):
+            found.extend(_probe(f"{prefix}.{i}"))
+    return sorted(found, key=lambda d: d["api_base"])
+
+
 _T_CACHE = {}
 def T():
     if not ansi_enabled():
@@ -8996,7 +9067,8 @@ def get_cmd_help():
  {bold}Configuration{reset}
    /agentname <name>    Set the name shown before assistant responses
    /provider           Provider manager: pick by number → switch/edit/test
-                       (also: add | api | key | test | rm | list)
+                       ([l]an scan finds remote llama.cpp/vLLM boxes; also:
+                       add | api | key | test | rm | list)
     /set api_base <url>  Set a custom API base URL (preserved when switching providers)
     /set api_base reset  Revert API base to the current provider's default
     /set subagent_model <m>  Use a cheaper/faster model for subagents (clear = main)
@@ -12207,8 +12279,10 @@ def cmd_provider_edit(name, input_fn=input):
 
 
 def cmd_provider_add_interactive(input_fn=input):
-    """Add wizard: pick a template by number, confirm the prefilled
-    name / URL / key (Enter keeps defaults), test, pick default model."""
+    """Add wizard: pick a template by number, pick a live server (local or
+    LAN-scanned) or enter a URL, key, test, default model — then optionally
+    add ANOTHER provider in the same run. One machine serves one model
+    (MTP), so multi-server setups add several providers in one pass."""
     t = T()
     presets = [
         ("llama.cpp (local or LAN)", "llamacpp", "http://127.0.0.1:8080/v1", ""),
@@ -12218,10 +12292,14 @@ def cmd_provider_add_interactive(input_fn=input):
         ("Jan", "jan", "http://127.0.0.1:1337/v1", ""),
         ("OpenAI-compatible (custom URL)", "custom", "http://localhost:8080/v1", ""),
     ]
-    print(f"\n  {t['bright']}Add a provider — pick a template:{RST}")
-    for _i, (_label, _sug, _url, _mdl) in enumerate(presets, 1):
-        print(f"   {t['primary']}{_i}.{RST} {_label:<34} {t['dim']}{_url}{RST}")
-    try:
+    _SERVER_SUGGESTS = ("llamacpp", "ollama", "lmstudio", "vllm", "jan")
+    _another = True
+    while _another:
+      _another = False
+      try:
+        print(f"\n  {t['bright']}Add a provider — pick a template:{RST}")
+        for _i, (_label, _sug, _url, _mdl) in enumerate(presets, 1):
+            print(f"   {t['primary']}{_i}.{RST} {_label:<34} {t['dim']}{_url}{RST}")
         _pick = input_fn(rl_prompt(f"  Template 1-{len(presets)} (Enter=1): ")).strip()
         if not _pick:
             _pick = "1"
@@ -12230,15 +12308,34 @@ def cmd_provider_add_interactive(input_fn=input):
             return
         _label, _sug, _url, _mdl = presets[int(_pick) - 1]
 
-        # A live local server matching this template wins as the default URL.
-        _det = detect_local_servers()
-        _live = next((d["api_base"] for d in _det
-                      if d["suggest"] == _sug), "")
-        _default_url = _live or _url
-        if _live:
-            print(f"  {t['bright']}+ Detected a live {_label} at {_live}{RST}")
+        # Server templates: offer live servers — local probes plus an
+        # optional LAN scan — as numbered picks before manual URL entry.
+        _default_url = _url
+        _default_name = _dedupe_provider_name(_sug)
+        if _sug in _SERVER_SUGGESTS:
+            _cands = [d for d in detect_local_servers() if d["suggest"] == _sug]
+            _scan = input_fn(rl_prompt("  Scan the LAN for remote servers? [y/N]: ")).strip().lower()
+            if _scan in ("y", "yes"):
+                print(f"  {t['dim']}Scanning {_local_subnet_prefix() or 'the local'}.0/24 ...{RST}")
+                _cands += [d for d in detect_lan_servers()
+                           if d["suggest"].rsplit("-", 1)[0] == _sug]
+            if _cands:
+                print(f"  {t['bright']}Live servers:{RST}")
+                for _i, _d in enumerate(_cands, 1):
+                    print(f"   {t['primary']}{_i}.{RST} {_d['label']}")
+                print(f"   {t['primary']}{len(_cands) + 1}.{RST} Enter a URL manually")
+                _sel = input_fn(rl_prompt(
+                    f"  Pick 1-{len(_cands) + 1} (Enter=1): ")).strip()
+                if not _sel:
+                    _sel = "1"
+                if _sel.isdigit() and 1 <= int(_sel) <= len(_cands):
+                    _c = _cands[int(_sel) - 1]
+                    _default_url = _c["api_base"]
+                    _default_name = _dedupe_provider_name(_c["suggest"])
+                    print(f"  {t['bright']}+ Using {_c['api_base']}{RST}")
+                # manual pick (or bad input) falls through to URL prompt below
 
-        _name = _dedupe_provider_name(_sug)
+        _name = _default_name
         _name = input_fn(rl_prompt(f"  Provider name [{_name}]: ")).strip() or _name
         _url = input_fn(rl_prompt(f"  API base URL [{_default_url}]: ")).strip() or _default_url
         _key = input_fn(rl_prompt("  API key (Enter to skip): ")).strip()
@@ -12276,7 +12373,11 @@ def cmd_provider_add_interactive(input_fn=input):
         _sw = input_fn(rl_prompt(f"  Switch to {_name} now? [Y/n]: ")).strip().lower()
         if _sw in ("", "y", "yes"):
             _switch_main_provider(_name)
-    except (EOFError, KeyboardInterrupt):
+        # Multi-server setups: keep adding providers in the same run.
+        _again = input_fn(rl_prompt("  Add another provider? [y/N]: ")).strip().lower()
+        if _again in ("y", "yes"):
+            _another = True
+      except (EOFError, KeyboardInterrupt):
         print(f"\n  {t['dim']}Cancelled.{RST}")
 
 
@@ -12383,15 +12484,17 @@ def _provider_detail(name, input_fn=input):
 def cmd_provider_menu(input_fn=input, detect_fn=detect_local_servers):
     """Interactive /provider: pick by number, then switch / edit / test /
     remove. Local servers are auto-detected and offered for one-keystroke
-    setup."""
+    setup; [l]an scans the /24 for remote llama.cpp/ollama/vllm boxes so
+    several one-model servers can each become their own provider."""
     t = T()
+    lan_found = []
     while True:
         detected = []
         try:
             detected = detect_fn() or []
         except Exception:
             pass
-        rows = _provider_menu_rows(detected)
+        rows = _provider_menu_rows(detected + lan_found)
         print(f"\n {t['bright']}MODEL PROVIDERS{RST}"
               f" {t['dim']}— current: {Config.PROVIDER or 'none'}{RST}")
         print(f" {'─' * 62}")
@@ -12408,7 +12511,7 @@ def cmd_provider_menu(input_fn=input, detect_fn=detect_local_servers):
         print(f" {'─' * 62}")
         try:
             c = input_fn(rl_prompt(
-                f"  Select 1-{len(rows)}, [a]dd, [r]escan, [q]uit: ")).strip().lower()
+                f"  Select 1-{len(rows)}, [a]dd, [l]an scan, [r]escan, [q]uit: ")).strip().lower()
         except (EOFError, KeyboardInterrupt):
             print()
             return
@@ -12416,6 +12519,18 @@ def cmd_provider_menu(input_fn=input, detect_fn=detect_local_servers):
             return
         if c == "a":
             cmd_provider_add_interactive(input_fn=input_fn)
+            continue
+        if c in ("l", "lan"):
+            print(f"  {t['dim']}Scanning {_local_subnet_prefix() or 'the local'}.0/24 for servers...{RST}")
+            try:
+                lan_found = detect_lan_servers() or []
+            except Exception as _e:
+                lan_found = []
+                print(f"  {t['warn']}LAN scan failed: {_e}{RST}")
+            if lan_found:
+                print(f"  {t['bright']}+ {len(lan_found)} LAN server(s) found — pick one below.{RST}")
+            else:
+                print(f"  {t['dim']}No LAN servers found.{RST}")
             continue
         if c == "r":
             continue  # loop re-probes

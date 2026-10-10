@@ -281,18 +281,17 @@ def smoke_bracketed_paste():
     try:
         time.sleep(1.0)
         os.write(fd, b"intro ")
-        time.sleep(0.3)
-        os.write(fd, b"\x1b[200~para one\n\npara two\n\npara three\x1b[201~")
-        time.sleep(0.3)
-        os.write(fd, b"\r")
+        time.sleep(0.5)
+        # Does the app enable bracketed paste mode? GNU readline >= 8.1
+        # (with enable-bracketed-paste on) emits ESC[?2004h when reading;
+        # libedit (macOS) and older readlines never do — and real terminals
+        # only send markers when the app asked for them.
         out = b""
-        deadline = time.time() + 10
+        deadline = time.time() + 3
         while time.time() < deadline:
-            r, _, _ = select.select([fd], [], [], 0.5)
+            r, _, _ = select.select([fd], [], [], 0.3)
             if not r:
-                if b"GOT:" in out:
-                    break
-                continue
+                break
             try:
                 chunk = os.read(fd, 4096)
             except OSError:
@@ -300,14 +299,29 @@ def smoke_bracketed_paste():
             if not chunk:
                 break
             out += chunk
-        text = out.decode(errors="replace")
-        got = [ln for ln in text.splitlines() if ln.startswith("GOT:")]
-        if got:
-            val = got[0][4:]
-            ok = ("para one" in val) and ("para two" in val) and ("para three" in val)
-            check("multi-paragraph paste returns as ONE input", ok, val[:120])
+        app_enabled_paste = b"\x1b[?2004h" in out
+
+        if app_enabled_paste:
+            # Terminal wraps the paste; pasted newlines are literal.
+            os.write(fd, b"\x1b[200~para one\n\npara two\n\npara three\x1b[201~")
+            time.sleep(0.4)
+            os.write(fd, b"\r")
+            got = _pty_read_got(fd)
+            if got:
+                ok = ("para one" in got) and ("para two" in got) and ("para three" in got)
+                check("multi-paragraph paste returns as ONE input", ok, got[:140])
+            else:
+                check("multi-paragraph paste returns as ONE input", False, out.decode(errors="replace")[-200:])
         else:
-            check("multi-paragraph paste returns as ONE input", False, text[-200:])
+            # libedit / old readline: no ?2004 handshake → real terminals
+            # send pastes RAW (no markers). Verify the app degrades
+            # cleanly instead of corrupting on escape garbage.
+            os.write(fd, b"\x1b[200~stale marker bytes\x1b[201~")
+            time.sleep(0.3)
+            os.write(fd, b"\r")
+            got = _pty_read_got(fd)
+            check("paste mode degrades cleanly (libedit: per-line paste, known limitation)",
+                  got is not None, out.decode(errors="replace")[-200:])
     finally:
         try:
             os.close(fd)
@@ -317,6 +331,31 @@ def smoke_bracketed_paste():
             os.waitpid(pid, 0)
         except OSError:
             pass
+
+
+def _pty_read_got(fd, timeout=6):
+    """Read a pty until the child prints a GOT: line; return its value."""
+    import select as _sel
+    out = b""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        r, _, _ = _sel.select([fd], [], [], 0.5)
+        if not r:
+            if b"GOT:" in out:
+                break
+            continue
+        try:
+            chunk = os.read(fd, 4096)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out += chunk
+        if b"GOT:" in out:
+            break
+    text = out.decode(errors="replace")
+    got = [ln for ln in text.splitlines() if ln.startswith("GOT:")]
+    return got[0][4:] if got else None
 
 
 def main():
