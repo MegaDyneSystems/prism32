@@ -218,7 +218,7 @@ fi
 header "Step 2/9 - Platform Check"
 
 echo -e "  ${DIM}OS:${RST}     $(uname -s)  $(uname -m)"
-echo -e "  ${DIM}Python:${RST}  $("$PY3" --version 2>&1)"
+echo -e "  ${DIM}Python:${RST}  $("$PY3" --version 2>&1)${DIM} ($PY3)${RST}"
 echo -e "  ${DIM}User:${RST}    $(whoami)"
 
 if [ ! -w "${PREFIX:-/usr/local}/bin" ]; then
@@ -233,11 +233,13 @@ fi
 root() {
   if [ "$NEED_ROOT" = "1" ]; then
     if [ -n "${SU_PASS:-}" ]; then
-      echo "$SU_PASS" | su -c "$*" 2>/dev/null || echo "$SU_PASS" | sudo -S sh -c "$*" 2>/dev/null
+      echo "$SU_PASS" | su root -c "$*" 2>/dev/null || echo "$SU_PASS" | sudo -S sh -c "$*" 2>/dev/null
     elif [ "$AUTO" = "1" ]; then
       return 0
     else
-      su -c "$*" 2>/dev/null || sudo sh -c "$*" 2>/dev/null
+      # `su root -c` (not `su -c`): NetBSD su rejects userless -c for non-root
+      # ("Only root may use -c"), while Linux/macOS accept both forms.
+      su root -c "$*" 2>/dev/null || sudo sh -c "$*" 2>/dev/null
     fi
   else
     eval "$*"

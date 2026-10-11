@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.2 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.3 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -3427,7 +3427,7 @@ class Platform:
                     pass
             if os.path.exists('/etc/rc.freenas'):
                 return 'TrueNAS/FreeNAS'
-            return "BSD"
+            return platform.system()
         return platform.system()
 
     @staticmethod
@@ -3541,6 +3541,28 @@ class Platform:
             return result.stdout.strip()
         except Exception:
             return ""
+
+    _SYSCTL_EXE = None
+
+    @staticmethod
+    def _find_sysctl():
+        """Locate sysctl. On NetBSD it lives in /sbin, which is absent from
+        non-login PATHs (ssh one-shots, cron) — probe absolute paths too."""
+        if Platform._SYSCTL_EXE is not None:
+            return Platform._SYSCTL_EXE
+        for cand in ('sysctl', '/sbin/sysctl', '/usr/sbin/sysctl'):
+            if shutil.which(cand):
+                Platform._SYSCTL_EXE = cand
+                return cand
+        Platform._SYSCTL_EXE = ''
+        return ''
+
+    @staticmethod
+    def _sysctl(key):
+        exe = Platform._find_sysctl()
+        if not exe:
+            return ''
+        return Platform._run_cmd([exe, '-n', key])
 
     @staticmethod
     def _humanize_arch(machine):
@@ -3692,9 +3714,9 @@ class Platform:
             if Platform.LINUX:
                 return Platform._get_cpu_linux()
             elif Platform.MACOS:
-                cpu = Platform._run_cmd(['sysctl', '-n', 'machdep.cpu.brand_string'])
+                cpu = Platform._sysctl('machdep.cpu.brand_string')
                 if not cpu:
-                    cpu = Platform._run_cmd(['sysctl', '-n', 'hw.model'])
+                    cpu = Platform._sysctl('hw.model')
                 return cpu or "Unknown CPU"
             elif Platform.WINDOWS:
                 result = Platform._run_cmd(['powershell', '-NoProfile', '-Command',
@@ -3707,7 +3729,11 @@ class Platform:
                     return lines[1].strip()
                 return "Unknown CPU"
             elif Platform.BSD:
-                return Platform._run_cmd(['sysctl', '-n', 'hw.model']) or "Unknown CPU"
+                # sysctl can be unreachable (NetBSD /sbin off-PATH) — fall
+                # through to the humanized-arch ladder instead of giving up
+                return (Platform._sysctl('hw.model')
+                        or Platform._humanize_arch(platform.machine())
+                        or "Unknown CPU")
             elif Platform.AIX:
                 out = Platform._run_cmd(['prtconf'])
                 for line in out.split('\n'):
@@ -3754,7 +3780,7 @@ class Platform:
                     total = int(f.readline().split()[1])
                     return total // 1024
             elif Platform.MACOS:
-                return int(Platform._run_cmd(['sysctl', '-n', 'hw.memsize']) or '0') // (1024 * 1024)
+                return int(Platform._sysctl('hw.memsize') or '0') // (1024 * 1024)
             elif Platform.WINDOWS:
                 result = Platform._run_cmd(['powershell', '-NoProfile', '-Command',
                     '(Get-CimInstance Win32_OperatingSystem).TotalVisibleMemorySize'])
@@ -3765,7 +3791,7 @@ class Platform:
                 if len(lines) > 1 and lines[1].strip().isdigit():
                     return int(lines[1].strip()) // 1024
             elif Platform.BSD:
-                return int(Platform._run_cmd(['sysctl', '-n', 'hw.physmem']) or '0') // (1024 * 1024)
+                return int(Platform._sysctl('hw.physmem') or '0') // (1024 * 1024)
             elif Platform.AIX:
                 out = Platform._run_cmd(['prtconf'])
                 for line in out.split('\n'):
@@ -3845,13 +3871,18 @@ class Platform:
                     return "N/A"
             elif Platform.MACOS or Platform.BSD:
                 import re, time
-                result = Platform._run_cmd(['sysctl', '-n', 'kern.boottime'])
+                result = Platform._sysctl('kern.boottime')
+                # FreeBSD/macOS print a struct { sec = 1697..., ... };
+                # NetBSD prints a bare epoch (1790833533)
                 m = re.search(r'sec\s*=\s*(\d+)', result)
                 if m:
                     boot_time = int(m.group(1))
-                    secs = time.time() - boot_time
                 else:
-                    return "N/A"
+                    m = re.fullmatch(r'\s*(\d+)\s*', result)
+                    if not m:
+                        return "N/A"
+                    boot_time = int(m.group(1))
+                secs = time.time() - boot_time
             elif Platform.AIX:
                 import re
                 out = Platform._run_cmd(['uptime'])
@@ -6401,7 +6432,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.2 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.3 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6412,12 +6443,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.2 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.3 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.2 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.3 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -9754,7 +9785,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.2 — MegaDyne Systems")
+        print("Prism32 v7.2.3 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9946,7 +9977,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.2 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.2.3 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")

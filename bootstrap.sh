@@ -145,7 +145,10 @@ if [ -n "${TERMUX_VERSION:-}" ] || [ -d "/data/data/com.termux" ]; then
   CLONE_DIR="$HOME/prism32"
   if [ -d "$CLONE_DIR/.git" ]; then
     ok "Updating existing clone..."
-    git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+    # hard-sync: a pull silently no-ops on a dirty clone (install.sh chmod +x
+      # makes prism32.py 755) and would install a stale version
+      git -C "$CLONE_DIR" fetch origin 2>/dev/null \
+        && git -C "$CLONE_DIR" reset --hard origin/main 2>/dev/null || true
   else
     git clone --depth 1 "$REPO" "$CLONE_DIR"
   fi
@@ -168,7 +171,10 @@ if [ -f "/etc/openwrt_release" ]; then
   fi
   CLONE_DIR="$HOME/prism32"
   if [ -d "$CLONE_DIR/.git" ]; then
-    git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+    # hard-sync: a pull silently no-ops on a dirty clone (install.sh chmod +x
+      # makes prism32.py 755) and would install a stale version
+      git -C "$CLONE_DIR" fetch origin 2>/dev/null \
+        && git -C "$CLONE_DIR" reset --hard origin/main 2>/dev/null || true
   else
     git clone --depth 1 "$REPO" "$CLONE_DIR" 2>/dev/null || {
       # Git not available — download directly
@@ -214,7 +220,10 @@ if [ "$OS" = "Darwin" ]; then
   CLONE_DIR="$HOME/prism32"
   if [ -d "$CLONE_DIR/.git" ]; then
     ok "Updating existing clone..."
-    git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+    # hard-sync: a pull silently no-ops on a dirty clone (install.sh chmod +x
+      # makes prism32.py 755) and would install a stale version
+      git -C "$CLONE_DIR" fetch origin 2>/dev/null \
+        && git -C "$CLONE_DIR" reset --hard origin/main 2>/dev/null || true
   else
     git clone --depth 1 "$REPO" "$CLONE_DIR"
   fi
@@ -271,7 +280,10 @@ if [ "$OS" = "Linux" ]; then
   if command -v git >/dev/null 2>&1; then
     if [ -d "$CLONE_DIR/.git" ]; then
       ok "Updating existing clone..."
-      git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+      # hard-sync: a pull silently no-ops on a dirty clone (install.sh chmod +x
+      # makes prism32.py 755) and would install a stale version
+      git -C "$CLONE_DIR" fetch origin 2>/dev/null \
+        && git -C "$CLONE_DIR" reset --hard origin/main 2>/dev/null || true
     else
       git clone --depth 1 "$REPO" "$CLONE_DIR"
     fi
@@ -321,15 +333,15 @@ if [ "$OS" = "FreeBSD" ] || [ "$OS" = "OpenBSD" ] || [ "$OS" = "NetBSD" ] || [ "
     elif command -v su >/dev/null 2>&1; then _as_root="__su__"
     fi
     if command -v pkg >/dev/null 2>&1; then
-      if [ "$_as_root" = "__su__" ]; then su -c "pkg install -y python3 git" || warn "pkg install failed — install python3 manually and rerun"
+      if [ "$_as_root" = "__su__" ]; then su root -c "pkg install -y python3 git" || warn "pkg install failed — install python3 manually and rerun"
       elif [ -z "$_as_root" ]; then pkg install -y python3 git || warn "pkg install failed — install python3 manually and rerun"
       else sudo pkg install -y python3 git || warn "pkg install failed — install python3 manually and rerun"; fi
     elif command -v pkgin >/dev/null 2>&1; then
-      if [ "$_as_root" = "__su__" ]; then su -c "pkgin -y install python3 git" || warn "pkgin install failed — install python3 manually and rerun"
+      if [ "$_as_root" = "__su__" ]; then su root -c "pkgin -y install python3 git" || warn "pkgin install failed — install python3 manually and rerun"
       elif [ -z "$_as_root" ]; then pkgin -y install python3 git || warn "pkgin install failed — install python3 manually and rerun"
       else sudo pkgin install python3 git || warn "pkgin install failed — install python3 manually and rerun"; fi
     elif command -v pkg_add >/dev/null 2>&1; then
-      if [ "$_as_root" = "__su__" ]; then su -c "pkg_add python3 git" || warn "pkg_add failed — install python3 manually and rerun"
+      if [ "$_as_root" = "__su__" ]; then su root -c "pkg_add python3 git" || warn "pkg_add failed — install python3 manually and rerun"
       elif [ -z "$_as_root" ]; then pkg_add python3 git || warn "pkg_add failed — install python3 manually and rerun"
       else sudo pkg_add python3 git || warn "pkg_add failed — install python3 manually and rerun"; fi
     fi
@@ -337,7 +349,10 @@ if [ "$OS" = "FreeBSD" ] || [ "$OS" = "OpenBSD" ] || [ "$OS" = "NetBSD" ] || [ "
   fi
   CLONE_DIR="$HOME/prism32"
   if [ -d "$CLONE_DIR/.git" ]; then
-    git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+    # hard-sync: a pull silently no-ops on a dirty clone (install.sh chmod +x
+      # makes prism32.py 755) and would install a stale version
+      git -C "$CLONE_DIR" fetch origin 2>/dev/null \
+        && git -C "$CLONE_DIR" reset --hard origin/main 2>/dev/null || true
   else
     git clone --depth 1 "$REPO" "$CLONE_DIR"
   fi
