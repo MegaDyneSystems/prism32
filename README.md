@@ -9,6 +9,8 @@ This README is the full operator guide. The GitHub front page shows the same doc
 
 ## What's New In 7.2
 
+**v7.2.2 — NAS install hardening (Synology DSM round).** A full bug-test pass on a real DSM 7.1.1 box (DS414, ARMv7, Python 3.8.12) validated the one-click install end-to-end and fixed ten defects. The installer's home fallback now prefers **persistent** locations — `$XDG_DATA_HOME`, then `/volume1/homes/<user>` (DSM's real home when `/var/services/homes` dangles) — instead of volatile noexec `/tmp`, so a NAS reboot no longer wipes sessions and config; `prism32.py`'s runtime resolver mirrors the same ladder. The wrapper lands in the persistent volume's `.local/bin`, PATH is persisted via a guarded `.profile`/`.bashrc` export (and `/etc/profile.d` for root installs), `-y` auto mode no longer dumps the provider menu into pipes (neutral local defaults instead), Step 9 verifies the wrapper it actually wrote and warns when a stale prism32 shadows it, the noexec hint includes the interpreter, and the CLI gained `-v` plus a `/version` REPL command (version, Python, platform, runtime dir).
+
 Prism32 v7.2.0 hardens the agent harness — the release goal is "flawless for RL": a model learning to drive Prism32 must never be lied to by the prompt, never wedge in a loop, and never lose a paste. Upgrading is seamless — config, sessions, memory, and provider keys carry over.
 
 **Multi-line paste fixed.** Pasting multi-paragraph text used to submit on the first pasted newline (each paragraph became its own message). GNU readline's bracketed-paste mode is now enabled: pasted text lands as literal buffer content and **only a real Enter submits** — a 10-paragraph paste arrives as one message.
@@ -55,7 +57,7 @@ Prism32 v7.0.0 is the multi-provider + mission release. Upgrading from 6.x is se
 
 **Reliability.** Atomic writes (temp + fsync + replace) protect all state files against power loss; a corrupt `config.json` is quarantined instead of silently rewritten; reasoning models that exhaust the response budget auto-retry with a larger budget; protocol routing follows the request's base URL so mixed providers never misroute; subagent requests run a TCP pre-flight with actionable error messages; session-only `--api-key` overrides print an exit warning so a working key is never silently lost; API keys are masked in all error output.
 
-**Real-hardware compat pass.** Verified on Synology DSM 7.1.1 (ARMv7, Python 3.8, nonexistent user home — the runtime dir reroutes to `/tmp/prism32`), NetBSD 10.1 i386 (pkgsrc python detection, `hw.physmem` RAM detection, `su -c` fallbacks), and Fire TV / Termux on Android 5.1.1. Installers handle noexec `/tmp`, pkgsrc python, and broken homes.
+**Real-hardware compat pass.** Verified on Synology DSM 7.1.1 (DS414, ARMv7, Python 3.8.12 — full battery: 165 pytest + 24 smoketests; the runtime dir now reroutes to the persistent `/volume1/homes/<user>/.prism32` when the DSM home symlink dangles, instead of volatile `/tmp`), NetBSD 10.1 i386 (pkgsrc python detection, `hw.physmem` RAM detection, `su -c` fallbacks), and Fire TV / Termux on Android 5.1.1. Installers handle noexec `/tmp`, pkgsrc python, and broken homes.
 
 **Packaging.** Published packages are trimmed to PyPI + npm; the Homebrew and Scoop seed repositories are kept.
 
@@ -107,6 +109,8 @@ No-root install:
 ```sh
 git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh -y && ~/.local/bin/prism32
 ```
+
+> On a NAS (Synology DSM) the user home may not exist — use the [NAS install](#nas-install-synology--qnap--wd-my-cloud) instead; the installer then auto-reroutes to the persistent volume home.
 
 Run directly without install:
 
@@ -1704,7 +1708,7 @@ The bootstrap script auto-detects:
 
 If Python 3 is not installed, the bootstrap script installs it via the system's package manager automatically. If no recognized package manager exists (e.g. Synology DSM, QNAP QTS), it falls back to downloading `prism32.py` + `install.sh` directly via `curl`/`wget`/`python3 urllib` — no git required.
 
-If the `$HOME` directory doesn't exist (common on Synology NAS where the user home may not be provisioned), the bootstrap script automatically falls back to `/tmp` as HOME.
+If the `$HOME` directory doesn't exist (common on Synology NAS where the user home may not be provisioned), the bootstrap script first probes persistent locations (`/volume1/prism32` on Synology) and only then falls back to `/tmp` as HOME.
 
 ## NAS Install (Synology / QNAP / WD My Cloud)
 
@@ -1723,21 +1727,28 @@ wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstr
 cat bootstrap.sh | ssh user@nas "cat > /tmp/bootstrap.sh && HOME=/tmp sh /tmp/bootstrap.sh"
 ```
 
-Tested on Synology DS414 (Marvell Armada XP, ARMv7l, 2GB RAM, Python 3.8.12, DSM 7.x; the v7.0 compat pass verified DSM 7.1.1 end-to-end with a broken user home). The installer:
+Tested on Synology DS414 (Marvell Armada XP, ARMv7l, 2GB RAM, Python 3.8.12, DSM 7.1.1 — the v7.2 full battery passed there: 165 pytest + 24 smoketests, GNU readline 8.0 with working bracketed paste). The installer:
 - Detects missing git and falls back to direct download of `prism32.py` + `install.sh`
-- Detects missing `$HOME` directory and falls back to `/tmp` as HOME
-- Copies `prism32.py` to `~/.prism32/` (or `/tmp/.prism32/`)
-- Creates wrapper command in `~/.local/bin/prism32`
-- Reroutes the runtime dir to `/tmp/prism32` inside `prism32.py` itself when the home is missing or unwritable — chat, execute blocks, and session persistence all work under the fallback
-- Skips the `~/.local/bin` wrapper with a run-command hint when `/tmp` is mounted noexec (DSM does this) instead of writing a wrapper that dies with permission denied
+- Detects a broken `$HOME` (DSM's `/var/services/homes/<user>` dangles when the user home service is off) and reroutes the runtime dir to the **persistent** `/volume1/homes/<user>/.prism32` — never volatile `/tmp`, which DSM mounts noexec and wipes on reboot
+- Installs the wrapper to `/volume1/homes/<user>/.local/bin/prism32` (persistent + exec-capable)
+- Persists PATH by appending a guarded export to `.profile`/`.bashrc` (and the volume home's `.profile`) — a fresh interactive SSH login finds `prism32`
+- Writes neutral local-provider defaults in `-y` auto mode (no menu dump, no dead-endpoint config) — configure the real endpoint with `/provider` on first run
+- Verifies the wrapper it actually wrote and warns if a stale prism32 elsewhere in PATH shadows it
 - No root required (installs to user-local paths)
+
+DSM notes:
+- Best fix for a missing home: **Control Panel → User & Group → Advanced → Enable user home service**, or run with `HOME=/volume1/homes/<user>`. `/volume1/homes/<user>` exists and is user-writable even when the homes symlink dangles.
+- `/tmp` is tmpfs, **noexec**, and wiped on reboot — nothing lives there.
+- `scp` to DSM needs `-O` (SFTP subsystem is disabled by default): `scp -O file user@nas:/path`.
+- Non-interactive SSH (`ssh nas 'prism32 --version'`) sources no dotfiles on DSM — run from an interactive shell, or use the full wrapper path.
+- No pip on DSM, but the app is stdlib-only (no dependencies). For development, `python3 -m venv` works (ensurepip is bundled).
 
 After install, run with:
 
 ```sh
-HOME=/tmp python3 ~/.prism32/prism32.py
-# or if wrapper is in PATH:
-HOME=/tmp prism32
+prism32                      # interactive shell, after PATH refresh
+# or explicitly:
+python3 /volume1/homes/<user>/.prism32/prism32.py
 ```
 
 To connect to a cloud provider (since NAS likely has no local LLM):
@@ -1745,7 +1756,7 @@ To connect to a cloud provider (since NAS likely has no local LLM):
 ```sh
 # CLI flags are session-only overrides — persist the pick with /model and
 # /provider key <name> <key> inside the app instead:
-HOME=/tmp prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
+prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
 ```
 
 ### QNAP QTS

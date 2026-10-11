@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.1 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.2 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -153,25 +153,64 @@ def register_theme(name, **colors):
     return colors
 
 # ── Home Directory Resolution ───────────────────────────────
-def _resolve_prism32_home():
-    """Resolve the ~/.prism32 base directory, falling back to /tmp/prism32
-    if home is missing or unwritable (e.g. Synology DSM missing homes dir)."""
+_PRISM32_VOLUME1 = "/volume1"   # Synology DSM persistent volume (tests monkeypatch this)
+
+def _prism32_home_candidates():
+    """Ordered runtime-dir candidates, most-preferred first.
+
+    Ladder (must stay in sync with install.sh's _resolve_runtime_base):
+      1. ~/.prism32                        — the normal case
+      2. $XDG_DATA_HOME/prism32            — if XDG_DATA_HOME is set
+      3. /volume1/homes/<user>/.prism32    — Synology DSM: /var/services/homes
+                                             dangles (homes service off) but
+                                             /volume1/homes/<user> is the real,
+                                             persistent, exec-capable home
+      4. /volume1/<user>/.prism32          — secondary DSM location
+      5. /tmp/prism32                      — volatile last resort (DSM /tmp is
+                                             noexec AND wiped on reboot)
+    """
+    cands = []
     home = os.path.expanduser("~")
-    base = os.path.join(home, ".prism32")
-    try:
-        os.makedirs(base, exist_ok=True)
-        test_file = os.path.join(base, ".write_test")
-        with open(test_file, 'w') as f:
-            f.write("ok")
-        os.remove(test_file)
-        return base
-    except (OSError, PermissionError, FileNotFoundError):
-        fallback = os.path.join("/tmp", "prism32")
+    if home and os.path.isabs(home):
+        cands.append(os.path.join(home, ".prism32"))
+    xdg = os.environ.get("XDG_DATA_HOME")
+    if xdg and os.path.isabs(xdg):
+        cands.append(os.path.join(xdg, "prism32"))
+    if os.path.isdir(_PRISM32_VOLUME1):
         try:
-            os.makedirs(fallback, exist_ok=True)
-        except OSError:
+            import pwd
+            uname = pwd.getpwuid(os.getuid()).pw_name
+            if uname:
+                cands.append(os.path.join(_PRISM32_VOLUME1, "homes", uname, ".prism32"))
+                cands.append(os.path.join(_PRISM32_VOLUME1, uname, ".prism32"))
+        except (ImportError, KeyError, OSError):
             pass
-        return fallback
+    return cands
+
+def _resolve_prism32_home():
+    """Resolve the prism32 base directory. Falls back through persistent
+    locations (XDG, Synology DSM volume homes) before the volatile /tmp/prism32
+    — a reboot must never wipe sessions/config (DSM /tmp is tmpfs)."""
+    def _usable(path):
+        try:
+            os.makedirs(path, exist_ok=True)
+            probe = os.path.join(path, ".write_test")
+            with open(probe, "w") as f:
+                f.write("ok")
+            os.remove(probe)
+            return True
+        except (OSError, PermissionError, FileNotFoundError):
+            return False
+
+    for cand in _prism32_home_candidates():
+        if _usable(cand):
+            return cand
+    fallback = os.path.join("/tmp", "prism32")
+    try:
+        os.makedirs(fallback, exist_ok=True)
+    except OSError:
+        pass
+    return fallback
 
 _PRISM32_HOME = _resolve_prism32_home()
 
@@ -6362,7 +6401,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.1 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.2 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6373,12 +6412,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.1 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.2 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.1 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.2 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -9066,6 +9105,7 @@ def get_cmd_help():
    /extend permanent <g> AI-generate/load persistent plugin
 
  {bold}Configuration{reset}
+   /version            Version, Python, platform, and runtime dir
    /agentname <name>    Set the name shown before assistant responses
    /provider           Provider manager: pick by number → switch/edit/test
                        ([l]an scan finds remote llama.cpp/vLLM boxes; also:
@@ -9703,7 +9743,7 @@ def main():
     parser.add_argument("--turbo", action="store_true", help="Turbo mode: enable live streaming output")
     parser.add_argument("--slow-cpu", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--no-boot", action="store_true", help="Skip boot sequence")
-    parser.add_argument("--version", "-V", action="store_true", help="Show version and exit")
+    parser.add_argument("--version", "-V", "-v", action="store_true", help="Show version and exit")
     parser.add_argument("--temperature", type=float, help="AI temperature (0.0-2.0)")
     parser.add_argument("--goal", "--mission", "-g", help="Run a mission headless and exit on completion")
     parser.add_argument("--set-timeout", type=int, help="Set command timeout in seconds and exit")
@@ -9714,7 +9754,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.1 — MegaDyne Systems")
+        print("Prism32 v7.2.2 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9903,6 +9943,13 @@ def main():
             _PluginHooks.fire_command(cmd, args_str, None)
         if cmd == 'help':
             print(f"\n{get_cmd_help()}\n")
+            continue
+
+        if cmd == 'version':
+            print(f"\n  Prism32 v7.2.2 — MegaDyne Systems")
+            print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
+            print(f"  Runtime dir: {_PRISM32_HOME}")
+            print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
             continue
 
         if cmd == 'clear':

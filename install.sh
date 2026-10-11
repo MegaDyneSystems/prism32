@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ═══════════════════════════════════════════════════════════════
-#  Prism32 — MegaDyne Systems Installer v6.9
+#  Prism32 — MegaDyne Systems Installer v7.2
 #  Idempotent, validated, user-friendly
 # ═══════════════════════════════════════════════════════════════
 set -euo pipefail
@@ -12,17 +12,50 @@ LOW_RAM=0
 _INSTALL_TMPFILES=""
 trap 'rm -f $_INSTALL_TMPFILES 2>/dev/null || true' EXIT INT TERM HUP
 
-# Pre-create runtime dir so log() works before Step 1. A nonexistent home
-# (e.g. Synology DSM users without an /var/services/homes entry) must fall
-# back to /tmp/prism32 — same rule prism32.py applies at runtime.
-RUNTIME_BASE=""
-if mkdir -p "$HOME/.prism32" 2>/dev/null && [ -w "$HOME/.prism32" ]; then
-  RUNTIME_BASE="$HOME/.prism32"
-else
-  RUNTIME_BASE="/tmp/prism32"
-  mkdir -p "$RUNTIME_BASE" 2>/dev/null || true
-  echo "  ! Home not usable ($HOME) — runtime dir: $RUNTIME_BASE"
-fi
+# Pre-create runtime dir so log() works before Step 1. Resolution ladder
+# (must stay in sync with prism32.py's _resolve_prism32_home):
+#   1. ~/.prism32                          — the normal case
+#   2. $XDG_DATA_HOME/prism32              — if set
+#   3. /volume1/homes/<user>/.prism32       — Synology DSM: $HOME dangles
+#      (/var/services/homes -> missing target) but /volume1/homes/<user> is
+#      the real, persistent, exec-capable home
+#   4. /volume1/<user>/.prism32            — secondary DSM location
+#   5. /tmp/prism32                        — volatile LAST resort (DSM /tmp is
+#                                            noexec AND tmpfs-wiped on reboot)
+_resolve_runtime_base() {
+  if mkdir -p "$HOME/.prism32" 2>/dev/null && [ -w "$HOME/.prism32" ]; then
+    printf '%s\n' "$HOME/.prism32"; return 0
+  fi
+  if [ -n "${XDG_DATA_HOME:-}" ] && mkdir -p "$XDG_DATA_HOME/prism32" 2>/dev/null && [ -w "$XDG_DATA_HOME/prism32" ]; then
+    printf '%s\n' "$XDG_DATA_HOME/prism32"; return 0
+  fi
+  if [ -d /volume1 ]; then
+    _nas_user="$(id -un 2>/dev/null || true)"
+    if [ -n "$_nas_user" ]; then
+      for _vh in "/volume1/homes/$_nas_user" "/volume1/$_nas_user"; do
+        if mkdir -p "$_vh/.prism32" 2>/dev/null && [ -w "$_vh/.prism32" ]; then
+          printf '%s\n' "$_vh/.prism32"; return 0
+        fi
+      done
+    fi
+  fi
+  mkdir -p /tmp/prism32 2>/dev/null || true
+  printf '%s\n' "/tmp/prism32"
+}
+
+RUNTIME_BASE="$(_resolve_runtime_base)"
+ALT_HOME=""
+case "$RUNTIME_BASE" in
+  "$HOME/.prism32") ;;
+  /tmp/prism32)
+    echo "  ! No persistent writable home found — runtime dir: $RUNTIME_BASE (volatile!)"
+    echo "  ! On Synology DSM: enable the user home service (Control Panel ->"
+    echo "  ! User & Group -> Advanced) or run with HOME=/volume1/homes/\$(id -un)" ;;
+  *)
+    ALT_HOME="$(dirname "$RUNTIME_BASE")"
+    echo "  ! Home not usable ($HOME) — using persistent NAS location instead"
+    echo "  ! Runtime dir: $RUNTIME_BASE" ;;
+esac
 
 NAME="prism32"
 # Resolve SRC_DIR from this script's location (works whether cloned to
@@ -128,7 +161,7 @@ EP_MODELS_FALLBACK=(
 # ═══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${CY}${BLD}  +========================================+${RST}"
-echo -e "${CY}${BLD}  |       Prism32 Installer v6.9           |${RST}"
+echo -e "${CY}${BLD}  |       Prism32 Installer v7.2           |${RST}"
 echo -e "${CY}${BLD}  |   MegaDyne Systems (MDS) Edition       |${RST}"
 echo -e "${CY}${BLD}  +========================================+${RST}"
 echo ""
@@ -260,29 +293,53 @@ WRAP
 }
 
 if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
-  # Prefer ~/.local/bin; on unusable homes (NAS DSM) fall back beside the
-  # runtime dir so a broken $HOME never aborts the install.
+  # Prefer ~/.local/bin; on NAS/DSM with an unusable $HOME, try the persistent
+  # volume location before volatile (usually noexec) /tmp.
+  LOCAL_BIN=""
   if mkdir -p "${HOME}/.local/bin" 2>/dev/null && [ -w "${HOME}/.local/bin" ]; then
     LOCAL_BIN="${HOME}/.local/bin"
+  elif [ -n "$ALT_HOME" ] && mkdir -p "${ALT_HOME}/.local/bin" 2>/dev/null && [ -w "${ALT_HOME}/.local/bin" ]; then
+    LOCAL_BIN="${ALT_HOME}/.local/bin"
+  elif [ "$RUNTIME_BASE" != "/tmp/prism32" ] && mkdir -p "${RUNTIME_BASE}/bin" 2>/dev/null && [ -w "${RUNTIME_BASE}/bin" ]; then
+    LOCAL_BIN="${RUNTIME_BASE}/bin"
   else
     LOCAL_BIN="${RUNTIME_BASE}/bin"
     mkdir -p "$LOCAL_BIN"
-    # noexec /tmp (Synology DSM): a wrapper there can't run — verify first
-    printf '#!/bin/sh\nexit 0\n' > "$LOCAL_BIN/.exectest.$$"
-    chmod +x "$LOCAL_BIN/.exectest.$$" 2>/dev/null
-    if "$LOCAL_BIN/.exectest.$$" 2>/dev/null; then
-      rm -f "$LOCAL_BIN/.exectest.$$"
-    else
-      rm -f "$LOCAL_BIN/.exectest.$$"
-      warn "Local bin dir is noexec — skipping wrapper"
-      warn "Run prism32 via: $RUNTIME_DIR/prism32.py"
-      unset LOCAL_BIN
-    fi
+  fi
+  # noexec mounts (Synology DSM /tmp is noexec): a wrapper there can't run — verify first
+  printf '#!/bin/sh\nexit 0\n' > "$LOCAL_BIN/.exectest.$$"
+  chmod +x "$LOCAL_BIN/.exectest.$$" 2>/dev/null
+  if "$LOCAL_BIN/.exectest.$$" 2>/dev/null; then
+    rm -f "$LOCAL_BIN/.exectest.$$"
+  else
+    rm -f "$LOCAL_BIN/.exectest.$$"
+    warn "Local bin dir is noexec — skipping wrapper"
+    warn "Run prism32 via: $PY3 $RUNTIME_DIR/prism32.py"
+    unset LOCAL_BIN
   fi
   if [ -n "${LOCAL_BIN:-}" ]; then
     _install_wrapper "$LOCAL_BIN/$NAME"
     ok "Wrapper: $LOCAL_BIN/$NAME"
     export PATH="$LOCAL_BIN:$PATH"
+    # Persist PATH for fresh logins — previously only this process got the
+    # export, so /bin/sh NAS logins never found the wrapper (and could find a
+    # stale prism32 elsewhere in PATH instead).
+    _persist_path_line() {
+      # Never return non-zero: install.sh runs under `set -e`, so a failed
+      # PATH persistence (broken $HOME) must be skipped, not abort Step 4.
+      # Never mkdir either — creating the parent of .profile could resurrect
+      # a dangling $HOME symlink (DSM /var/services/homes -> missing target).
+      _pf="$1"
+      _pd="$(dirname "$_pf")"
+      [ -d "$_pd" ] || return 0
+      [ -w "$_pd" ] || return 0
+      grep -qs '# Added by prism32 installer' "$_pf" 2>/dev/null && return 0
+      printf '\n# Added by prism32 installer\n[ -d "%s" ] && PATH="%s:$PATH"\nexport PATH\n' "$LOCAL_BIN" "$LOCAL_BIN" >> "$_pf" 2>/dev/null \
+        && ok "PATH updated: $_pf" || true
+    }
+    [ -n "$ALT_HOME" ] && _persist_path_line "$ALT_HOME/.profile"
+    _persist_path_line "$HOME/.profile"
+    _persist_path_line "$HOME/.bashrc"
   else
     _install_wrapper_runonly=1
     mkdir -p "$RUNTIME_DIR"
@@ -303,8 +360,17 @@ WRAP
   chmod +x "$TMP_WRAP"
   root cp "$TMP_WRAP" "$BIN" && root chmod 755 "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; rm -f "$TMP_WRAP"; exit 1; }
   rm -f "$TMP_WRAP"
+  SYSTEM_BIN_INSTALLED=1
+  # Best-effort PATH persistence for system installs (openwrt-install.sh
+  # pattern): non-interactive /bin/sh logins (Synology DSM) source nothing.
+  if [ -d /etc/profile.d ]; then
+    root "printf '%s\n' 'PATH=\"$PREFIX/bin:\$PATH\"' 'export PATH' > /etc/profile.d/prism32.sh" 2>/dev/null \
+      && root chmod 755 /etc/profile.d/prism32.sh 2>/dev/null \
+      && ok "PATH updated: /etc/profile.d/prism32.sh" || true
+  fi
 else
   _install_wrapper "$BIN" && ok "Wrapper: $BIN" || { fail "Install failed"; exit 1; }
+  SYSTEM_BIN_INSTALLED=1
 fi
 hash -r 2>/dev/null || true
 
@@ -469,16 +535,29 @@ print(json.dumps(all_p))
 }
 
 # First provider
-_configure_provider
-
-# Ask for more
-while [ -t 0 ]; do
-  echo ""
-  read -r -p "  Configure another provider? (y/N): " more
-  more="${more:-n}"
-  [ "$more" != "y" ] && [ "$more" != "Y" ] && [ "$more" != "yes" ] && break
+if [ "$AUTO" = "1" ]; then
+  # Auto mode, no existing config: write neutral local defaults. Previously
+  # the interactive menu ran anyway — piped/non-tty installs dumped the whole
+  # 9-provider menu to the pipe and silently configured a dead endpoint.
+  ok "Auto mode: skipping interactive provider setup"
+  sub "Defaults: local provider @ http://127.0.0.1:8080"
+  sub "Run 'prism32' then /provider to configure a real endpoint"
+  PROV="local"
+  API_BASE="http://127.0.0.1:8080"
+  MODEL=""
+  api_key=""
+else
   _configure_provider
-done
+
+  # Ask for more
+  while [ -t 0 ]; do
+    echo ""
+    read -r -p "  Configure another provider? (y/N): " more
+    more="${more:-n}"
+    [ "$more" != "y" ] && [ "$more" != "Y" ] && [ "$more" != "yes" ] && break
+    _configure_provider
+  done
+fi
 
 fi  # end of else (non-auto or no config)
 
@@ -598,8 +677,37 @@ echo -e "  ${DIM}Refreshing startup memory, harness scan, and evolve baseline...
 header "Step 9/9 - Verification"
 
 hash -r 2>/dev/null || true
-CMD_PATH="$(command -v "$NAME" 2>/dev/null)"
-[ -n "$CMD_PATH" ] && ok "Command: $CMD_PATH" || warn "Not in PATH — try: export PATH=\"\$HOME/.local/bin:\$PATH\""
+# Verify the wrapper THIS install actually wrote — `command -v` alone reports
+# any stale prism32 earlier in PATH (a v6.x leftover at /usr/bin on a NAS was
+# previously shown as a successful v7 install).
+INSTALLED_WRAPPER=""
+if [ -n "${LOCAL_BIN:-}" ] && [ -x "$LOCAL_BIN/$NAME" ]; then
+  INSTALLED_WRAPPER="$LOCAL_BIN/$NAME"
+elif [ -n "${SYSTEM_BIN_INSTALLED:-}" ] && [ -x "$BIN" ]; then
+  INSTALLED_WRAPPER="$BIN"
+fi
+# Resolve against a fresh login's PATH — the installer's own export
+# (LOCAL_BIN prepended) would always find the new wrapper first and mask
+# any stale prism32 shadowing it in default shells.
+LOGIN_CMD_PATH="$(PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" command -v "$NAME" 2>/dev/null)"
+if [ -n "$INSTALLED_WRAPPER" ]; then
+  if [ "$LOGIN_CMD_PATH" = "$INSTALLED_WRAPPER" ]; then
+    ok "Command: $INSTALLED_WRAPPER"
+  elif [ -n "$LOGIN_CMD_PATH" ]; then
+    warn "Another prism32 shadows this install in default PATH:"
+    sub "in PATH:  $LOGIN_CMD_PATH"
+    sub "installed: $INSTALLED_WRAPPER"
+    sub "Use the full path, or move $INSTALLED_WRAPPER earlier in PATH"
+  else
+    warn "Wrapper not on default PATH (fresh interactive logins pick it up via .profile)"
+    sub "Installed: $INSTALLED_WRAPPER"
+  fi
+elif [ -n "$LOGIN_CMD_PATH" ]; then
+  warn "Found unrelated prism32 in PATH: $LOGIN_CMD_PATH (not from this install)"
+else
+  warn "No launcher installed (run-only copy). Start with:"
+  sub "$PY3 $RUNTIME_DIR/prism32.py"
+fi
 
 HELP_OUT="$("$PY3" "$SRC_FILE" --help 2>&1 | head -3)"
 echo ""
@@ -629,9 +737,15 @@ for i in "${!EP_KEYS[@]}"; do
 done
 echo -e "  ${BLD}Provider:${RST}  ${prov_name:-$PROV}"
 echo -e "  ${BLD}Endpoint:${RST}  $API_BASE"
-echo -e "  ${BLD}Model:${RST}     $MODEL"
+echo -e "  ${BLD}Model:${RST}     ${MODEL:-<unset — run /provider in prism32>}"
 echo ""
-echo -e "  ${CY}Run:  prism32${RST}"
+if [ -n "$INSTALLED_WRAPPER" ]; then
+  echo -e "  ${CY}Run:  $INSTALLED_WRAPPER${RST}"
+elif [ "${_install_wrapper_runonly:-0}" = "1" ]; then
+  echo -e "  ${CY}Run:  $PY3 $RUNTIME_DIR/prism32.py${RST}"
+else
+  echo -e "  ${CY}Run:  prism32${RST}"
+fi
 echo -e "  ${CY}Help: prism32 --help${RST}"
 echo ""
 
@@ -649,7 +763,7 @@ if [ "$LOW_RAM" = "1" ]; then
   echo ""
 fi
 
-echo -e "${DIM}  MegaDyne Systems (MDS) — Prism32 v6.9${RST}"
+echo -e "${DIM}  MegaDyne Systems (MDS) — Prism32 v7.2${RST}"
 echo ""
 
 # vim: set ts=2 sw=2 et:
