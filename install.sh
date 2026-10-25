@@ -644,6 +644,35 @@ json.dump(c, open(path, 'w'), indent=2)
   chmod 600 "$CONFIG_FILE" 2>/dev/null || true
 fi
 
+# Remember the root password collected earlier, so the AGENT can use it too
+# (auto-fed to its su/sudo commands via pty). Without this, the password
+# given at install was lost the moment the installer exited and every later
+# agent root command failed auth. Interactive only; auto mode never collects
+# SU_PASS in the first place.
+if [ -n "${SU_PASS:-}" ] && [ -t 0 ]; then
+  echo -n "  Remember this root password for the agent (su/sudo)? [Y/n] "
+  read -r _rp_ok || _rp_ok=""
+  case "$_rp_ok" in
+    n*|N*)
+      echo -e "  ${DIM}Not stored. Set it anytime inside prism32: /rootpass <pw>${RST}" ;;
+    *)
+      PRISM32_ROOT_PASS="$SU_PASS" "$PY3" - "$CONFIG_FILE" <<'PYEOF'
+import json, os, sys
+path = sys.argv[1]
+pw = os.environ.pop('PRISM32_ROOT_PASS', '')
+try:
+    c = json.load(open(path)) or {}
+except Exception:
+    c = {}
+c['root_pass'] = pw
+json.dump(c, open(path, 'w'), indent=2)
+PYEOF
+      chmod 600 "$CONFIG_FILE" 2>/dev/null || true
+      echo -e "  ${G}+${RST} Root password stored in config (chmod 600) — agent su/sudo now work"
+      ;;
+  esac
+fi
+
 echo ""
 "$PY3" -c "
 import json, sys

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.4 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.5 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -2659,9 +2659,61 @@ def _do_git_update(project_dir=None):
         else:
             ver = "updated"
         print(f"\n  {t['ok']}Update complete! Version: {ver}{RST}")
-        print(f"  {t['dim']}Restart prism32 to use the new version.{RST}")
+        return True
     else:
         print(f"  {t['err']}Install failed:{RST}\n  {result.stderr[:500]}")
+        return False
+
+def _hot_reload_argv(runtime_py, session_id, passthrough):
+    """Build the re-exec argv for a hot update: interpreter, fresh runtime,
+    the original CLI flags (so --api-key/--model etc. keep applying), and a
+    trailing --resume-session so the conversation survives the swap.
+    Any prior --resume-session pair is stripped first."""
+    argv = [sys.executable, runtime_py]
+    skip_value = False
+    for a in passthrough:
+        if skip_value:
+            skip_value = False
+            continue
+        if a == '--resume-session':
+            skip_value = True
+            continue
+        argv.append(a)
+    if session_id:
+        argv += ['--resume-session', session_id]
+    return argv
+
+def _hot_reload():
+    """Apply a freshly installed update immediately: save the session and
+    replace the running process (os.execv) against the new prism32.py.
+    --resume-session restores the conversation, so the update lands without
+    a manual restart. Falls back to a restart hint on any failure so an
+    update can never wedge the REPL."""
+    try:
+        if Platform.WINDOWS:
+            print(f"  {T()['dim']}Restart prism32 to use the new version.{RST}")
+            return False
+        try:
+            reset_scroll_region()
+        except Exception:
+            pass
+        try:
+            _footer_animate_stop()
+        except Exception:
+            pass
+        runtime_py = os.path.join(_resolve_prism32_home(), "prism32.py")
+        if not os.path.isfile(runtime_py):
+            runtime_py = os.path.realpath(__file__)
+        sid = _CURRENT_SESSION_ID
+        print(f"  {T()['bright']}Applying update now (session resumes automatically)...{RST}")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os.execv(sys.executable,
+                 _hot_reload_argv(runtime_py, sid, sys.argv[1:]))
+    except Exception as e:
+        print(f"  {T()['warn']}Hot apply failed ({e}) — restart prism32 to use the new version.{RST}")
+        return False
+    return True
 
 def _handle_sigterm(sig, frame):
     global _shutdown_flag
@@ -4196,7 +4248,7 @@ class Config:
 
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
     SUBAGENT_PROVIDER = ""  # provider for subagents (empty = main provider)
-    ROOT_PASS = ""  # root password for su/sudo commands (injected as $ROOT_PASS env)
+    ROOT_PASS = ""  # root password for su/sudo commands (auto-fed via pty; $ROOT_PASS env)
     STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
     NATIVE_TOOLS = os.environ.get("PRISM32_NATIVE_TOOLS", "1").lower() not in ("0", "false", "no", "off")
     MAX_MEMORY_CTX = 1024  # max chars for memory context in system prompt (0 = disable)
@@ -6442,7 +6494,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.4 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.5 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6453,12 +6505,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.4 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.5 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.4 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.5 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7002,10 +7054,34 @@ def _can_cancel_foreground_input():
     except Exception:
         return False
 
+def _child_env():
+    """Child-process environment with $ROOT_PASS injected when configured.
+
+    The system prompt promises $ROOT_PASS to execute blocks; without this
+    injection it was an undefined shell variable and every su/sudo the
+    agent ran got an empty password."""
+    if not Config.ROOT_PASS or Platform.WINDOWS:
+        return None
+    env = dict(os.environ)
+    env['ROOT_PASS'] = Config.ROOT_PASS
+    return env
+
+_ROOT_PASS_PIPE_RE = re.compile(
+    r'^\s*echo\s+([\'"]?)\$ROOT_PASS\1\s*\|\s*((?:sudo|su)\b.*)$', re.DOTALL)
+
 def run_cmd(cmd, timeout=None):
     global _INTERJECTION_RESULT
     if timeout is None:
         timeout = Config.CMD_TIMEOUT
+    if Config.ROOT_PASS and not Platform.WINDOWS:
+        # The system prompt's documented idiom `echo "$ROOT_PASS" | su ...`
+        # can never work through a pipe — su reads the password from the
+        # tty, not stdin, on Linux and BSD alike. Rewrite it to the bare
+        # command so the _pty_su_root router below feeds the password
+        # through a real pty.
+        _m = _ROOT_PASS_PIPE_RE.match(cmd)
+        if _m:
+            cmd = _m.group(2)
     try:
         if Config.ROOT_PASS and re.match(r'\s*(sudo|su)\b', cmd) and not Platform.WINDOWS:
             return _pty_su_root(cmd, timeout)
@@ -7025,6 +7101,7 @@ def run_cmd(cmd, timeout=None):
                 "shell": True,
                 "stdout": subprocess.PIPE,
                 "stderr": subprocess.STDOUT,
+                "env": _child_env(),
             }
             # Only use start_new_session in main thread so that killpg
             # works for group termination during cancellation. Subagent
@@ -7108,7 +7185,8 @@ def run_cmd(cmd, timeout=None):
                 except Exception:
                     pass
             return _tail_cmd_output(out)
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                                timeout=timeout, env=_child_env())
         out = result.stdout + result.stderr
         return out[-4000:] if len(out) > 4000 else out
     except subprocess.TimeoutExpired:
@@ -7665,7 +7743,7 @@ CROSS-PLATFORM RULES:
 3. Use appropriate network command: ip/ss (modern Linux), busybox/ifconfig/netstat (embedded), ifconfig/netstat (macOS/BSD/Solaris/old Unix), ipconfig/route/netstat/Get-NetAdapter (Windows). In containers/CI, check namespace and mounted filesystem limits before changing networking.
 4. Prefer POSIX sh syntax on unknown Unix, embedded systems, containers, Solaris, AIX, HP-UX, IRIX, Tru64, QNX, and appliance/NAS platforms. Avoid GNU-only flags unless GNU tools are detected.
 5. On appliances and immutable systems (Proxmox, TrueNAS, pfSense, OPNsense, Unraid, SteamOS, Fedora CoreOS/Silverblue/Kinoite, Clear Linux), inspect documentation/tooling first and avoid host storage/network changes unless explicitly requested.
-6. For root access: Linux — echo "$ROOT_PASS" | su -c "command" or sudo; BSD/old Unix — su root -c "command"; macOS — sudo; Windows — PowerShell or cmd (avoid Unix-only utils unless in Cygwin/MSYS/WSL).
+6. For root access: just run `su -c "command"` (Linux), `su root -c "command"` (BSD/old Unix), or `sudo command` (macOS) — Prism32 detects these and feeds the configured root password automatically via a pty. Do NOT pipe passwords yourself (`echo "$ROOT_PASS" | su ...` does not work — su reads the tty). Windows: PowerShell or cmd (avoid Unix-only utils unless in Cygwin/MSYS/WSL).
 
 GENERAL RULES:
 1. ALWAYS run commands to investigate — don't just suggest them. You have full shell access.
@@ -9174,7 +9252,7 @@ def get_cmd_help():
    /maxtokens <n>       Override max context tokens (>=10000)
     /maxsteps <n>        Set max mission steps (per-todo budget)
     /subagent-model [m]  Show/set default subagent model (/sam <m>)
-    /rootpass <pw>       Set root password ($ROOT_PASS env for su/sudo)
+    /rootpass <pw>       Set root password (auto-fed to agent su/sudo)
     /verify-ssl [on|off] Toggle HTTPS certificate verification
     /prompt_caching [on|off] Toggle provider prompt caching (Anthropic/OpenAI/DeepSeek)
     /json <file>          Read/pretty-print JSON files (smart summary for large)
@@ -9225,7 +9303,7 @@ def get_cmd_help():
     /harness [scan]      Detect external AI agent harness CLIs
      /evolve [on|docs]    Self-repair docs, baseline, tool scan mode
      /extend prompt       Pasteable plugin-generation prompt
-    /update [dir]        Git pull + reinstall from project directory
+    /update [dir]        Git pull + reinstall; applies immediately (hot reload)
    /help                This help
    /quit                Exit
 
@@ -9798,13 +9876,15 @@ def main():
     parser.add_argument("--goal", "--mission", "-g", help="Run a mission headless and exit on completion")
     parser.add_argument("--set-timeout", type=int, help="Set command timeout in seconds and exit")
     parser.add_argument("--update", help="Update prism32 from a URL or file path and exit")
+    parser.add_argument("--resume-session", dest="resume_session", metavar="ID",
+                        help="Resume a session id (used by hot update to keep the conversation)")
     parser.add_argument("--setup-runtime", action="store_true", help="Refresh startup memory, harness scan, and evolve baseline, then exit")
     parser.add_argument("--harness-scan", action="store_true", help="Scan for external AI harness CLIs, then exit")
     parser.add_argument("--evolve-setup", action="store_true", help="Create evolve docs/baseline/tool scan, then exit")
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.4 — MegaDyne Systems")
+        print("Prism32 v7.2.5 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9919,6 +9999,24 @@ def main():
     _auto_scheduler_thread.start()
     cmd_log = []
 
+    if getattr(args, 'resume_session', None):
+        # Hot-update resume: the process was re-exec'd against a new
+        # prism32.py with the pre-update session id. Restore the
+        # conversation (minus the old system prompt — the new build's
+        # prompt takes over) and keep saving into the same session.
+        _rs = load_session(args.resume_session)
+        if _rs and (_rs.get('history') or _rs.get('cmd_log')):
+            _hist = _rs.get('history') or []
+            if _hist and _hist[0].get('role') == 'system':
+                _hist = _hist[1:]
+            history = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}] + _hist
+            _PluginHooks._history = history
+            cmd_log = _rs.get('cmd_log') or []
+            _CURRENT_SESSION_ID = args.resume_session
+            print(f"  {t['bright']}Update applied — session resumed ({len(_hist)} messages restored).{RST}")
+        else:
+            print(f"  {t['warn']}Hot-update session not found — starting fresh.{RST}")
+
     if args.goal:
         # Headless --goal: run the mission synchronously and exit on
         # structural completion (all todo leaves done).
@@ -9996,7 +10094,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.4 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.2.5 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
@@ -10509,7 +10607,7 @@ def main():
                 Config.ROOT_PASS = args_str
                 Config.save_config()
                 print(f"  {t['bright']}+ Root password stored.{RST}")
-                print(f"  {t['dim']}  Available as \\$ROOT_PASS in shell commands. AI can use: echo \\\"\\$ROOT_PASS\\\" | su -c (Linux) or su root -c (BSD){RST}")
+                print(f"  {t['dim']}  The AI can just run su/sudo directly — the password is fed automatically.{RST}")
             else:
                 has = bool(Config.ROOT_PASS)
                 print(f"  Root password: {t['bright']}{'<set>' if has else '<not set>'}{RST}")
@@ -11059,7 +11157,10 @@ def main():
             project_dir = args_str.strip() if args_str else ""
             Config.save_config()
             save_current_session(history, cmd_log)
-            _do_git_update(project_dir if project_dir else None)
+            _ok = _do_git_update(project_dir if project_dir else None)
+            if _ok:
+                release_footer_for_output()
+                _hot_reload()
             Config.load_config()
             print()
             continue
