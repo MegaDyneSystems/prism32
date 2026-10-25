@@ -1,104 +1,11 @@
-# Prism32 v7.0.0
-
+# Prism32 v7.2.4
+The Easiest agent to use, You never have to learn how to use prism32
 Prism32 is a self-extending, self-repairing, self-evolving hivemind program with a AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do. it can turn any PC or low end hardware SBC or laptop etc into a robotic assistant that can control external peripherals and can also run on robots and IOT devices with shell and python on bare metal. Prism32 is the first polymorphic AI assistant and coding harness
 Prism32 uses MegadyneSystem's Tesseract hivemind technology to maximize intelligence and efficiency removing bloated A2A communication and addressing the issues with multi agent systems
-
+ 
 It is designed for modern PC's and older machines: no Node.js, no browser runtime, no pip dependencies, and no local database server. Runtime state lives in small files under `~/.prism32/`.
 
 This README is the full operator guide. The GitHub front page shows the same document.
-
-## What's New In 7.2
-
-**v7.2.4 — Flex-model wait fix.** Flex/priority-tier models (which queue before responding) were dying with a network error instead of waiting: the AI request socket timeout was hardcoded at 600s, so a model that took longer than 10 minutes to send its first byte dropped the connection — and every retry re-failed the same way. The wait is now `AI_TIMEOUT`, defaulting to 3600s (1 hour), persisted in config with a 60s floor, and tunable per session via `/aitimeout <seconds>`. Timed-out requests now say so explicitly and point at `/aitimeout` instead of a bare network error.
-
-**v7.2.3 — NetBSD install fixes (NetBSD 10.1 round).** A bug-test pass on real NetBSD 10.1 i386 hardware (pkgsrc Python 3.12, ksh, no sudo) found the app itself fully green (pytest via venv, 24/24 smoketests, GNU readline bracketed paste) but five platform defects, all fixed: root installs now use `su root -c` (NetBSD su rejects userless `-c` for non-root, which broke every root-path operation); `bootstrap.sh` update runs hard-sync (`fetch` + `reset --hard origin/main`) so a dirty managed clone can never silently install a stale version; `sysctl` is probed at absolute paths (`/sbin`, `/usr/sbin` — NetBSD keeps it off the non-login PATH, so CPU/RAM/uptime used to degrade to "Unknown"); NetBSD's bare-epoch `kern.boottime` is parsed for uptime; and `get_system()` returns the real platform name (`NetBSD`) instead of generic `BSD`.
-
-**v7.2.2 — NAS install hardening (Synology DSM round).** A full bug-test pass on a real DSM 7.1.1 box (DS414, ARMv7, Python 3.8.12) validated the one-click install end-to-end and fixed ten defects. The installer's home fallback now prefers **persistent** locations — `$XDG_DATA_HOME`, then `/volume1/homes/<user>` (DSM's real home when `/var/services/homes` dangles) — instead of volatile noexec `/tmp`, so a NAS reboot no longer wipes sessions and config; `prism32.py`'s runtime resolver mirrors the same ladder. The wrapper lands in the persistent volume's `.local/bin`, PATH is persisted via a guarded `.profile`/`.bashrc` export (and `/etc/profile.d` for root installs), `-y` auto mode no longer dumps the provider menu into pipes (neutral local defaults instead), Step 9 verifies the wrapper it actually wrote and warns when a stale prism32 shadows it, the noexec hint includes the interpreter, and the CLI gained `-v` plus a `/version` REPL command (version, Python, platform, runtime dir).
-
-Prism32 v7.2.0 hardens the agent harness — the release goal is "flawless for RL": a model learning to drive Prism32 must never be lied to by the prompt, never wedge in a loop, and never lose a paste. Upgrading is seamless — config, sessions, memory, and provider keys carry over.
-
-**Multi-line paste fixed.** Pasting multi-paragraph text used to submit on the first pasted newline (each paragraph became its own message). GNU readline's bracketed-paste mode is now enabled: pasted text lands as literal buffer content and **only a real Enter submits** — a 10-paragraph paste arrives as one message.
-
-**Mission info board — shared, mission-scoped, self-expiring.** Every mission now gets exactly two temporary files under `~/.prism32/missions/<id>/`: `board.md` (shared info board — any shard appends findings with `/board <text>`, and every shard's context includes the live board tail, so discoveries propagate without polling) and `goals.md` (the goal plus the live step tree, rewritten as steps advance). Both **expire the instant the mission completes** — final board highlights are folded into the completion summary first. Orphaned dirs from crashed runs are wiped on startup. `who` attribution on every entry (operator / main / shard id) shows exactly who posted what.
-
-**Agent commands verified against the code.** A subagent audit found `/remember`, `/recall`, `/memories`, `/forget` advertised in the system prompt but falling through to the shell — the prompt was lying to the agent. All four now route in execute blocks, and a new test (`tests/test_agent_commands.py`) fails the build if any advertised agent command ever goes dead again.
-
-**Degenerate-loop guard.** A model re-emitting the identical execute block every round used to burn its entire step budget (1000 steps of the same command). The loop guard nudges after 3 identical runs and force-stops after 5 — `[SUBAGENT LOOP GUARD]` — and applies to both the main agent and subagents.
-
-**Shell-wrap self-healing.** Agents that wrap agent commands in `sh -c '/quantum ...'` get an actionable `[PRISM32 HINT]` appended to the not-found error instead of an opaque shell failure.
-
-**Multi-remote llama.cpp providers + LAN scan.** One machine serves one model (MTP), so real setups run several llama.cpp/vLLM boxes on the LAN. `/provider` → `l` scans the local /24 for OpenAI-compatible servers (llama.cpp :8080, Ollama :11434, LM Studio :1234, vLLM :8000, Jan :1337) in a few seconds; every found server appears as a `● detected` row — select it and press Enter to configure **and** switch in one step, with a host-derived name (`llamacpp-106`). The add wizard loops ("Add another?") so a multi-server fleet becomes providers in one pass, and offers live servers (local + LAN-scanned) as numbered picks before manual URL entry. Each server's model is fetched from its live catalog at switch time.
-
-**macOS validated.** The full battery runs green on macOS 12 (x86_64, system Python 3.9/libedit): 164 tests + 24 smoketests. The Mac run itself caught three bugs — a test that poisoned `sys.platform` process-wide (invisible on Linux), an Arch-hardcoded package-manager assertion, and a paste smoketest that simulated terminals incorrectly. Bracketed paste needs GNU readline ≥ 8.1 (Linux/Termux); on libedit systems the terminal never sends paste markers, so paste degrades to per-line submission — a documented platform limitation, verified clean.
-
-**Smoketests.** `python3 smoketests.py` runs 24 end-to-end checks against an in-process mock provider — REPL commands, chat + execute-block protocol, agent LTM routing, subagent delegation, full mission lifecycle (board + expiry), bracketed paste (real pty, handshake-aware), and the loop guard. Hermetic: no network, no keys, exits non-zero on any failure.
-
-**System prompt sync.** Provider list refreshed (llamacpp-remote), duplicate `/find` pruned from the operator-only list, mission board documented for shards, and loop-guard/hint behavior added to the general rules.
-
-## What's New In 7.1
-
-Prism32 v7.1.0 rebuilds `/provider` as a fully interactive provider manager. Upgrading from 7.0 is seamless — config, sessions, memory, and provider keys carry over.
-
-**`/provider` is now a numbered picker.** Every provider — built-in, user-added, and *live-detected local servers* — appears in one numbered list with its key state and URL. Select a number to act on it: **switch** (makes it the active provider, fetching a model from its catalog if none is saved), **use for subagents**, **edit**, **test**, or **remove/reset**. No more memorizing subcommand syntax.
-
-**Local server auto-detection.** Opening `/provider` TCP-probes the standard ports for llama.cpp (8080), Ollama (11434), LM Studio (1234), vLLM (8000), and Jan (1337). A server found there that isn't already configured shows up as `● detected — not configured yet`; selecting it and pressing Enter configures it *and* switches to it. Probes are short-timeout, so nothing running means nothing shows and the menu stays instant.
-
-**Prefilled edit wizard.** Editing a provider prompts `1/3 API base URL [current]` → `2/3 API key [pySk…f9Qw]` → `3/3 Default model [current]` — **Enter keeps each value**, typing replaces it, `-` clears the key. Built-ins are edited as overrides; removing one resets it to factory defaults instead of deleting it.
-
-**Template add wizard.** `/provider add` (no args) now starts from a numbered template list (llama.cpp, Ollama, LM Studio, vLLM, Jan, custom) with prefilled URLs — a live local server matching the template wins as the default — then key, live test, default-model pick, and an optional immediate switch.
-
-`/provider <name>` jumps straight to that provider's action menu. The direct subcommands (`add <name> <base> [model]`, `api <name> <url>`, `key <name> <key>`, `test [name]`, `rm <name>`, `list`) all still work.
-
-## What's New In 7.0
-
-Prism32 v7.0.0 is the multi-provider + mission release. Upgrading from 6.x is seamless — config, sessions, memory, and provider keys carry over.
-
-**Unified multi-provider `/model`.** `/model` now fetches every configured provider's catalog into one browseable list. Models are tagged `[provider]`, and a numbered pick assigns the model to the **main agent** or the **subagent** slot. Mixing providers is first-class: run a cloud reasoning model as your main agent and a local qwen as your subagent, picked from the same screen.
-
-**`/provider` manages the registry.** Direct subcommands for configuration: `add <name> <base> [model]` (no args = template wizard), `rm <name>`, `api <name> <url>` (fix a provider's base), `key <name> <key>` (per-provider keys, persisted under `providers.<name>.api_key`), `test [name]` (3-step diagnostic: reachability → auth → model-in-catalog), and `list`. A built-in `llamacpp-remote` provider targets remote llama.cpp servers (no default host — point it with `/provider api`). Round out subagent routing with `/set subagent_provider` and `/set subagent_model`.
-
-**`/mission` replaces `/goal`.** A planner decomposes your goal into 3-6 steps, and each ready step runs as a PARALLEL subagent shard — siblings run concurrently, children wait for parents. If the goal is ambiguous, the planner first asks the operator 1-3 clarifying questions. Completion is STRUCTURAL: all leaf steps done (failed steps requeue once, then the leaf fails and the mission continues) — no more `GOAL COMPLETE` magic phrase. Every shard receives mission context (completed steps + team notes). The REPL stays live — `/mission` returns instantly, with `/mission status | pause | resume | interject <note> | wait` for control. Results land in quantum context (`mission_<id>_result`). `--goal`/`--mission` runs headless, `/maxsteps` sets the per-todo step budget, and `/goal` still works as an alias.
-
-**Reliability.** Atomic writes (temp + fsync + replace) protect all state files against power loss; a corrupt `config.json` is quarantined instead of silently rewritten; reasoning models that exhaust the response budget auto-retry with a larger budget; protocol routing follows the request's base URL so mixed providers never misroute; subagent requests run a TCP pre-flight with actionable error messages; session-only `--api-key` overrides print an exit warning so a working key is never silently lost; API keys are masked in all error output.
-
-**Real-hardware compat pass.** Verified on Synology DSM 7.1.1 (DS414, ARMv7, Python 3.8.12 — full battery: 165 pytest + 24 smoketests; the runtime dir now reroutes to the persistent `/volume1/homes/<user>/.prism32` when the DSM home symlink dangles, instead of volatile `/tmp`), NetBSD 10.1 i386 (full battery: pytest via venv + 24/24 smoketests on pkgsrc Python 3.12 — no `python3` symlink, `sysctl` in off-PATH `/sbin`, `su root -c` root installs, ksh logins), and Fire TV / Termux on Android 5.1.1. Installers handle noexec `/tmp`, pkgsrc python, and broken homes.
-
-**Packaging.** Published packages are trimmed to PyPI + npm; the Homebrew and Scoop seed repositories are kept.
-
-## Cheat Sheet: Fastest Path
-
-### Package Managers (Quickest)
-
-**PyPI** (Linux, macOS, Windows, BSD — any Python install):
-
-```sh
-pip install prism32
-prism32
-```
-
-**Homebrew** (macOS, Linux):
-
-```sh
-brew tap MegaDyneSystems/prism32
-brew install prism32
-```
-
-**Scoop** (Windows):
-
-```powershell
-scoop bucket add prism32 https://github.com/MegaDyneSystems/scoop-prism32
-scoop install prism32
-```
-
-**npm / npx / bunx** (any Node.js runtime):
-
-```sh
-npx @megadynesystems/prism32
-# or
-bunx @megadynesystems/prism32
-```
-
----
 
 ### From Source (Git clone)
 
