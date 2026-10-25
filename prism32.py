@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.3 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.4 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -1285,6 +1285,7 @@ def _default_config_snapshot():
         "max_history": 2000,
         "max_response_tokens": 8192,
         "cmd_timeout": 600,
+        "ai_timeout": 3600,
         "max_memory_ctx": 1024,
         "subagent_model": "",
         "agent_name": "MDS",
@@ -4178,6 +4179,10 @@ class Config:
     API_KEY = ""
     MAX_HISTORY = 2000
     CMD_TIMEOUT = 600
+    # Socket-level timeout for AI API requests (connect + each blocking
+    # read). Must comfortably exceed a flex/priority-tier model's queue
+    # delay before its first byte — 600s dropped flex requests mid-wait.
+    AI_TIMEOUT = 3600
     MAX_RESPONSE_TOKENS = 8192
     TEMPERATURE = 0.7
     THEME = "ember"
@@ -4267,6 +4272,7 @@ class Config:
                 "max_history": cls.MAX_HISTORY,
                 "max_response_tokens": cls.MAX_RESPONSE_TOKENS,
                 "cmd_timeout": cls.CMD_TIMEOUT,
+                "ai_timeout": cls.AI_TIMEOUT,
                 "goal_max_steps": cls.GOAL_MAX_STEPS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
                 "stream": cls.STREAM,
@@ -4437,6 +4443,10 @@ class Config:
                 cls.MAX_RESPONSE_TOKENS = _tolerant_int(data["max_response_tokens"], cls.MAX_RESPONSE_TOKENS)
             if "cmd_timeout" in data:
                 cls.CMD_TIMEOUT = _tolerant_int(data["cmd_timeout"], cls.CMD_TIMEOUT)
+            if "ai_timeout" in data:
+                # Floor at 60s: a too-small persisted value must not
+                # reintroduce the flex-model drop this setting fixes.
+                cls.AI_TIMEOUT = max(60, _tolerant_int(data["ai_timeout"], cls.AI_TIMEOUT))
             if "goal_max_steps" in data:
                 loaded_steps = _tolerant_int(data["goal_max_steps"], cls.GOAL_MAX_STEPS)
                 cls.GOAL_MAX_STEPS = max(1000, loaded_steps) if loaded_steps == 50 else loaded_steps
@@ -6432,7 +6442,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.3 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.4 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6443,12 +6453,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.3 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.4 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.3 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.4 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7874,7 +7884,7 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
                 data=json.dumps(payload).encode(),
                 headers=_build_anthropic_headers(_api_key),
             )
-            with urlopen_with_ssl(req, timeout=600) as resp:
+            with urlopen_with_ssl(req, timeout=Config.AI_TIMEOUT) as resp:
                 if stream if stream is not None else Config.STREAM:
                     _sr = _stream_anthropic_native(resp, cancel_event=cancel_event)
                     if _sr == RESPONSE_BUDGET_EXHAUSTED and not _budget_scaled:
@@ -7926,6 +7936,10 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
             _lb = (_api_base or Config.API_BASE or "")
             if "127.0.0.1" in _lb or "localhost" in _lb:
                 _local_hint = " — no local server running. Configure a provider: /model or /provider add (wizard)"
+            _reason = getattr(e, 'reason', None) or e
+            if 'timed out' in str(_reason).lower() or isinstance(e, TimeoutError):
+                _local_hint = (f" — the model did not send a byte within the {Config.AI_TIMEOUT}s wait "
+                               f"(flex/priority-tier models queue for a long time). Raise it: /aitimeout <seconds>")
             last_error = f"[NETWORK ERROR] {e}{_local_hint}"
             learn_error(str(e), "network")
             if attempt < retry:
@@ -8096,7 +8110,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                 data=json.dumps(payload).encode(),
                 headers=build_headers(api_key=_api_key, api_base=_api_base),
             )
-            with urlopen_with_ssl(req, timeout=600) as resp:
+            with urlopen_with_ssl(req, timeout=Config.AI_TIMEOUT) as resp:
                 if stream if stream is not None else Config.STREAM:
                     _sr = stream_response(resp, cancel_event=cancel_event)
                     if _sr == RESPONSE_BUDGET_EXHAUSTED and not budget_scaled:
@@ -8194,6 +8208,10 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             _lb = (_api_base or Config.API_BASE or "")
             if "127.0.0.1" in _lb or "localhost" in _lb:
                 _local_hint = " — no local server running. Configure a provider: /model or /provider add (wizard)"
+            _reason = getattr(e, 'reason', None) or e
+            if 'timed out' in str(_reason).lower() or isinstance(e, TimeoutError):
+                _local_hint = (f" — the model did not send a byte within the {Config.AI_TIMEOUT}s wait "
+                               f"(flex/priority-tier models queue for a long time). Raise it: /aitimeout <seconds>")
             last_error = f"[NETWORK ERROR] {e}{_local_hint}"
             learn_error(str(e), "network")
             if attempt < retry:
@@ -8212,7 +8230,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             last_error = f"[ERROR] {e}"
             learn_error(str(e), "ask_ai exception")
             break
-    
+
     return last_error
 
 def stream_response(resp, cancel_event=None):
@@ -9150,6 +9168,7 @@ def get_cmd_help():
    /temperature <0-2>   Set AI temperature (default 0.7)
    /thinking <off|l|m|h> Set reasoning effort (off/low/medium/high)
    /timeout <sec>       Set command execution timeout
+   /aitimeout <sec>     Set AI request wait timeout (flex models need more)
    /autosave <sec>      Set auto-save interval (>=10s)
    /maxhistory <n>      Set max conversation history length
    /maxtokens <n>       Override max context tokens (>=10000)
@@ -9785,7 +9804,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.3 — MegaDyne Systems")
+        print("Prism32 v7.2.4 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -9977,7 +9996,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.3 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.2.4 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
@@ -10821,6 +10840,26 @@ def main():
             else:
                 print(f"  Command timeout: {t['bright']}{Config.CMD_TIMEOUT}s{RST}")
                 print(f"  {t['dim']}Usage: timeout <seconds>{RST}")
+            print()
+            continue
+
+        if cmd == 'aitimeout':
+            if args_str:
+                try:
+                    val = int(args_str)
+                    if val >= 60:
+                        Config.AI_TIMEOUT = val
+                        Config.save_config()
+                        print(f"  {t['bright']}+ AI request timeout set to: {val}s{RST}")
+                    else:
+                        print(f"  {t['dim']}Must be >= 60 seconds (flex models queue for a long time){RST}")
+                except ValueError:
+                    print(f"  {t['dim']}Usage: aitimeout <seconds>{RST}")
+            else:
+                print(f"  AI request timeout: {t['bright']}{Config.AI_TIMEOUT}s{RST}")
+                print(f"  {t['dim']}How long to wait for a model response before giving up.{RST}")
+                print(f"  {t['dim']}Raise it for flex/priority-tier models that queue (default 3600s).{RST}")
+                print(f"  {t['dim']}Usage: aitimeout <seconds>{RST}")
             print()
             continue
 
