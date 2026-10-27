@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.5 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.6 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -1086,7 +1086,13 @@ def refresh_memory_profile(save=True):
 def _probe_version(exe_path):
     for args in ([exe_path, "--version"], [exe_path, "version"], [exe_path, "-v"]):
         try:
-            result = subprocess.run(args, capture_output=True, text=True, timeout=2)
+            # 5s: mise-shimmed Node CLIs can take >2s cold (kimi measured
+            # 1.2s warm); 2s silently emptied their version_text.
+            result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+            # rc==0 required: a failing CLI's stderr (e.g. a mise "no
+            # version set for shim" error) is not a version string.
+            if result.returncode != 0:
+                continue
             out = (result.stdout or result.stderr or "").strip().splitlines()
             if out:
                 return out[0][:120]
@@ -1173,7 +1179,11 @@ def ensure_harness_scan(force=False):
     except OSError:
         stale = True
     if force or stale:
-        data = detect_harnesses(probe_versions=force)
+        # Probe versions on EVERY real scan (force only bypasses
+        # staleness): a stale-refresh rescan used to run without probing,
+        # wiping every harness's version_text to "" and persisting it —
+        # the boot path then served the emptied cache indefinitely.
+        data = detect_harnesses(probe_versions=True)
         save_harnesses(data)
         return data
     return load_harnesses()
@@ -1197,19 +1207,23 @@ def format_harnesses(data=None, verbose=True):
             lines.append(f"  hint: {h.get('hint')}")
     return "\n".join(lines)
 
-def harness_context(limit=1600):
+def harness_context(limit=2400):
     data = ensure_harness_scan(force=False)
     installed = data.get("installed", [])
     if not installed:
         return "AI harnesses: none detected yet. Use /harness scan after installing external agent CLIs."
     lines = ["AI HARNESS ABSORPTION: external agent CLIs detected and usable from execute blocks. Use FULL PATHS to invoke them:"]
-    for h in installed[:8]:
+    for h in installed[:12]:
         abilities = ", ".join(h.get("abilities", [])[:4])
         full_path = h.get("path", "") or h.get("command", "")
         lines.append(f"- {h.get('display', h.get('id'))}: {full_path}  abilities: {abilities}. {h.get('hint', '')}")
     lines.append("Use /harness delegate <task> to spawn a super subagent seeded with these capabilities.")
     text = "\n".join(lines)
-    return text[:limit]
+    if len(text) <= limit:
+        return text
+    # Truncate at the last complete line — mid-line cuts corrupt the
+    # last harness entry (path/abilities) for the model reading it.
+    return text[:limit].rsplit("\n", 1)[0]
 
 def _harness_super_task(task):
     return (
@@ -2661,7 +2675,15 @@ def _do_git_update(project_dir=None):
         print(f"\n  {t['ok']}Update complete! Version: {ver}{RST}")
         return True
     else:
-        print(f"  {t['err']}Install failed:{RST}\n  {result.stderr[:500]}")
+        # install.sh prints its diagnostics to stdout — stderr alone was
+        # always empty, so failures showed as a bare "Install failed:".
+        _diag = (result.stderr or "").strip()[-500:]
+        _out = (result.stdout or "").strip()[-500:]
+        print(f"  {t['err']}Install failed (exit {result.returncode}):{RST}")
+        if _out:
+            print(f"  {t['dim']}{_out}{RST}")
+        if _diag:
+            print(f"  {t['dim']}{_diag}{RST}")
         return False
 
 def _hot_reload_argv(runtime_py, session_id, passthrough):
@@ -5486,6 +5508,25 @@ def agent_cancel_requested(cancel_event=None):
 def agent_cancel_message():
     return _AGENT_CANCEL_REASON or "Agent stopped by Escape"
 
+_AI_AUTO_RETRIES = 6  # transient-failure resends before giving the turn back
+
+def _ai_failure_kind(resp):
+    """Classify an ask_ai result for the agent loops.
+    Returns 'empty' for no response, 'auth' for wrong/missing key (401),
+    'budget' for reasoning-budget exhaustion (needs /maxtokens), 'retry'
+    for other transient errors (5xx, network, timeouts), or None for
+    normal model content. Auth and budget failures cannot heal by
+    resending — they need operator action, so the loops break on them."""
+    if not resp:
+        return 'empty'
+    if resp.startswith(('[HTTP ERROR', '[NETWORK ERROR', '[ERROR]')):
+        if '401' in resp:
+            return 'auth'
+        if 'exhausted its entire response budget' in resp:
+            return 'budget'
+        return 'retry'
+    return None
+
 def _interjection_start():
     global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
     if _INTERJECTION_ACTIVE:
@@ -6494,7 +6535,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.5 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.6 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6505,12 +6546,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.5 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.6 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.5 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.6 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -7429,6 +7470,7 @@ class SubAgent:
             return
         try:
             nudges = 0
+            ai_retries = 0
             nudge_marks = []  # indices of announce/nudge exchanges in self._history
           # (body guarded below)
             for iteration in range(self.max_steps):
@@ -7447,10 +7489,29 @@ class SubAgent:
                     self.error = agent_cancel_message()
                     self.done = True
                     return
-                if (not resp or resp.startswith(('[HTTP ERROR', '[NETWORK ERROR', '[ERROR]'))):
-                    # Only real error prefixes are fatal here — a model reply
-                    # that merely begins with '[' (citations, timestamps) is
-                    # legitimate content.
+                _fail = _ai_failure_kind(resp)
+                if _fail is not None:
+                    # Same auto-retry policy as the main agent loop: resend
+                    # transient failures with backoff so a flaky API round
+                    # doesn't kill the subagent mid-task. Auth/budget
+                    # failures are fatal here too (operator action needed).
+                    if _fail in ('retry', 'empty'):
+                        ai_retries += 1
+                        if ai_retries <= _AI_AUTO_RETRIES:
+                            _delay = min(60, 5 * (2 ** (ai_retries - 1)))
+                            _summary = ("No response" if _fail == 'empty'
+                                        else (resp or '').splitlines()[0][:70])
+                            viz.status(f"[{self.id}] {_summary} — retrying in {_delay}s "
+                                       f"({ai_retries}/{_AI_AUTO_RETRIES})", "warning")
+                            _end_t = time.time() + _delay
+                            _aborted = False
+                            while time.time() < _end_t:
+                                if agent_cancel_requested():
+                                    _aborted = True
+                                    break
+                                time.sleep(0.5)
+                            if not _aborted:
+                                continue
                     self.error = resp or "No response"
                     self.result = f"[SUBAGENT ERROR] {self.error}"
                     break
@@ -9884,7 +9945,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.5 — MegaDyne Systems")
+        print("Prism32 v7.2.6 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -10013,7 +10074,7 @@ def main():
             _PluginHooks._history = history
             cmd_log = _rs.get('cmd_log') or []
             _CURRENT_SESSION_ID = args.resume_session
-            print(f"  {t['bright']}Update applied — session resumed ({len(_hist)} messages restored).{RST}")
+            print(f"  {t['bright']}Session resumed — {len(_hist)} messages restored ({args.resume_session}).{RST}")
         else:
             print(f"  {t['warn']}Hot-update session not found — starting fresh.{RST}")
 
@@ -10094,7 +10155,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.5 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.2.6 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
@@ -11618,6 +11679,7 @@ def main():
         max_iter = 9999
         nudges = 0
         asks = 0
+        ai_retries = 0
         nudge_marks = []  # history indices of announce/nudge exchanges added this turn
 
         for iteration in range(max_iter):
@@ -11668,13 +11730,36 @@ def main():
                 break
             if resp is None:
                 break
-            if not resp:
-                print(f"\n  {T()['warn']}No response from AI — press Enter to retry or type /quit to exit{RST}\n")
-                break
-            if resp.startswith('[HTTP ERROR') or resp.startswith('[NETWORK ERROR') or resp.startswith('[ERROR]'):
-                box("AI ERROR", resp, "err")
-                if "401" in resp:
+            # Transient failures auto-retry: the harness keeps the session
+            # alive and resends it with backoff instead of dropping back to
+            # the operator prompt mid-task (the old behavior needed a
+            # manual nudge after every API hiccup). Escape still cancels
+            # during the wait; auth/budget failures still break (operator
+            # action required, resending cannot fix them).
+            _fail = _ai_failure_kind(resp)
+            if _fail is not None:
+                if _fail in ('retry', 'empty'):
+                    ai_retries += 1
+                    if ai_retries <= _AI_AUTO_RETRIES:
+                        _delay = min(60, 5 * (2 ** (ai_retries - 1)))
+                        _summary = ("No response from AI" if _fail == 'empty'
+                                    else (resp or '').splitlines()[0][:90])
+                        viz.status(f"{_summary} — resending in {_delay}s "
+                                   f"(auto-retry {ai_retries}/{_AI_AUTO_RETRIES})", "warning")
+                        _end_t = time.time() + _delay
+                        _cancelled_during_wait = False
+                        while time.time() < _end_t:
+                            if agent_cancel_requested():
+                                _cancelled_during_wait = True
+                                break
+                            time.sleep(0.5)
+                        if not _cancelled_during_wait:
+                            continue  # resend — history/session intact
+                box("AI ERROR", resp or "No response from AI", "err")
+                if _fail == 'auth':
                     print(f"  {T()['dim']}Tip: /provider key <key> sets it — or pick models/providers with /model{RST}")
+                elif _fail == 'empty':
+                    print(f"\n  {T()['warn']}No response from AI — press Enter to retry or type /quit to exit{RST}\n")
                 break
 
             resp, asked = handle_ask_blocks(resp, history, return_asked=True)

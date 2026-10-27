@@ -719,8 +719,11 @@ elif [ -n "${SYSTEM_BIN_INSTALLED:-}" ] && [ -x "$BIN" ]; then
 fi
 # Resolve against a fresh login's PATH — the installer's own export
 # (LOCAL_BIN prepended) would always find the new wrapper first and mask
-# any stale prism32 shadowing it in default shells.
-LOGIN_CMD_PATH="$(PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" command -v "$NAME" 2>/dev/null)"
+# any stale prism32 shadowing it in default shells. `|| true`: user-mode
+# installs put the wrapper in ~/.local/bin, which is NOT on this restricted
+# PATH — command -v exits 1 and `set -e` killed the whole install at Step 9
+# ("Install failed" with empty output; only system-path installs survived).
+LOGIN_CMD_PATH="$(PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" command -v "$NAME" 2>/dev/null || true)"
 if [ -n "$INSTALLED_WRAPPER" ]; then
   if [ "$LOGIN_CMD_PATH" = "$INSTALLED_WRAPPER" ]; then
     ok "Command: $INSTALLED_WRAPPER"
