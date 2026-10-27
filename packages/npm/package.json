@@ -1,6 +1,6 @@
 {
   "name": "@megadynesystems/prism32",
-  "version": "7.2.6",
+  "version": "7.2.7",
   "description": "Self-extending polymorphic AI super-agent \u2014 cross-platform terminal harness (Python, distributed via npm for convenience)",
   "author": "MegaDyne Systems <dev@megadynesystems.com>",
   "license": "Apache-2.0",

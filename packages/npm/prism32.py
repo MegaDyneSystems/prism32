@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.6 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.7 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -1211,7 +1211,8 @@ def harness_context(limit=2400):
     data = ensure_harness_scan(force=False)
     installed = data.get("installed", [])
     if not installed:
-        return "AI harnesses: none detected yet. Use /harness scan after installing external agent CLIs."
+        msg = "AI harnesses: none detected yet. Use /harness scan after installing external agent CLIs."
+        return msg if len(msg) <= limit else msg[:limit].rsplit("\n", 1)[0]
     lines = ["AI HARNESS ABSORPTION: external agent CLIs detected and usable from execute blocks. Use FULL PATHS to invoke them:"]
     for h in installed[:12]:
         abilities = ", ".join(h.get("abilities", [])[:4])
@@ -6535,7 +6536,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.6 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.7 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6546,12 +6547,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.6 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.7 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.6 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.7 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -9945,7 +9946,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.6 — MegaDyne Systems")
+        print("Prism32 v7.2.7 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -10155,7 +10156,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.6 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.2.7 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")

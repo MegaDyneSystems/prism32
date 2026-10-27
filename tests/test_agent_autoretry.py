@@ -84,10 +84,33 @@ class HarnessScanFixesTestCase(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_harness_context_truncates_on_line_boundary(self):
-        long_ctx = harness_context(limit=50)
-        self.assertLessEqual(len(long_ctx), 50)
-        if long_ctx:
-            self.assertNotIn('\n', long_ctx[45:])  # no mid-line corruption tail
+        # Hermetic: force a known scan result with long entries.
+        fake = {'version': 1, 'scanned_at': 'now', 'missing': [],
+                'installed': [
+                    {'id': f'h{i}', 'display': f'Harness {i}', 'path': f'/some/very/long/path/number{i}/bin/cli',
+                     'abilities': ['a', 'b'], 'hint': f'hint text {i}'}
+                    for i in range(10)
+                ]}
+        orig = globals()['ensure_harness_scan']
+        try:
+            globals()['ensure_harness_scan'] = lambda force=False: fake
+            long_ctx = harness_context(limit=300)
+            self.assertLessEqual(len(long_ctx), 300)
+            # No mid-line corruption: every line is a complete entry.
+            for line in long_ctx.split('\n'):
+                self.assertTrue(line.startswith(('-', 'AI HARNESS', 'Use /harness')), line)
+        finally:
+            globals()['ensure_harness_scan'] = orig
+
+    def test_harness_context_none_installed_respects_limit(self):
+        fake = {'version': 1, 'scanned_at': 'now', 'missing': [], 'installed': []}
+        orig = globals()['ensure_harness_scan']
+        try:
+            globals()['ensure_harness_scan'] = lambda force=False: fake
+            short = harness_context(limit=50)
+            self.assertLessEqual(len(short), 50)
+        finally:
+            globals()['ensure_harness_scan'] = orig
 
 
 if __name__ == '__main__':
