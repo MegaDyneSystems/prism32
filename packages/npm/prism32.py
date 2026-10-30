@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.7 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.8 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -4426,6 +4426,12 @@ class Config:
             if api_key is not None:
                 entry["api_key"] = str(api_key).strip()
             provs[name] = entry
+            # Setting the ACTIVE provider's key wires it into the request
+            # path too (top-level api_key), not just the registry entry.
+            if (cls.PROVIDER or "").strip() == name and api_key is not None:
+                data["api_key"] = str(api_key).strip()
+                cls.API_KEY = str(api_key).strip()
+                cls.SESSION_ONLY_KEYS.discard("api_key")
             data["providers"] = provs
             if persist:
                 _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
@@ -4510,7 +4516,13 @@ class Config:
                         cls.API_BASE = reg.get("api_base", cls.API_BASE)
                     if "model" not in data:
                         cls.MODEL = reg.get("model", cls.MODEL)
-                    if "api_key" not in data and reg.get("default_key"):
+                    # Registry key lift: an EMPTY top-level key must not
+                    # shadow the active provider's stored key. save_config
+                    # persists api_key: "" whenever it was unset, so the
+                    # old `if "api_key" not in data` check was permanently
+                    # false after the first config save — every boot came
+                    # up keyless and every request 401'd (NO key sent).
+                    if not (cls.API_KEY or "").strip() and reg.get("default_key"):
                         cls.API_KEY = reg["default_key"]
             if "max_history" in data:
                 cls.MAX_HISTORY = _tolerant_int(data["max_history"], cls.MAX_HISTORY)
@@ -6536,7 +6548,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.7 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.8 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6547,12 +6559,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.7 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.8 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.7 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.8 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -9946,7 +9958,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.7 — MegaDyne Systems")
+        print("Prism32 v7.2.8 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -10156,7 +10168,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.7 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.2.8 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
@@ -10390,7 +10402,18 @@ def main():
                     if len(_p_parts) >= 3:
                         _pname, _pkey = _p_parts[1], _p_parts[2]
                         Config.set_provider_entry(_pname, api_key=_pkey)
-                        print(f"  {t['bright']}+ {_pname} key set: {mask_key(_pkey)}{RST}")
+                        if _pname == (Config.PROVIDER or "").strip():
+                            # Active provider's key must reach the request
+                            # path NOW — it used to only update the
+                            # providers.<name> entry while Config.API_KEY
+                            # stayed empty, so the very next request 401'd
+                            # with "NO key was sent".
+                            Config.API_KEY = _pkey.strip()
+                            Config.SESSION_ONLY_KEYS.discard("api_key")
+                            Config.save_config()
+                            print(f"  {t['bright']}+ {_pname} key set: {mask_key(_pkey)} (active — applies now){RST}")
+                        else:
+                            print(f"  {t['bright']}+ {_pname} key set: {mask_key(_pkey)}{RST}")
                     elif len(_p_parts) == 2:
                         _pkey = _p_parts[1]
                         Config.API_KEY = _pkey.strip()
@@ -12234,6 +12257,12 @@ def _apply_model_selection(provider, model_id, role):
             Config.save_config()
         else:
             Config.MODEL = model_id
+            # Same-provider re-pick: a key set since boot must still reach
+            # the request path — lift it when the active key is empty.
+            _rk = (reg.get("default_key") or "").strip()
+            if _rk and not (Config.API_KEY or "").strip():
+                Config.API_KEY = _rk
+                Config.SESSION_ONLY_KEYS.discard("api_key")
             Config.SESSION_ONLY_KEYS.discard("model")
             Config.save_config()
         print(f"  {t['bright']}+ Main model: {model_id} [{provider}]{RST}")
