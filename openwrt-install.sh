@@ -47,7 +47,7 @@ sub()   { printf "  ${DIM}|${RST}  %s\n" "$*"; }
 # ── Banner ──
 printf "\n"
 printf "  ${BLD}+========================================+${RST}\n"
-printf "  ${BLD}|  Prism32 OpenWrt Installer v6.8      |${RST}\n"
+printf "  ${BLD}|  Prism32 OpenWrt Installer v7.2.9      |${RST}\n"
 printf "  ${BLD}|  MegaDyne Systems Edition             |${RST}\n"
 printf "  ${BLD}+========================================+${RST}\n"
 printf "\n"
@@ -135,8 +135,10 @@ else
             warn "Low flash space (${FREE_KB}KB free). Consider using USB:"
             warn "  sh openwrt-install.sh /mnt/usb"
             printf "  Continue installing to flash? (y/N): "
-            if [ "$AUTO" = "0" ]; then
-                read -r confirm
+            if [ "$AUTO" = "0" ] && [ -t 0 ]; then
+                # tty-guarded: EOF/piped stdin used to kill the script
+                # silently under set -e (read returns 1 at EOF).
+                read -r confirm || confirm=""
                 case "$confirm" in
                     y|Y|yes) ;;
                     *) warn "Aborted. Try: sh $0 /mnt/usb"; exit 0 ;;
@@ -339,7 +341,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 header "Step 6/6 - Complete"
 
-printf "  ${BLD}Prism32 v6.8 installed!${RST}\n"
+printf "  ${BLD}Prism32 v7.2.9 installed!${RST}\n"
 printf "\n"
 printf "  ${DIM}Install location:${RST}  $RUNTIME_DIR\n"
 printf "  ${DIM}Wrapper:${RST}           $WRAPPER\n"

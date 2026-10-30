@@ -221,11 +221,16 @@ echo -e "  ${DIM}OS:${RST}     $(uname -s)  $(uname -m)"
 echo -e "  ${DIM}Python:${RST}  $("$PY3" --version 2>&1)${DIM} ($PY3)${RST}"
 echo -e "  ${DIM}User:${RST}    $(whoami)"
 
+# A PREFIX whose bin/ doesn't exist yet is not a root problem — create it
+# (a nonexistent dir used to fail -w and misroute the wrapper to ~/.local/bin).
+if [ ! -d "${PREFIX:-/usr/local}/bin" ] && ! mkdir -p "${PREFIX:-/usr/local}/bin" 2>/dev/null; then
+  NEED_ROOT=1
+fi
 if [ ! -w "${PREFIX:-/usr/local}/bin" ]; then
   NEED_ROOT=1
   if [ "$AUTO" = "0" ] && [ -z "${SU_PASS+x}" ] && [ -t 0 ]; then
     echo ""
-    echo -e "  ${Y}w${RST} Root access required for symlink in /usr/local/bin/"
+    echo -e "  ${Y}w${RST} Root access required for symlink in ${PREFIX:-/usr/local}/bin/"
     echo -n "  Root password: "; read -rs SU_PASS || true; echo ""
   fi
 fi
@@ -257,11 +262,14 @@ if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
   # that were never made; leave existing files untouched and let the
   # per-user path take over.
   ok "Auto mode, no root credentials — leaving system paths untouched"
-elif [ -f "$BIN" ] || [ -l "$BIN" ]; then
+elif [ -f "$BIN" ] || [ -L "$BIN" ]; then
+  # -L (not the invalid -l): a dangling symlink from a broken prior
+  # install must still be detected, or the backup branch is skipped and
+  # the wrapper write below dies writing THROUGH the dead link.
   if root cp -P "$BIN" "$BIN_BACKUP"; then
     ok "Backed up $BIN"
     backups=$((backups+1))
-    root rm -f "$BIN"
+    root rm -f "$BIN" || warn "Could not remove old $BIN (backup at $BIN_BACKUP)"
   else
     fail "Backup failed — keeping existing binary, aborting"
     exit 1
@@ -366,7 +374,8 @@ WRAP
   # Best-effort PATH persistence for system installs (openwrt-install.sh
   # pattern): non-interactive /bin/sh logins (Synology DSM) source nothing.
   if [ -d /etc/profile.d ]; then
-    root "printf '%s\n' 'PATH=\"$PREFIX/bin:\$PATH\"' 'export PATH' > /etc/profile.d/prism32.sh" 2>/dev/null \
+    _PFX="${PREFIX:-/usr/local}"
+    root "printf '%s\n' 'PATH=\"$_PFX/bin:\$PATH\"' 'export PATH' > /etc/profile.d/prism32.sh" 2>/dev/null \
       && root chmod 755 /etc/profile.d/prism32.sh 2>/dev/null \
       && ok "PATH updated: /etc/profile.d/prism32.sh" || true
   fi
@@ -398,27 +407,31 @@ header "Step 5/9 - API Configuration"
 
 # In auto-update mode, preserve existing config — don't clobber provider info
 if [ "$AUTO" = "1" ] && [ -f "$CONFIG_FILE" ]; then
-  ok "Auto-update mode: preserving existing config (provider, model, API key)"
-  # Load current values from config so Steps 6-9 have them
-  eval "$("$PY3" -c "
-import json, sys
-try:
-    c = json.load(open(sys.argv[1]))
-except Exception:
-    # Unparsable config: fall back loudly rather than eval'ing empty output
-    # (empty eval returns 0 and silently starves the {defaults} guard of
-    # set -u downstream)
-    print('PROV=local'); print('MODEL='); print('API_BASE=http://127.0.0.1:8080')
-    sys.exit(1)
-print(f'PROV=\"{c.get(\"provider\",\"local\")}\"')
-print(f'MODEL=\"{c.get(\"model\",\"\")}\"')
-print(f'API_BASE=\"{c.get(\"api_base\",\"\")}\"')
-" "$CONFIG_FILE" 2>/dev/null)" 2>/dev/null || {
+  # Validate first: a corrupt config must not be silently "preserved"
+  # (the old path claimed preservation while substituting defaults).
+  if ! "$PY3" -c "import json, sys; json.load(open(sys.argv[1]))" "$CONFIG_FILE" >/dev/null 2>&1; then
+    warn "Config is corrupt — quarantining (kept as config.json.corrupt.<ts>)"
+    mv "$CONFIG_FILE" "$CONFIG_FILE.corrupt.$(date +%s)" 2>/dev/null || true
     PROV="local"; MODEL=""; API_BASE="http://127.0.0.1:8080"
-  }
-  ALL_PROVIDERS="{}"
-  # Skip to step 6
-  skip_config_write=1
+    ALL_PROVIDERS="{}"
+    skip_config_write=0
+  else
+    ok "Auto-update mode: preserving existing config (provider, model, API key)"
+    # Load current values so Steps 6-9 have them. shlex.quote: these
+    # assignments are eval'd — a quote/backtick/$(...) in a config value
+    # used to execute arbitrary shell code on every update run.
+    eval "$("$PY3" -c "
+import json, shlex, sys
+c = json.load(open(sys.argv[1]))
+print('PROV=' + shlex.quote(str(c.get('provider', 'local'))))
+print('MODEL=' + shlex.quote(str(c.get('model', ''))))
+print('API_BASE=' + shlex.quote(str(c.get('api_base', ''))))
+" "$CONFIG_FILE")" || {
+      PROV="local"; MODEL=""; API_BASE="http://127.0.0.1:8080"
+    }
+    ALL_PROVIDERS="{}"
+    skip_config_write=1
+  fi
 else
   skip_config_write=0
   ALL_PROVIDERS="{}"
@@ -432,7 +445,7 @@ _configure_provider() {
 
   sel="${PROVIDER_SELECT:-}"
   if [ -z "$sel" ] && [ -t 0 ]; then
-    read -r -p "  Select provider [1-${#EP_KEYS[@]}] (default: 1): " sel
+    read -r -p "  Select provider [1-${#EP_KEYS[@]}] (default: 1): " sel || sel=""
   fi
   sel="${sel:-1}"
   idx=$((sel - 1))
@@ -445,7 +458,7 @@ _configure_provider() {
   local api_default="${EP_BASE[$pidx]}"
   local api_val=""
   if [ -t 0 ]; then
-    read -r -p "  API endpoint [$api_default]: " api_val
+    read -r -p "  API endpoint [$api_default]: " api_val || api_val=""
   fi
   local api_base="${api_val:-$api_default}"
   sub "Endpoint: $api_base"
@@ -485,7 +498,7 @@ except Exception:
     local fb="${EP_MODELS_FALLBACK[$pidx]}"
     echo -e "  ${Y}w${RST} Could not fetch models — enter manually"
     if [ -t 0 ]; then
-      read -r -p "  Model name [$fb]: " model_name
+      read -r -p "  Model name [$fb]: " model_name || model_name=""
     fi
     model_name="${model_name:-$fb}"
   else
@@ -503,7 +516,7 @@ except Exception:
     echo ""
     local mdl_sel=""
     if [ -t 0 ]; then
-      read -r -p "  Select model [1-${#MODELS[@]}] (default: 1): " mdl_sel
+      read -r -p "  Select model [1-${#MODELS[@]}] (default: 1): " mdl_sel || mdl_sel=""
     fi
     mdl_sel="${mdl_sel:-1}"
     local mdl_idx=$((mdl_sel - 1))
@@ -554,7 +567,7 @@ else
   # Ask for more
   while [ -t 0 ]; do
     echo ""
-    read -r -p "  Configure another provider? (y/N): " more
+    read -r -p "  Configure another provider? (y/N): " more || more=""
     more="${more:-n}"
     [ "$more" != "y" ] && [ "$more" != "Y" ] && [ "$more" != "yes" ] && break
     _configure_provider
@@ -674,10 +687,14 @@ PYEOF
 fi
 
 echo ""
+# Mask secrets: this dump used to print api_key and root_pass in cleartext
+# into piped logs and terminal recordings.
 "$PY3" -c "
 import json, sys
 c = json.load(open(sys.argv[1]))
 for k, v in c.items():
+    if k in ('api_key', 'root_pass') and v:
+        v = str(v)[:4] + '***'
     print(f'    ${DIM}{k}:${RST} {v}')
 " "$CONFIG_FILE" 2>/dev/null || true
 

@@ -43,7 +43,10 @@ ok "Python: $("$PY3" --version 2>&1)"
 # Clone or update
 if [ -d "$CLONE_DIR/.git" ]; then
   ok "Updating existing Prism32 clone..."
-  git -C "$CLONE_DIR" pull origin main 2>/dev/null || true
+  # Hard-sync (not pull): a dirty clone makes pull a silent no-op while
+  # reporting success — the stale-version pattern bootstrap.sh fixed.
+  git -C "$CLONE_DIR" fetch origin 2>/dev/null \
+    && git -C "$CLONE_DIR" reset --hard origin/main 2>/dev/null || true
 else
   echo -e "  \033[2mCloning repository...\033[0m"
   git clone --depth 1 "$REPO" "$CLONE_DIR"
@@ -123,5 +126,5 @@ echo ""
 echo -e "  \033[2mTo use a cloud provider (OpenRouter/Groq/etc.):${RST:-}"
 echo -e "  \033[2m  prism32  then inside: /provider key openrouter sk-or-...${RST:-}"
 echo ""
-echo -e "  \033[2mMegaDyne Systems (MDS) — Prism32 v6.8\033[0m"
+echo -e "  \033[2mMegaDyne Systems (MDS) — Prism32 v7.2.9\033[0m"
 echo ""

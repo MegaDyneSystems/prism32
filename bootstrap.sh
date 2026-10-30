@@ -32,8 +32,10 @@ if [ ! -d "$HOME" ] || [ ! -w "$HOME" ]; then
       fi
       rm -f "$candidate/.exec_test.$$"
     done
+    # Last-resort fallback must NOT fail: HOME=$(…) under set -eu kills
+    # the whole script on exactly the no-exec-home boxes this serves.
     echo "/root"
-    return 1
+    return 0
   }
   HOME=$(_find_exec_home)
   export HOME
@@ -177,8 +179,9 @@ if [ -f "/etc/openwrt_release" ]; then
         && git -C "$CLONE_DIR" reset --hard origin/main 2>/dev/null || true
   else
     git clone --depth 1 "$REPO" "$CLONE_DIR" 2>/dev/null || {
-      # Git not available — download directly
-      warn "git not available, downloading files directly..."
+      # Clone failed (network/auth) — fall back to direct download.
+      # (Not necessarily "git not available" — don't mislabel the cause.)
+      warn "git clone failed — downloading files directly..."
       mkdir -p "$RUNTIME_DIR"
       wget -qO- "$RAW/prism32.py" > "$RUNTIME_DIR/prism32.py" 2>/dev/null || \
         curl -fsSL "$RAW/prism32.py" > "$RUNTIME_DIR/prism32.py"
@@ -239,25 +242,28 @@ if [ "$OS" = "Linux" ]; then
   # Check for package managers and install Python+git if needed
   if [ -z "$PY3" ]; then
     warn "Python 3 not found, installing..."
+    # Root containers have no sudo binary — check id first or set -e dies.
+    _S=""
+    [ "$(id -u)" = "0" ] || _S="sudo"
     if command -v apt-get >/dev/null 2>&1; then
-      sudo apt-get update -qq && sudo apt-get install -y python3 git
+      $_S apt-get update -qq && $_S apt-get install -y python3 git
     elif command -v dnf >/dev/null 2>&1; then
-      sudo dnf install -y python3 git
+      $_S dnf install -y python3 git
     elif command -v yum >/dev/null 2>&1; then
-      sudo yum install -y python3 git
+      $_S yum install -y python3 git
     elif command -v pacman >/dev/null 2>&1; then
-      sudo pacman -S --noconfirm python git
+      $_S pacman -S --noconfirm python git
     elif command -v zypper >/dev/null 2>&1; then
-      sudo zypper install -y python3 git
+      $_S zypper install -y python3 git
     elif command -v apk >/dev/null 2>&1; then
-      sudo apk add python3 git
+      $_S apk add python3 git
     elif command -v emerge >/dev/null 2>&1; then
-      sudo emerge python git
+      $_S emerge python git
     elif command -v xbps-install >/dev/null 2>&1; then
-      sudo xbps-install -y python3 git
+      $_S xbps-install -y python3 git
     elif command -v pkg >/dev/null 2>&1; then
       # FreeBSD/TrueOS
-      sudo pkg install -y python3 git
+      $_S pkg install -y python3 git
     else
       fail "No recognized package manager found."
       echo -e "  ${DIM}Install Python 3.7+ and git manually, then run:${RST}"
@@ -269,9 +275,9 @@ if [ "$OS" = "Linux" ]; then
 
   if ! command -v git >/dev/null 2>&1; then
     # Try to install git without sudo (may already be available on some systems)
-    if command -v apt-get >/dev/null 2>&1; then sudo apt-get install -y git
-    elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y git
-    elif command -v pacman >/dev/null 2>&1; then sudo pacman -S --noconfirm git
+    if command -v apt-get >/dev/null 2>&1; then $_S apt-get install -y git
+    elif command -v dnf >/dev/null 2>&1; then $_S dnf install -y git
+    elif command -v pacman >/dev/null 2>&1; then $_S pacman -S --noconfirm git
     fi
   fi
 

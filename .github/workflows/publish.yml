@@ -89,7 +89,7 @@ jobs:
           VERSION="${TAG#v}"
           URL="https://github.com/MegaDyneSystems/prism32/raw/${TAG}/prism32.py"
           SHA256=$(curl -sL "$URL" | sha256sum | awk '{print $1}')
-          sed -i "s|url \"https://github.com/MegaDyneSystems/prism32/raw/v[0-9.\]*/prism32.py\"|url \"$URL\"|" tap/prism32.rb
+          sed -i "s|url \"https://github.com/MegaDyneSystems/prism32/raw/v[0-9.A-Za-z.-]*/prism32.py\"|url \"$URL\"|" tap/prism32.rb
           sed -i "s/sha256 \"[a-f0-9]*\"/sha256 \"$SHA256\"/" tap/prism32.rb
           sed -i "s/version \"[0-9.]*\"/version \"$VERSION\"/" tap/prism32.rb
           cd tap

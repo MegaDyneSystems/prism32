@@ -1,16 +1,19 @@
 {
-    "version": "6.9.0",
-    "description": "Self-extending polymorphic AI super-agent",
-    "homepage": "https://github.com/MegaDyneSystems/prism32",
-    "license": "Apache-2.0",
-    "url": "https://github.com/MegaDyneSystems/prism32/raw/v6.9.0/prism32.py",
-    "hash": "e4da6c8be6ef065f2b44f801d9cb58c90428c96da47fb17d36b2b6d83c03e167",
-    "depends": "python",
-    "pre_install": [
-        "Set-Content -Path \"$dir\\prism32.cmd\" -Value '@echo off' -Encoding ASCII",
-        "Add-Content -Path \"$dir\\prism32.cmd\" -Value 'python \"%~dp0\\prism32.py\" %*' -Encoding ASCII"
-    ],
-    "bin": [
-        ["prism32.cmd", "prism32"]
+  "version": "7.2.9",
+  "description": "Self-extending polymorphic AI super-agent",
+  "homepage": "https://github.com/MegaDyneSystems/prism32",
+  "license": "Apache-2.0",
+  "url": "https://github.com/MegaDyneSystems/prism32/raw/v6.9.0/prism32.py",
+  "hash": "e4da6c8be6ef065f2b44f801d9cb58c90428c96da47fb17d36b2b6d83c03e167",
+  "depends": "python",
+  "pre_install": [
+    "Set-Content -Path \"$dir\\prism32.cmd\" -Value '@echo off' -Encoding ASCII",
+    "Add-Content -Path \"$dir\\prism32.cmd\" -Value 'python \"%~dp0\\prism32.py\" %*' -Encoding ASCII"
+  ],
+  "bin": [
+    [
+      "prism32.cmd",
+      "prism32"
     ]
+  ]
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.8 - MegaDyne Systems Terminal Agent
+Prism32 v7.2.9 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -126,17 +126,23 @@ class CommandRegistry:
         cmd = self.get(name)
         if not cmd:
             return None
-        old_stdout = sys.stdout
-        captured = io.StringIO()
-        sys.stdout = captured
-        try:
-            cmd.handler(args_str, [], [])
-            result = captured.getvalue()
-        finally:
-            sys.stdout = old_stdout
+        # Serialize the stdout swap: two concurrent captures (subagent
+        # threads) used to restore each other's stdout and corrupt both
+        # results. Foreign prints during the window are cosmetic noise;
+        # breaking capture for subagents would be worse.
+        with _DISPATCH_CAPTURE_LOCK:
+            old_stdout = sys.stdout
+            captured = io.StringIO()
+            sys.stdout = captured
+            try:
+                cmd.handler(args_str, [], [])
+                result = captured.getvalue()
+            finally:
+                sys.stdout = old_stdout
         return result
 
 registry = CommandRegistry()
+_DISPATCH_CAPTURE_LOCK = threading.Lock()
 
 # ── Provider Registry (extensible) ─────────────────────────
 PROVIDER_REGISTRY = {}
@@ -489,6 +495,7 @@ _MEMORY_DIRTY = False
 _MEMORY_FLUSH_COUNTER = 0
 _LAST_INTERJECT = ""
 _CURRENT_SESSION_ID = None
+_MAIN_CMD_LOG = []  # main-loop cmd_log reference for the timed autosaver
 _EVOLVE_MODE = False
 
 # ── Interjection state ────────────────────────────────────────
@@ -521,6 +528,9 @@ _FOOTER_TOOL_NAME = ""
 _SESSION_INPUT_TOKENS = 0
 _SESSION_OUTPUT_TOKENS = 0
 _SESSION_COST = 0.0
+# _track_usage runs from every subagent thread — the += accumulators
+# must be atomic or parallel subagents lose updates and /cost undercounts.
+_usage_lock = threading.Lock()
 # Prompt-cache tracking (across providers: OpenAI auto-cache, DeepSeek cache
 # hits, Anthropic cache reads/creation). These let /cost show cache savings.
 _SESSION_CACHE_HIT_TOKENS = 0        # tokens served from cache (cache reads)
@@ -580,7 +590,10 @@ def _fetch_api_pricing():
     if model_lower in _MODEL_PRICING:
         return  # hardcoded price is accurate, no need to hit the API
     try:
-        url = Config.API_BASE.rstrip("/") + "/models"
+        # normalize + /v1/models: every other code path builds the models
+        # URL this way — a bare base without /v1 used to 404 here and
+        # silently fall back to hardcoded pricing.
+        url = normalize_api_base(Config.API_BASE) + "/v1/models"
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {str(Config.API_KEY).strip()}",
             **PRISM32_DEFAULT_HEADERS,
@@ -717,11 +730,12 @@ def _track_usage(usage_dict):
         input_cost += (cache_create / 1000.0) * in_rate * create_mult
     output_cost = (out / 1000.0) * out_rate
 
-    _SESSION_INPUT_TOKENS += inp
-    _SESSION_OUTPUT_TOKENS += out
-    _SESSION_CACHE_HIT_TOKENS += cache_hit
-    _SESSION_CACHE_CREATION_TOKENS += cache_create
-    _SESSION_COST += input_cost + output_cost
+    with _usage_lock:
+        _SESSION_INPUT_TOKENS += inp
+        _SESSION_OUTPUT_TOKENS += out
+        _SESSION_CACHE_HIT_TOKENS += cache_hit
+        _SESSION_CACHE_CREATION_TOKENS += cache_create
+        _SESSION_COST += input_cost + output_cost
 
     # Savings = what these input tokens would have cost at full price minus what they cost now
     if is_anthropic:
@@ -793,8 +807,13 @@ def save_memory(memory):
             sorted_errs = sorted(memory["error_patterns"].items(), key=lambda x: -x[1].get("count", 0))
             memory["error_patterns"] = dict(sorted_errs[:15])
         _safe_write_json(MEMORY_FILE, memory)
-    except Exception:
-        pass
+    except OSError as e:
+        # Disk full / permissions: learning data loss must at least be
+        # visible in the debug log, not fully silent.
+        try:
+            debug_log(f"memory.json save failed: {e}")
+        except Exception:
+            pass
 
 # ── Startup Memory, Harness Absorption, and Evolve Support ─────
 
@@ -1857,14 +1876,26 @@ def _load_ltm_index():
         return idx
     except (FileNotFoundError, json.JSONDecodeError):
         return _default_ltm_index()
+    except OSError:
+        # PermissionError/IsADirectoryError etc. — the narrow pair above
+        # let these propagate and crash the whole REPL from /remember.
+        return _default_ltm_index()
 
 def _save_ltm_index(idx):
     os.makedirs(LONGTERM_DIR, exist_ok=True)
     try:
         with open(LONGTERM_INDEX_FILE, 'w') as f:
             json.dump(idx, f)
-    except Exception:
-        pass
+        return True
+    except OSError as e:
+        # NEVER swallow silently: an unpersisted next_id reuses memory
+        # ids and silently overwrites stored memories on the next store.
+        try:
+            viz.status(f"Memory index save failed ({e}) — ids may collide; "
+                       f"check {LONGTERM_DIR} permissions", "error")
+        except Exception:
+            pass
+        return False
 
 def _ltm_path(mem_id):
     return os.path.join(LONGTERM_DIR, f"mem_{mem_id:07d}.json")
@@ -2574,7 +2605,13 @@ def _do_git_update(project_dir=None):
     git_bin = shutil.which("git") if hasattr(shutil, 'which') else None
     if not git_bin:
         print(f"  {t['err']}git not found. Install: apt install git / brew install git / pkg install git{RST}")
-        return
+        return False
+
+    if project_dir and not os.path.isdir(project_dir):
+        # A typo'd /update <dir> used to raise FileNotFoundError from
+        # subprocess.run(cwd=...) and kill the whole REPL.
+        print(f"  {t['err']}Directory not found: {project_dir}{RST}")
+        return False
 
     if not project_dir:
         runtime_py = os.path.join(home, ".prism32", "prism32.py")
@@ -2596,18 +2633,23 @@ def _do_git_update(project_dir=None):
                     shutil.rmtree(clone_dir)
                 except Exception:
                     print(f"  {t['err']}Cannot remove stale {clone_dir}. Remove manually.{RST}")
-                    return
+                    return False
             clone = subprocess.run(
                 [git_bin, "clone", "https://github.com/MegaDyneSystems/prism32.git", clone_dir],
                 capture_output=True, text=True
             )
             if clone.returncode != 0:
                 print(f"  {t['err']}Clone failed:{RST}\n  {clone.stderr[:300]}")
-                return
+                return False
             project_dir = clone_dir
 
     print(f"  {t['bright']}Updating Prism32...{RST}")
-    subprocess.run([git_bin, "fetch", "origin"], capture_output=True, text=True, cwd=project_dir)
+    fetch = subprocess.run([git_bin, "fetch", "origin"], capture_output=True, text=True, cwd=project_dir)
+    if fetch.returncode != 0:
+        # Offline: a plain reset --hard origin/main would "succeed" against
+        # the stale local ref and report an update at the old version.
+        print(f"  {t['err']}git fetch failed (offline?):{RST}\n  {fetch.stderr[:300]}")
+        return False
 
     status = subprocess.run([git_bin, "status", "--porcelain"], capture_output=True, text=True, cwd=project_dir)
     has_local_changes = bool(status.stdout.strip())
@@ -4351,6 +4393,7 @@ class Config:
                 "goal_max_steps": cls.GOAL_MAX_STEPS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
                 "stream": cls.STREAM,
+                "slow_cpu": cls.SLOW_CPU,
                 "thinking_effort": cls.THINKING_EFFORT,
                 "max_memory_ctx": cls.MAX_MEMORY_CTX,
                 "max_context_tokens": cls.MAX_CONTEXT_TOKENS,
@@ -4416,6 +4459,13 @@ class Config:
                     print(f"  Config unparsable ({e}) — quarantined; provider '{name}' "
                           f"updated in registry for this session only")
                     _registry_update_mem(name, api_base, model, api_key)
+                    # Quarantine path must wire the ACTIVE provider's key
+                    # too — /provider edit calls this directly, and the
+                    # registry-only update left Config.API_KEY empty
+                    # (the 401-no-key-sent class).
+                    if api_key is not None and (cls.PROVIDER or "").strip() == name:
+                        cls.API_KEY = str(api_key).strip()
+                        cls.SESSION_ONLY_KEYS.discard("api_key")
                     return False
             provs = data.get("providers") or {}
             entry = dict(provs.get(name) or {})
@@ -5767,7 +5817,9 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     if _SESSION_COST > 0:
         cost_color = t['warn'] if _SESSION_COST >= 1.0 else t['dim']
         parts.append(f"{cost_color}${_SESSION_COST:.4f}{RST}")
-    sa_count = sum(1 for s in _SUBAGENTS.values() if not s.done)
+    # Snapshot: other threads add/remove subagents while the footer
+    # renders — iterating the live dict raises 'dictionary changed size'.
+    sa_count = sum(1 for s in list(_SUBAGENTS.values()) if not s.done)
     if sa_count > 0:
         parts.append(f"{t['warn']}SA:{sa_count}{RST}")
     if _quantum.was_used():
@@ -6343,11 +6395,42 @@ def save_current_session(history, cmd_log):
     except Exception:
         pass
 
+def _session_autosave_loop():
+    """Timed session saver — consumes Config.AUTO_SAVE_INTERVAL (>=10s).
+    /autosave <sec> set the value for years, but nothing ever read it:
+    the command printed success while timed saving did not exist."""
+    last = time.time()
+    while True:
+        time.sleep(2)
+        try:
+            interval = Config.AUTO_SAVE_INTERVAL or 0
+            if interval < 10:
+                last = time.time()
+                continue
+            if time.time() - last < interval:
+                continue
+            last = time.time()
+            hist = getattr(_PluginHooks, '_history', None)
+            if hist and any(m.get("role") != "system" for m in hist):
+                save_current_session(hist, list(_MAIN_CMD_LOG))
+        except Exception:
+            pass
+
 def cmd_session_load(session_id):
     t = T()
     session_data = load_session(session_id)
     if not session_data:
-        viz.status(f"Session not found: {session_id}", "error")
+        # Distinguish corrupt from missing — "not found" for a truncated
+        # file sent users hunting for a typo while their data sat on disk.
+        _path = None
+        try:
+            _path = get_session_path(session_id)
+        except ValueError:
+            pass
+        if _path and os.path.exists(_path):
+            viz.status(f"Session file corrupt: {_path} (quarantine it or restore from backup)", "error")
+        else:
+            viz.status(f"Session not found: {session_id}", "error")
         return None, None
     history = session_data.get("history", [])
     cmd_log = session_data.get("cmd_log", [])
@@ -6548,7 +6631,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.8 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.2.9 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6559,12 +6642,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.8 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.2.9 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.8 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.2.9 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -6898,8 +6981,14 @@ def _try_plugin_cmd(c, history=None, who=None):
                 return "No automations."
             return "\n".join(f"{a.get('id','')}: {a.get('description','')} status={a.get('status','')}" for a in autos)
         if sub == "run":
+            # Synchronous in execute blocks: report the actual outcome —
+            # "started" used to print even for missing/inactive ids.
+            auto = automation_load(subarg)
+            if not auto or auto.get("status") != "active":
+                return (f"Automation {subarg} not found or not active. "
+                        f"List available: /auto list")
             automation_execute(subarg)
-            return f"Automation {subarg} started."
+            return f"Automation {subarg} executed (synchronously)."
         if sub in ("show", "delete", "pause", "resume"):
             return f"/auto {sub} is operator-only. Use /auto create <description> or /auto list|run."
         if sub == "create" and subarg:
@@ -7854,11 +7943,21 @@ def _resolve_cache_support(provider=None, api_base=None):
         return "openai_auto"
     if "api.deepseek.com" in base:
         return "deepseek_auto"
-    # Registry mode for the provider itself (single-provider custom bases)
-    reg = PROVIDER_REGISTRY.get(prov, {})
-    mode = reg.get("cache_support")
-    if mode:
-        return mode
+    # Registry mode ONLY when the request actually targets the main
+    # provider's endpoint. An explicitly-passed foreign base (a subagent
+    # on groq while the main provider is anthropic) must not inherit the
+    # main provider's protocol mode — the known-domain checks above are
+    # exhaustive for the big three, everything else is OpenAI-compat
+    # unless the base belongs to the main provider.
+    if api_base is None:
+        reg = PROVIDER_REGISTRY.get(prov, {})
+        return reg.get("cache_support") or None
+    try:
+        if normalize_api_base(api_base) == normalize_api_base(Config.API_BASE):
+            reg = PROVIDER_REGISTRY.get(prov, {})
+            return reg.get("cache_support") or None
+    except Exception:
+        pass
     return None
 
 # ── Anthropic native Messages API (with prompt caching) ──────────────────
@@ -8049,6 +8148,14 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
                         payload["max_tokens"] = max(_prev, min(65536, _prev * 4))
                         viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
                         continue
+                    if _sr == RESPONSE_BUDGET_EXHAUSTED:
+                        # Second exhaustion: operator-actionable error (same
+                        # wording as the OpenAI-compat path) — the raw
+                        # sentinel used to leak into the conversation as if
+                        # it were the model's reply.
+                        return (f"[ERROR] The model exhausted its entire response budget "
+                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 32768")
                     return _sr
                 data = json.loads(resp.read().decode())
                 if agent_cancel_requested(cancel_event):
@@ -9958,7 +10065,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.8 — MegaDyne Systems")
+        print("Prism32 v7.2.9 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -10071,7 +10178,12 @@ def main():
     _PluginHooks.start_tick(interval=5)
     _auto_scheduler_thread = threading.Thread(target=_automation_scheduler_loop, daemon=True)
     _auto_scheduler_thread.start()
-    cmd_log = []
+    _autosave_thread = threading.Thread(target=_session_autosave_loop, daemon=True)
+    _autosave_thread.start()
+    # Alias the module-level list so the autosaver thread always sees the
+    # live object (locals rebind; the shared list is mutated in place).
+    cmd_log = _MAIN_CMD_LOG
+    cmd_log.clear()
 
     if getattr(args, 'resume_session', None):
         # Hot-update resume: the process was re-exec'd against a new
@@ -10085,7 +10197,7 @@ def main():
                 _hist = _hist[1:]
             history = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}] + _hist
             _PluginHooks._history = history
-            cmd_log = _rs.get('cmd_log') or []
+            cmd_log[:] = (_rs.get('cmd_log') if isinstance(_rs.get('cmd_log'), list) else [])
             _CURRENT_SESSION_ID = args.resume_session
             print(f"  {t['bright']}Session resumed — {len(_hist)} messages restored ({args.resume_session}).{RST}")
         else:
@@ -10095,7 +10207,8 @@ def main():
         # Headless --goal: run the mission synchronously and exit on
         # structural completion (all todo leaves done).
         m = mission_take(args.goal, wait=True)
-        print(SHOW)
+        if sys.stdout.isatty():
+            print(SHOW)  # cursor-show escape only on a terminal, not piped output
         return
 
     print(f"  {t['dim']}Prism32 MDS terminal ready. Type /help for commands. Talk to the AI naturally.{RST}")
@@ -10122,6 +10235,7 @@ def main():
         if not user_input:
             continue
         is_slash = user_input.startswith("/")
+        _appended_this_turn = False  # set by /image — skips the append below
         parts = user_input.lstrip("/").split(None, 1) if is_slash else []
         cmd = parts[0].lower() if parts else ""
         args_str = parts[1] if len(parts) > 1 else ""
@@ -10168,7 +10282,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.8 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.2.9 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
@@ -10177,9 +10291,9 @@ def main():
         if cmd == 'clear':
             history[:] = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}]
             _PluginHooks._history = history
+            _CURRENT_SESSION_ID = None
             cmd_log.clear()
             _reset_session_cost()
-            _CURRENT_SESSION_ID = None
             clear_active_goal()
             print(f"  {t['bright']}+ History cleared{RST}\n")
             continue
@@ -10985,6 +11099,10 @@ def main():
             img_content = cmd_image(args_str)
             if img_content:
                 history.append({"role": "user", "content": img_content})
+                # The multimodal message already carries this turn's input;
+                # the default-interaction append below must skip it THIS
+                # iteration only (see the guard at Default AI interaction).
+                _appended_this_turn = True
             else:
                 print()
                 continue
@@ -11329,7 +11447,7 @@ def main():
                     lines = []
                     for sid, sa in list(_SUBAGENTS.items()):
                         lines.append(f"  {sa.status_str()}")
-                    box("SUBAGENTS", "\n".join(lines), "primary" if any(not s.done for s in _SUBAGENTS.values()) else "bright")
+                    box("SUBAGENTS", "\n".join(lines), "primary" if any(not s.done for s in list(_SUBAGENTS.values())) else "bright")
                     # NOTE: Don't delete done agents here — /collect needs them.
                     # Cleanup happens in /collect after results are retrieved.
             print()
@@ -11424,6 +11542,15 @@ def main():
             print()
             continue
 
+        if cmd == 'json':
+            # Documented in help but previously had NO operator handler —
+            # typed /json fell through to the AI as a chat message.
+            plugin_result = _try_plugin_cmd(user_input, history=history, who='main')
+            if plugin_result is not None:
+                print(plugin_result)
+            print()
+            continue
+
         if cmd == 'recall':
             if args_str:
                 results = ltm_search(args_str)
@@ -11496,6 +11623,10 @@ def main():
             if not name:
                 print(f"  Usage: /skill-load <name>")
                 print(f"  See available: /skill-list")
+            elif not history:
+                # Empty-history session (a crashed/exported session file):
+                # history[0] assignment below used to IndexError.
+                print(f"  {t['warn']}Session history is empty — skill context needs a system prompt.{RST}")
             elif skill_inject(name):
                 # Rebuild history system prompt to include skill context
                 history[0] = {"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}
@@ -11668,37 +11799,20 @@ def main():
                     Config.STREAM = False
                     print(f"  {T()['bright']}Stream: OFF{RST}")
                 else:
-                    history.append({"role": "user", "content": args_str})
-                    if Config.STREAM:
-                        resp = ask_ai(history)
-                    else:
-                        resp = ask_ai(history, stream=False)
-                    commands = extract_blocks(resp, 'execute')
-                    if commands:
-                        for c in commands:
-                            c = c.strip()
-                            print(f"\n  {T()['warn']}>{c}{RST}")
-                            plugin_result = _try_plugin_cmd(c, history=history, who='main')
-                            if plugin_result is not None:
-                                result = plugin_result.strip()
-                            else:
-                                result = run_cmd(c)
-                            success = _cmd_succeeded(result)
-                            cmd_result(c, result, success)
-                            cmd_log.append(("ai", c))
-                            history.append({"role": "assistant", "content": f"Ran: {c}\n{result[:800]}"})
-                            history.append({"role": "user", "content": "Output above. Continue."})
-                    else:
-                        history.append({"role": "assistant", "content": resp})
-                    if len(history) > Config.MAX_HISTORY:
-                        history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
-                Config.save_config()
+                    # A typo'd /stream <arg> used to fall through and send
+                    # the argument to the AI as a chat message (billed turn).
+                    print(f"  {T()['warn']}Unknown stream mode: {args_str}{RST}")
+                    print(f"  {T()['dim']}Usage: stream [on|off]{RST}")
             else:
                 print(f"  Stream: {T()['bright']}{('ON' if Config.STREAM else 'OFF')}{RST}")
             print()
             continue
         # ── Default AI interaction ──
-        if not (history and isinstance(history[-1].get("content"), list)):
+        if not _appended_this_turn:
+            # (Turn-scoped: /image already appended its multimodal message.
+            # The old isinstance(history[-1], list) check also fired on the
+            # NEXT turn after an aborted image turn and silently dropped
+            # the user's message — the image got re-sent instead.)
             history.append({"role": "user", "content": user_input})
         max_iter = 9999
         nudges = 0
@@ -11959,7 +12073,7 @@ def main():
 
 # ── HTTP Helpers ────────────────────────────────────────────
 
-PRISM32_USER_AGENT = "Prism32/6.9"
+PRISM32_USER_AGENT = "Prism32/7.2"
 PRISM32_DEFAULT_HEADERS = {
     "User-Agent": PRISM32_USER_AGENT,
     "Accept": "application/json, text/plain, text/html, */*",
@@ -12092,7 +12206,7 @@ def fetch_models_from(api_base, api_key=None, timeout=15):
     """Fetch model list from one OpenAI-compatible endpoint.
     Returns a list of {"id", "pricing"} dicts; raises on HTTP/network error."""
     _base = normalize_api_base(api_base)
-    h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.11"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.2"}
     _key = api_key if api_key is not None else Config.API_KEY
     if isinstance(_key, str):
         _key = _key.strip()
@@ -12116,7 +12230,7 @@ def fetch_models_from(api_base, api_key=None, timeout=15):
 
 
 def build_headers(extra=None, api_key=None, api_base=None):
-    h = {"Content-Type": "application/json", "User-Agent": "Prism32/6.11"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.2"}
     _key = api_key if api_key is not None else Config.API_KEY
     if isinstance(_key, str):
         _key = _key.strip()
@@ -12251,6 +12365,13 @@ def _apply_model_selection(provider, model_id, role):
             _rk = (reg.get("default_key") or "")
             if isinstance(_rk, str) and _rk.strip():
                 Config.API_KEY = _rk.strip()
+            else:
+                # Switching to a keyless provider: the current top-level key
+                # belongs to the OLD provider — keeping it would send it to
+                # the new endpoint and persist it as the top-level key
+                # (leak vector; local servers ignore auth headers, but the
+                # old key shouldn't travel).
+                Config.API_KEY = ""
             Config.SESSION_ONLY_KEYS.discard("api_key")
             Config.SESSION_ONLY_KEYS.discard("api_base")
             Config.SESSION_ONLY_KEYS.discard("model")
@@ -12477,6 +12598,11 @@ def cmd_provider_remove(name):
             _rk = (reg.get("default_key") or "").strip()
             if _rk:
                 Config.API_KEY = _rk
+            else:
+                # Factory has no key: the user's old key must not survive
+                # a "reset to defaults" — it used to stay active in memory
+                # AND as the persisted top-level api_key.
+                Config.API_KEY = ""
             Config.save_config()
         viz.status(f"{name}: edits reset to built-in defaults", "success")
         return

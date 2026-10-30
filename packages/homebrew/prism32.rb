@@ -3,7 +3,7 @@ class Prism32 < Formula
   homepage "https://github.com/MegaDyneSystems/prism32"
   url "https://github.com/MegaDyneSystems/prism32/raw/v6.9.0/prism32.py"
   sha256 "e4da6c8be6ef065f2b44f801d9cb58c90428c96da47fb17d36b2b6d83c03e167"
-  version "6.9.0"
+  version "7.2.9"
   license "Apache-2.0"
 
   depends_on "python@3.12"

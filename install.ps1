@@ -17,7 +17,7 @@ $Target = Join-Path $InstallDir "prism32.py"
 $CmdShim = Join-Path $InstallDir "prism32.cmd"
 
 Write-Host ""
-Write-Host "  Prism32 Windows Installer v6.7"
+Write-Host "  Prism32 Windows Installer v7.2.9"
 Write-Host ""
 
 if (!(Test-Path $Source)) {
@@ -32,10 +32,14 @@ foreach ($candidate in @("py", "python3", "python")) {
         try {
             if ($candidate -eq "py") {
                 & $candidate -3 -c "import sys; raise SystemExit(0 if sys.version_info >= (3,7) else 1)" | Out-Null
+                # Native exit codes do NOT throw in Windows PowerShell —
+                # without this check the MS-Store python stub was accepted.
+                if ($LASTEXITCODE -ne 0) { $Python = $null; continue }
                 $Python = $candidate
                 $PythonArgs = @("-3")
             } else {
                 & $candidate -c "import sys; raise SystemExit(0 if sys.version_info >= (3,7) else 1)" | Out-Null
+                if ($LASTEXITCODE -ne 0) { $Python = $null; continue }
                 $Python = $candidate
                 $PythonArgs = @()
             }
@@ -67,12 +71,14 @@ Ok "Command shim $CmdShim"
 
 try {
     & $Python @PythonArgs $Target --setup-runtime | Out-Null
-    Ok "Runtime memory/harness/evolve setup complete"
+    if ($LASTEXITCODE -ne 0) { Warn "Runtime setup failed; run prism32 --setup-runtime later" }
+    else { Ok "Runtime memory/harness/evolve setup complete" }
 } catch {
     Warn "Runtime setup skipped; run prism32 --setup-runtime later"
 }
 
 $PathUser = [Environment]::GetEnvironmentVariable("Path", "User")
+if (-not $PathUser) { $PathUser = "" }   # fresh profiles return $null — TrimEnd on it crashed the script
 if ($PathUser -notlike "*$InstallDir*") {
     [Environment]::SetEnvironmentVariable("Path", ($PathUser.TrimEnd(';') + ";" + $InstallDir), "User")
     Warn "Added Prism32 to user PATH. Open a new terminal before running prism32."

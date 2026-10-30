@@ -36,7 +36,10 @@ jobs:
 
       - name: Compile prism32.py to bytecode
         run: |
-          python -m py_compile -b prism32.py
+          # compileall -b writes the legacy-path prism32.pyc; py_compile's
+          # CLI has no -b flag (every build here failed with exit 2, so
+          # no .pyc assets were ever attached).
+          python -m compileall -b prism32.py
           # Rename to include Python version for clarity
           mv prism32.pyc prism32.cpython-${{ matrix.python-version }}.pyc
 
