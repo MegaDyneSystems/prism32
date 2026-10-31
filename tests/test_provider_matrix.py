@@ -972,7 +972,9 @@ class ZZ_Report(unittest.TestCase):
         w(f"TOTAL: {len(RESULTS)}  PASS: {passes}  FAIL: {fails}  "
           f"WARN(documented/flagged): {warns}\n")
         table = out.getvalue()
-        with open("/tmp/opencode/matrix_results.txt", "w") as f:
+        # Portable scratch location (CI runners have no /tmp/opencode).
+        _report = os.path.join(tempfile.gettempdir(), "prism32_matrix_results.txt")
+        with open(_report, "w") as f:
             f.write(table)
         print("\n" + table)
 
