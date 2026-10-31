@@ -30,7 +30,7 @@ last test in the file.
 """
 import sys, os, io, json, shutil, tempfile, unittest, contextlib
 
-REPO = os.environ.get("PRISM32_REPO", "/home/labcomputer5/Documents/Programs/Palmcoder95")
+REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
 sys.path.insert(0, REPO)
 exec(open(os.path.join(REPO, "prism32.py")).read().split("if __name__")[0])
 
