@@ -57,6 +57,15 @@ try:
 except Exception:
     pass
 
+# Ctrl+P at the idle prompt = swarm pause. Readline owns the keyboard there,
+# so the raw-mode interjection handler can't see the key — bind it to submit
+# /pause instead. (Up-arrow still does history.) No-op on libedit/older
+# readlines; /pause and /unpause always work typed manually.
+try:
+    readline.parse_and_bind('"\\C-p": "/pause\\n"')
+except Exception:
+    pass
+
 # ── Low-RAM Detection ───────────────────────────────────────
 _LOW_RAM = False
 try:
@@ -5624,10 +5633,10 @@ def toggle_agent_pause():
     """Ctrl+P handler: freeze/resume the whole swarm between steps."""
     if agent_pause_requested():
         clear_agent_pause()
-        viz.status("SWARM RESUMED — agents continue from where they paused", "success")
+        viz.status("SWARM RESUMED — subagents and AI loop continue", "success")
         return False
     request_agent_pause()
-    viz.status("SWARM PAUSED (Ctrl+P or /resume to continue) — running commands finish, "
+    viz.status("SWARM PAUSED (Ctrl+P or /unpause to continue) — running commands finish, "
                "no new steps start, processes untouched", "warn")
     return True
 
@@ -7276,32 +7285,55 @@ def _wait_for_work(cmd_args):
         i += 1
     idset = set(ids) if ids else None
     deadline = time.time() + timeout
-    while True:
-        with _subagent_lock:
-            targets = dict(_SUBAGENTS)
-        with _bg_lock:
-            targets.update(dict(_BG_JOBS))
-        if idset:
-            targets = {tid: t for tid, t in targets.items() if tid in idset}
-        if not targets:
+    # The wait blocks the main thread OUTSIDE run_cmd — the interjection
+    # reader would never be running and Ctrl+P / Escape / typed messages
+    # all died in this window (user report 2026-11: "buttons aren't
+    # working"). Own the keyboard AND the footer bar while waiting:
+    # Escape cancels the wait, Ctrl+P pauses the swarm, typed text is
+    # echoed in the bar and reaches the captain after.
+    _use_reader = (threading.current_thread() is threading.main_thread()
+                   and _can_cancel_foreground_input())
+    if _use_reader:
+        set_scroll_region()
+        _footer_animate_start(state="waiting", history=None)
+        _interjection_start()
+    try:
+        while True:
+            with _subagent_lock:
+                targets = dict(_SUBAGENTS)
+            with _bg_lock:
+                targets.update(dict(_BG_JOBS))
             if idset:
-                return ("No subagents or background jobs matching: " + ", ".join(sorted(idset)) +
-                        "\n(Existing: /subagents, /bg. Start work with /spawn <task> or /bg <command>.)")
-            return ("No subagents or background jobs running. "
-                    "Start work with /spawn <task> or /bg <command>.")
-        running = [t for t in targets.values() if not t.done]
-        if not running:
-            break
-        if time.time() >= deadline:
-            lines = [f"WAIT TIMEOUT after {timeout}s — still running:"]
-            for t in running:
-                lines.append(f"  {t.status_str()}")
-            lines.append("Wait again with /wait (optionally --timeout <sec>), or keep working — "
-                         "a completion notice is delivered automatically when work finishes.")
-            return "\n".join(lines)
-        if agent_cancel_requested():
-            return "[CANCELLED] /wait interrupted by operator."
-        time.sleep(0.5)
+                targets = {tid: t for tid, t in targets.items() if tid in idset}
+            if not targets:
+                if idset:
+                    return ("No subagents or background jobs matching: " + ", ".join(sorted(idset)) +
+                            "\n(Existing: /subagents, /bg. Start work with /spawn <task> or /bg <command>.)")
+                return ("No subagents or background jobs running. "
+                        "Start work with /spawn <task> or /bg <command>.")
+            running = [t for t in targets.values() if not t.done]
+            if not running:
+                break
+            if time.time() >= deadline:
+                lines = [f"WAIT TIMEOUT after {timeout}s — still running:"]
+                for t in running:
+                    lines.append(f"  {t.status_str()}")
+                lines.append("Wait again with /wait (optionally --timeout <sec>), or keep working — "
+                             "a completion notice is delivered automatically when work finishes.")
+                return "\n".join(lines)
+            if agent_cancel_requested():
+                return "[CANCELLED] /wait interrupted by operator."
+            if _use_reader:
+                inj = _interjection_poll()
+                if inj is _INTERJECTION_CANCEL:
+                    return "[CANCELLED] /wait interrupted by operator."
+                # typed text lands in _INTERJECTION_RESULT — the main loop
+                # delivers it to the captain on its next model call.
+            time.sleep(0.25)
+    finally:
+        if _use_reader:
+            _interjection_stop()
+            _footer_animate_stop()
     lines = ["Waited work finished:"]
     for tid in sorted(targets):
         t = targets[tid]
@@ -7404,7 +7436,10 @@ def _try_plugin_cmd(c, history=None, who=None):
                 return "Usage: /harness delegate <task>"
             ensure_harness_scan(force=False)
             sa = SubAgent(_harness_super_task(task))
-            sa.run()
+            _res = run_cancelable_blocking(lambda: sa.run(), message=f"harness subagent {sa.id}")
+            if _res == AGENT_CANCELLED_RESPONSE:
+                return (f"[Harness subagent {sa.id} cancelled by operator — partial result (if any)]\n"
+                        f"{(sa.result or '')[:500]}")
             _quantum.put(f"harness_super_{sa.id}_result", sa.result)
             if sa.result:
                 ltm_store(sa.result, source=f"harness_super_{sa.id}", summary=f"Harness super subagent: {task[:80]}", tags=["subagent", "harness"])
@@ -7579,7 +7614,14 @@ def _try_plugin_cmd(c, history=None, who=None):
             return "Usage: /delegate <task>"
         task, provider = _split_task_provider(task)
         sa = SubAgent(task, provider=provider, max_steps=Config.SUBAGENT_MAX_STEPS)
-        sa.run()
+        # Cancelable: run_cancelable_blocking drives the interjection
+        # reader on the main thread, so Escape/Ctrl-P/typing work while a
+        # sync delegate runs (the old direct sa.run() left the keyboard
+        # dead for the whole subagent run).
+        _res = run_cancelable_blocking(lambda: sa.run(), message=f"subagent {sa.id}")
+        if _res == AGENT_CANCELLED_RESPONSE:
+            return (f"[Subagent {sa.id} cancelled by operator — partial result (if any)]\n"
+                    f"{(sa.result or '')[:500]}")
         _quantum.put(f"subagent_{sa.id}_result", sa.result)
         if sa.result:
             ltm_store(sa.result, source=f"subagent_{sa.id}", summary=f"Subagent result: {sa.task[:80]}", tags=["subagent", "auto"])
@@ -12178,7 +12220,15 @@ def main():
             if args_str:
                 task, provider = _split_task_provider(args_str)
                 sa = SubAgent(task, provider=provider)
-                sa.run()
+                # Cancelable run: Escape stops waiting, Ctrl-P pauses the
+                # swarm, typing reaches the captain (run_cancelable_blocking
+                # drives the interjection reader on the main thread).
+                _res = run_cancelable_blocking(lambda: sa.run(), message=f"subagent {sa.id}")
+                if _res == AGENT_CANCELLED_RESPONSE:
+                    history.append({"role": "user",
+                        "content": f"[Subagent {sa.id} cancelled by operator]\nPartial result: {(sa.result or '')[:800]}"})
+                    box("STOPPED", f"Subagent {sa.id} cancelled by Escape", "warn")
+                    continue
                 _quantum.put(f"subagent_{sa.id}_result", sa.result)
                 if sa.result:
                     ltm_store(sa.result, source=f"subagent_{sa.id}", summary=f"Subagent result: {sa.task[:80]}", tags=["subagent", "auto"])
