@@ -9,19 +9,29 @@ This README is the full operator guide. The GitHub front page shows the same doc
 
 ## Install And Start
 
-Fastest way — package manager:
+Recommended — the one-click install works everywhere (macOS, Linux, BSD/unix, Android/Termux, ChromeOS, NAS, any POSIX box with `curl` or `wget`). It auto-detects the platform, installs Python 3 + git if missing, and sets everything up:
 
 ```sh
-pip install prism32      # or: brew install prism32, scoop install prism32
-prism32 --setup-runtime
-prism32
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
 ```
+
+or, if `curl` is not available:
+
+```sh
+wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
+Then start with `prism32`. For updates, run the same command again — it updates an existing clone in place.
+
+**Termux (Android):** install [Termux from F-Droid](https://f-droid.org/en/packages/com.termux/), then `pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh`
+
+Package managers also work if you prefer them:
 
 | Manager | Platform | Install Command |
 |---------|----------|-----------------|
-| **pip** | Any (Python 3.7+) | `pip install prism32` |
 | **Homebrew** | macOS, Linux | `brew tap MegaDyneSystems/prism32 && brew install prism32` |
 | **Scoop** | Windows | `scoop bucket add prism32 https://github.com/MegaDyneSystems/scoop-prism32 && scoop install prism32` |
+| **pip** | Any (Python 3.7+) | `pip install prism32` |
 | **npm / npx / bunx** | Any (Node.js 14+) | `npx @megadynesystems/prism32` |
 
 All package managers install the same `prism32` command. After installation, run `prism32 --version` to verify, then `prism32 --setup-runtime` to initialize your config.
