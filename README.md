@@ -1,4 +1,4 @@
-# Prism32 v7.2.9
+# Prism32 v7.3.0
 The Easiest agent to use, You never have to learn how to use prism32
 Prism32 is a self-extending, self-repairing, self-evolving hivemind program with a AI super-agent from MegaDyne Systems. One Python file, stdlib-only. A real Jarvis. It auto-detects its platform, absorbs external AI harnesses, generates plugins on the fly for missing capabilities, delegates to subagents running different models, synchronizes state through quantum context, persists everything it learns, and becomes more powerful every time you use it. There is no fixed feature ceiling — every task expands what the agent can do. it can turn any PC or low end hardware SBC or laptop etc into a robotic assistant that can control external peripherals and can also run on robots and IOT devices with shell and python on bare metal. Prism32 is the first polymorphic AI assistant and coding harness
 Prism32 uses MegadyneSystem's Tesseract hivemind technology to maximize intelligence and efficiency removing bloated A2A communication and addressing the issues with multi agent systems
@@ -7,9 +7,33 @@ It is designed for modern PC's and older machines: no Node.js, no browser runtim
 
 This README is the full operator guide. The GitHub front page shows the same document.
 
+## Install And Start
+
+Fastest way — package manager:
+
+```sh
+pip install prism32      # or: brew install prism32, scoop install prism32
+prism32 --setup-runtime
+prism32
+```
+
+| Manager | Platform | Install Command |
+|---------|----------|-----------------|
+| **pip** | Any (Python 3.7+) | `pip install prism32` |
+| **Homebrew** | macOS, Linux | `brew tap MegaDyneSystems/prism32 && brew install prism32` |
+| **Scoop** | Windows | `scoop bucket add prism32 https://github.com/MegaDyneSystems/scoop-prism32 && scoop install prism32` |
+| **npm / npx / bunx** | Any (Node.js 14+) | `npx @megadynesystems/prism32` |
+
+All package managers install the same `prism32` command. After installation, run `prism32 --version` to verify, then `prism32 --setup-runtime` to initialize your config.
+
+**pip / PyPI:** https://pypi.org/project/prism32/  
+**Homebrew Tap:** https://github.com/MegaDyneSystems/homebrew-prism32  
+**Scoop Bucket:** https://github.com/MegaDyneSystems/scoop-prism32  
+**npm Registry:** https://www.npmjs.com/package/@megadynesystems/prism32
+
 ### From Source (Git clone)
 
-Install and start on Unix/Linux/macOS/BSD/Android Termux
+Install and start on Unix/Linux/macOS/BSD/Android Termux:
 
 ```sh
 git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh && prism32
@@ -21,127 +45,9 @@ No-root install:
 git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh -y && ~/.local/bin/prism32
 ```
 
-> On a NAS (Synology DSM) the user home may not exist — use the [NAS install](#nas-install-synology--qnap--wd-my-cloud) instead; the installer then auto-reroutes to the persistent volume home.
+> On a NAS (Synology DSM) the user home may not exist — use the [NAS install](#nas-synology--qnap--wd-my-cloud) instead; the installer then auto-reroutes to the persistent volume home.
 
 Run directly without install:
-
-```sh
-git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
-```
-
-Install on OpenWrt router:
-
-```sh
-wget -O /tmp/install.sh https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/openwrt-install.sh
-sh /tmp/install.sh                # interactive
-sh /tmp/install.sh -y            # auto mode
-sh /tmp/install.sh /mnt/usb      # install to USB drive
-```
-
-Install on ChromeOS (Crostini):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-```
-
-Install on Android/Termux:
-
-```sh
-pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh
-```
-
-Universal bootstrap (auto-detects any platform):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-```
-
-Install on NAS (Synology/QNAP/WD — no git needed):
-
-```sh
-# Via SSH (auto-detects NAS, falls back to direct download):
-curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-# The script auto-detects persistent storage (/volume1/prism32 on Synology)
-# and installs system-wide to /usr/bin/prism32
-```
-
-Portable install to floppy/USB/CD:
-
-```sh
-python3 make_floppy.py            # build 1.44MB image with your config
-sh floppy-install.sh              # write to removable device
-```
-
-Most-used first commands inside Prism32:
-
-```text
-/help                 Show all commands
-/provider             Interactive provider manager (switch/edit/test by number)
-/provider add         Add a provider (template wizard with live detection)
-/provider key <name> <key>
-                      Set a provider's API key (persisted)
-/model                Browse every provider's models; assign main/subagent
-/cost                 Show session token usage and cost
-/config               Show active config
-/mission <goal>       Autonomous orchestrated mission mode
-/bash <cmd>           Run a shell command manually
-/memory edit          Edit machine notes injected into context
-/remember <text>      Store long-term memory
-/delegate <task>       Run a subagent now
-/spawn <task>         Start a background subagent
-/extend <goal>        Generate/load a temporary plugin for a missing capability
-/extend prompt        Print the plugin-generation prompt
-/evolve on            Enable self-repair/plugin/tool-scan context
-/json <file>          Read JSON files (AI-side: inside execute blocks)
-/quit                 Exit
-```
-
-Practical starter prompts:
-
-```text
-inspect this machine, identify OS/architecture/package manager, and save useful notes to startup memory
-```
-
-```text
-inspect this git repo, run the tests, and summarize what failed without changing files
-```
-
-```text
-/mission audit this server for disk pressure, failed services, open ports, and risky logs; report only
-```
-
-Stop anything that is taking too long:
-
-```text
-Press Escape.
-```
-
-## Quick Start
-
-Fastest way — package manager:
-
-```sh
-pip install prism32      # or: brew install prism32, scoop install prism32
-prism32 --setup-runtime
-prism32
-```
-
-From source (Unix, Linux, macOS, BSD):
-
-```sh
-git clone https://github.com/MegaDyneSystems/prism32.git
-cd prism32
-bash install.sh
-prism32
-```
-
-Non-root user-local install:
-
-```sh
-git clone https://github.com/MegaDyneSystems/prism32.git && cd prism32 && bash install.sh -y
-```
-
-Run without installing:
 
 ```sh
 git clone https://github.com/MegaDyneSystems/prism32.git
@@ -164,41 +70,174 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 prism32
 ```
 
-Android Termux:
-
-```sh
-# Option A: pip
-pip install prism32
-prism32
-
-# Option B: From source
-pkg update
-pkg install python git
-git clone https://github.com/MegaDyneSystems/prism32.git
-cd prism32
-python prism32.py --setup-runtime
-python prism32.py
-```
-
 Direct local model example:
 
 ```sh
 python3 prism32.py --api http://127.0.0.1:8080 --model local-model
 ```
 
-NVIDIA Jetson, DGX, or CUDA-backed local model example:
-
-```sh
-python3 prism32.py --api http://127.0.0.1:8080 --model local-cuda-model
-```
-
-OpenRouter example:
+NVIDIA Jetson, DGX, or CUDA-backed local models use the same local-server form (`--api http://127.0.0.1:8080 --model local-cuda-model`). OpenRouter example:
 
 ```sh
 python3 prism32.py --api https://openrouter.ai/api/v1 --api-key sk-or-v1-... --model deepseek/deepseek-v4-flash
 ```
 
-Inside Prism32, use `/help` for the live command list.
+### OpenWrt Routers
+
+Pure POSIX sh installer (busybox ash compatible):
+
+```sh
+wget -O /tmp/install.sh https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/openwrt-install.sh
+sh /tmp/install.sh                # interactive
+sh /tmp/install.sh -y            # auto mode
+sh /tmp/install.sh /mnt/usb      # install to USB drive (low-flash routers)
+```
+
+The OpenWrt installer:
+
+- Auto-detects `opkg` (OpenWrt <24) or `apk` (OpenWrt >=24)
+- Bootstraps HTTPS support (`libustream-mbedtls` + `ca-bundle`)
+- Installs `python3-light` + `python3-openssl` (minimal footprint)
+- Low-flash detection: suggests USB install below 8 MB free
+- Low-RAM detection: skips `py_compile` syntax check on devices <64 MB to avoid OOM during install
+- Downloads `prism32.py` from GitHub if not present locally
+- Router-tuned config: lower `max_history` (500), `max_response_tokens` (4096), `stream: false`
+- Creates `/etc/profile.d/prism32.sh` for USB PATH setup
+- Works on 4 MB+ flash (with USB), 24 MB+ RAM
+
+### ChromeOS (Crostini)
+
+ChromeOS supports Linux apps via the Crostini container (built into ChromeOS 69+) — no Developer Mode or Crouton needed. In the Terminal app (Crostini):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
+This auto-detects ChromeOS/Crostini as Linux, installs Python 3 + git if needed, clones the repo, and runs the installer. Or install manually: `sudo apt-get install -y python3 git`, then clone and `bash install.sh` (or run `python3 prism32.py` directly from the clone).
+
+ChromeOS notes:
+
+- **Crostini** is recommended over Crouton/Developer Mode — it's sandboxed, stable, and supported on all Chromebooks from 2019 onward.
+- Prism32 runs at full speed in the Crostini container (a real Linux environment with `apt`, `python3`, `git`, etc.).
+- Shared filesystem: files in the Crostini container's home directory are accessible from the ChromeOS Files app under "Linux files"; clipboard sharing works.
+- From the restricted Crosh shell (Ctrl+Alt+T) — no Python, no package manager — bootstrap into the container:
+  `vmc start termina` then `vmc container termina -- penguin -- sh -c "curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh"`. If Crostini isn't enabled yet, the bootstrap script prints how to enable it (Settings → Linux development environment → Turn on). With Developer Mode, type `shell` in Crosh for a root bash shell, then run the bootstrap command.
+
+### Android / Termux
+
+One-command install for Android phones, tablets, Chromecast with Google TV, Android TV, Wear OS watches, Fire TV (sideloaded Termux), and any device that can run Termux:
+
+```sh
+# 1. Install Termux from F-Droid (Google Play version is deprecated)
+# 2. In Termux, run:
+pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh
+```
+
+This installs Python 3 + git via `pkg`, clones Prism32, creates a `prism32` command in `$PREFIX/bin` (no root needed), and preserves existing config on updates. Then start with `prism32`. To use a cloud provider, pass `--api`/`--api-key` for the session or persist the pick with `/model` and `/provider key <name> <key>` inside the app (no `--provider` CLI flag exists).
+
+### Universal Bootstrap (Any Platform)
+
+A single command that auto-detects the platform and installs everything:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+# or:
+wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
+```
+
+| Platform | Package Manager | Install Path |
+|----------|-----------------|-------------|
+| Termux/Android | `pkg` | `~/prism32` + `install.sh -y` |
+| OpenWrt | `opkg` or `apk` | `~/prism32` + `openwrt-install.sh -y` |
+| macOS | `brew` (auto-installs if needed) | `~/prism32` + `install.sh -y` + SSL fix |
+| Linux (Debian/Ubuntu) | `apt-get` | `~/prism32` + `install.sh -y` |
+| Linux (Fedora/RHEL) | `dnf` | `~/prism32` + `install.sh -y` |
+| Linux (Arch/Manjaro) | `pacman` | `~/prism32` + `install.sh -y` |
+| Linux (Alpine) | `apk` | `~/prism32` + `install.sh -y` |
+| Linux (Gentoo) | `emerge` | `~/prism32` + `install.sh -y` |
+| Linux (Void) | `xbps-install` | `~/prism32` + `install.sh -y` |
+| BSD (FreeBSD/NetBSD/OpenBSD) | `pkg`/`pkgin`/`pkg_add` | `~/prism32` + `install.sh -y` |
+| Synology/QNAP/WD NAS | N/A (no package manager) | Direct download via `curl`/`wget` (no git needed) |
+| Unknown | N/A | Direct download of `prism32.py` via `wget`/`curl`/`python3` |
+
+If Python 3 is not installed, the bootstrap script installs it via the system's package manager automatically. If no recognized package manager exists (e.g. Synology DSM, QNAP QTS), it falls back to downloading `prism32.py` + `install.sh` directly via `curl`/`wget`/`python3 urllib` — no git required. If `$HOME` doesn't exist (common on Synology NAS), it probes persistent locations (`/volume1/prism32` on Synology) and only then falls back to `/tmp` as HOME.
+
+### NAS (Synology / QNAP / WD My Cloud)
+
+Most NAS devices ship with Python 3 and `curl`/`wget` but no `git` and no package manager. The universal bootstrap handles this automatically — via SSH (Synology DSM has curl preinstalled; use `wget -qO- ... | sh` if curl is unavailable). If GitHub CDN is cached, pipe the script directly from your local machine:
+
+```sh
+cat bootstrap.sh | ssh user@nas "cat > /tmp/bootstrap.sh && HOME=/tmp sh /tmp/bootstrap.sh"
+```
+
+Tested on Synology DS414 (Marvell Armada XP, ARMv7l, 2GB RAM, Python 3.8.12, DSM 7.1.1 — the v7.2 full battery passed there: 165 pytest + 24 smoketests, GNU readline 8.0 with working bracketed paste). The installer:
+
+- Detects missing git and falls back to direct download of `prism32.py` + `install.sh`
+- Detects a broken `$HOME` (DSM's `/var/services/homes/<user>` dangles when the user home service is off) and reroutes the runtime dir to the **persistent** `/volume1/homes/<user>/.prism32` — never volatile `/tmp`, which DSM mounts noexec and wipes on reboot
+- Installs the wrapper to `/volume1/homes/<user>/.local/bin/prism32` (persistent + exec-capable)
+- Persists PATH by appending a guarded export to `.profile`/`.bashrc` (and the volume home's `.profile`) — a fresh interactive SSH login finds `prism32`
+- Writes neutral local-provider defaults in `-y` auto mode — configure the real endpoint with `/provider` on first run
+- Verifies the wrapper it actually wrote and warns if a stale prism32 elsewhere in PATH shadows it
+- No root required (installs to user-local paths)
+
+DSM notes:
+
+- Best fix for a missing home: **Control Panel → User & Group → Advanced → Enable user home service**, or run with `HOME=/volume1/homes/<user>`. `/volume1/homes/<user>` exists and is user-writable even when the homes symlink dangles.
+- `/tmp` is tmpfs, **noexec**, and wiped on reboot — nothing lives there.
+- `scp` to DSM needs `-O` (SFTP subsystem is disabled by default): `scp -O file user@nas:/path`.
+- Non-interactive SSH (`ssh nas 'prism32 --version'`) sources no dotfiles on DSM — run from an interactive shell, or use the full wrapper path.
+- No pip on DSM, but the app is stdlib-only (no dependencies). For development, `python3 -m venv` works (ensurepip is bundled).
+- To connect to a cloud provider (NAS likely has no local LLM), pass `--api`/`--api-key` for the session, then persist with `/model` and `/provider key <name> <key>` inside the app.
+
+After install, run with `prism32` (after PATH refresh) or `python3 /volume1/homes/<user>/.prism32/prism32.py` explicitly.
+
+QNAP QTS: same procedure as Synology. QNAP NAS devices also ship with Python 3 and `curl`; the bootstrap script auto-detects QNAP via `/etc/config/uLinux.conf` or `/etc/qnap_config`.
+
+WD My Cloud: busybox Linux with Python 3 available via optware; the bootstrap script detects WD via `/etc/NAS_CFG` and uses direct download.
+
+### Portable: Floppy / USB / CD
+
+The project includes tooling to build a FAT12 floppy disk image that bundles Prism32 with your configuration, API keys, plugins, and memory:
+
+```sh
+python3 make_floppy.py            # build 1.44MB image with your config
+sh floppy-install.sh              # write to removable device
+```
+
+See [Floppy And Removable Media](#floppy-and-removable-media) below for image contents and usage.
+
+## First Commands
+
+Most-used first commands inside Prism32:
+
+```text
+/help                 Show all commands
+/provider             Interactive provider manager (switch/edit/test by number)
+/provider add         Add a provider (template wizard with live detection)
+/provider key <name> <key>
+                       Set a provider's API key (persisted)
+/model                Browse every provider's models; assign main/subagent
+/cost                 Show session token usage and cost
+/config               Show active config
+/mission <goal>       Autonomous orchestrated mission mode
+/bash <cmd>           Run a shell command manually
+/memory edit          Edit machine notes injected into context
+/remember <text>      Store long-term memory
+/delegate <task>       Run a subagent now
+/spawn <task>         Start a background subagent
+/extend <goal>        Generate/load a temporary plugin for a missing capability
+/quit                 Exit
+```
+
+Practical starter prompts:
+
+```text
+inspect this machine, identify OS/architecture/package manager, and save useful notes to startup memory
+inspect this git repo, run the tests, and summarize what failed without changing files
+/mission audit this server for disk pressure, failed services, open ports, and risky logs; report only
+```
+
+Stop anything that is taking too long: press Escape.
 
 ## What Prism32 Does
 
@@ -207,7 +246,7 @@ Prism32 combines several systems in one terminal harness:
 - Interactive chat with OpenAI-compatible model APIs.
 - Active task mode: the AI can emit shell commands in fenced `execute` blocks; Prism32 runs them, captures output, and asks the AI what to do next.
 - Autonomous mission mode with `/mission <goal>`: a planner decomposes the goal into 3-6 steps that run as parallel subagent shards until the mission is structurally complete.
-- Synchronous and asynchronous subagents with `/delegate`, `/spawn`, `/subagents`, and `/collect`.
+- Synchronous and asynchronous subagents with `/delegate`, `/spawn`, `/subagents`, `/collect`, and `/wait`; background shell jobs with `/bg`. Completion is event-driven — finished subagents and jobs push their results into the conversation automatically, so nothing needs to be polled.
 - Plugin loading from `~/.prism32/plugins/*.py` for custom slash commands, providers, themes, context injection, timers, and HTTP helpers.
 - Self-extension with `/extend`: Prism32 can ask the configured model to generate a stdlib-only plugin, syntax-check it, write it, load it, and use the new command immediately.
 - Memory and evolution files that let the system remember machine quirks, recurring fixes, tools, baselines, user rules, and long-term notes.
@@ -381,7 +420,7 @@ Use `/arch` to inspect the detected label. Use `PRISM32_ARCH=<label>` or `/arch 
 
 Prism32's local overhead is intentionally small:
 
-- The main program is a single `prism32.py` file of about 507 KB in this working copy.
+- The main program is a single `prism32.py` file of about 600 KB in this working copy.
 - The core uses only Python standard-library modules.
 - There is no browser, Electron shell, Node.js dependency tree, local vector database, or background service required.
 - Live streaming of AI responses is on by default (`Config.STREAM = True`) — tokens (and reasoning, dimmed) render as they arrive and flow into terminal scrollback. Turn it off with `/stream off` (persisted) or `--slow-cpu` on fragile/slow terminals.
@@ -451,12 +490,13 @@ All flags are optional. `--model`, `--api`, and `--api-key` are **session-only o
 | `--goal, --mission, -g <task>` | Run a mission headless and exit on completion |
 | `--set-timeout <sec>` | Set command timeout and exit |
 | `--update <url|path>` | Update prism32 from a URL or file path and exit |
+| `--resume-session <id>` | Resume a saved session id (used by hot update to keep the conversation) |
 | `--setup-runtime` | Refresh startup memory, harness scan, evolve baseline, exit |
 | `--harness-scan` | Scan for external AI harness CLIs and exit |
 | `--evolve-setup` | Create evolve docs/baseline/tool scan and exit |
 | `--version, -V` | Show version and exit |
 
-Additional operator commands not listed elsewhere: `/agentname <name>`, `/autosave <min>`, `/rootpass <pwd>`, `/verify-ssl [on|off]`, `/maxhistory <n>`, `/maxtokens <n>`. Extra environment variables: `PRISM32_VERIFY_SSL=0` (disable TLS verification), `PRISM32_DEVICE=<name>` (manual device label), plus `PRISM32_ARCH` and `NO_COLOR`.
+Additional operator commands not listed elsewhere: `/agentname <name>`, `/autosave <sec>`, `/aitimeout <sec>`, `/rootpass <pwd>`, `/verify-ssl [on|off]`, `/maxhistory <n>`, `/maxtokens <n>`, `/compact`, `/wait`, `/bg`, `/interject`, `/board`. Extra environment variables: `PRISM32_VERIFY_SSL=0` (disable TLS verification), `PRISM32_DEVICE=<name>` (manual device label), plus `PRISM32_ARCH` and `NO_COLOR`.
 
 ## How The Agent Loop Works
 
@@ -497,7 +537,8 @@ During streaming responses, you can type at any time. The footer changes to `int
 
 Useful controls:
 
-- Escape: **the only key that cancels** agent work. This covers streaming, non-streaming API waits, foreground commands, and in-flight mission shards/subagents. Escape is detected through a unified `select()` that polls stdin and stdout simultaneously, so there is no blind spot during tool execution. Typed interjections do NOT cancel — they are queued for after the current response completes.
+- Escape: **the only key that cancels** agent work. This covers streaming, non-streaming API waits, foreground commands, in-flight mission shards/subagents, and a blocking `/wait`. Escape is detected through a unified `select()` that polls stdin and stdout simultaneously, so there is no blind spot during tool execution. Typed interjections do NOT cancel — they are queued for after the current response completes.
+- Ctrl+P: pause/resume the whole swarm between steps, non-destructively (running commands finish, processes untouched, no progress lost). While paused, typed messages reach the captain agent on its next model call. `/pause` and `/unpause` are the scriptable equivalents.
 - Up/Down while interjecting: cycle previous interjections.
 - Left/Right, Home, End: edit the interjection buffer.
 - Delete (forward): delete the character after the cursor.
@@ -512,27 +553,7 @@ Useful controls:
 
 Arrow keys are handled as escape sequences, so normal arrow-key editing does not trigger bare-Escape cancellation. Double-Escape also cancels.
 
-## Package Managers
-
-Prism32 is available through multiple package managers for easy installation:
-
-| Manager | Platform | Install Command |
-|---------|----------|-----------------|
-| **pip** | Any (Python 3.7+) | `pip install prism32` |
-| **Homebrew** | macOS, Linux | `brew tap MegaDyneSystems/prism32 && brew install prism32` |
-| **Scoop** | Windows | `scoop bucket add prism32 https://github.com/MegaDyneSystems/scoop-prism32 && scoop install prism32` |
-| **npm / npx / bunx** | Any (Node.js 14+) | `npx @megadynesystems/prism32` |
-
-All package managers install the same `prism32` command. After installation, run `prism32 --version` to verify, then `prism32 --setup-runtime` to initialize your config.
-
-**pip / PyPI:** https://pypi.org/project/prism32/  
-**Homebrew Tap:** https://github.com/MegaDyneSystems/homebrew-prism32  
-**Scoop Bucket:** https://github.com/MegaDyneSystems/scoop-prism32  
-**npm Registry:** https://www.npmjs.com/package/@megadynesystems/prism32
-
----
-
-## Installers
+## What The Installers Do
 
 `install.sh` performs a Unix/macOS/BSD-style install:
 
@@ -548,18 +569,6 @@ All package managers install the same `prism32` command. After installation, run
 - Tests model API reachability when possible.
 - Runs `prism32.py --setup-runtime` to create startup memory, harness scan, and evolve baseline files.
 
-`openwrt-install.sh` performs an OpenWrt router install:
-
-- Pure POSIX sh (busybox ash compatible).
-- Auto-detects `opkg` (OpenWrt <24) or `apk` (OpenWrt >=24).
-- Bootstraps HTTPS support (`libustream-mbedtls` + `ca-bundle`).
-- Installs `python3-light` + `python3-openssl`.
-- Low-flash detection: suggests USB install below 8 MB free.
-- Low-RAM detection: skips `py_compile` syntax check on devices <64 MB to avoid OOM during install.
-- USB/SD install support: `sh openwrt-install.sh /mnt/usb`.
-- Downloads `prism32.py` from GitHub if not present locally.
-- Router-tuned config: lower `max_history` (500), `stream: false`.
-
 `install.ps1` performs a Windows user-local install:
 
 - Copies `prism32.py` to `%LOCALAPPDATA%\Programs\Prism32`.
@@ -568,22 +577,9 @@ All package managers install the same `prism32` command. After installation, run
 - Runs `--setup-runtime` when possible.
 - Adds the install directory to the user PATH.
 
-`bootstrap.sh` is a universal auto-detecting installer:
+`bootstrap.sh` is the universal auto-detecting installer (see the platform table under [Universal Bootstrap](#universal-bootstrap-any-platform)). It detects Termux/Android, OpenWrt, macOS, Linux and BSD package managers, and unknown platforms; installs Python 3 + git if missing; clones the repo (`--depth 1`) and runs the appropriate installer; updates existing clones with `git pull`; and falls back to direct `wget`/`curl` download of `prism32.py` for unknown platforms.
 
-- Detects: Termux/Android, OpenWrt, macOS, Linux (apt/dnf/yum/pacman/zypper/apk/emerge/xbps), BSD (pkg/pkgin/pkg_add), and unknown platforms.
-- Installs Python 3 + git if missing (via the system package manager).
-- Clones the repo (`--depth 1`) and runs the appropriate installer.
-- Updates existing clones with `git pull`.
-- Falls back to direct `wget`/`curl` download of `prism32.py` for unknown platforms.
-- One-liner: `curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh`
-
-`termux-install.sh` is a quick installer for Android/Termux:
-
-- Installs `python3` and `git` via `pkg`.
-- Clones the repo and installs Prism32.
-- Preserves existing config.
-- Creates `prism32` command in `$PREFIX/bin` (no root needed).
-- One-liner: `pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh`
+`termux-install.sh` installs `python3` and `git` via `pkg`, clones the repo, preserves existing config, and creates the `prism32` command in `$PREFIX/bin` (no root needed).
 
 ## First Run Setup
 
@@ -630,7 +626,7 @@ Track session cost:
 /cost                 Show input/output tokens and dollar cost for this session
 ```
 
-Prism32 captures token usage from both streaming and non-streaming API responses. Cost is calculated using per-model pricing for 20+ models (OpenAI, Anthropic, Groq, Together, Neuralwatt, OpenRouter). Local models show $0.0000. The running cost is shown live in the status bar as `$X.XXXX`.
+Prism32 captures token usage from both streaming and non-streaming API responses. Cost is calculated using real per-model pricing fetched from the provider's API at startup where available, with hardcoded prices for 29 common models (OpenAI, Anthropic, Groq, Together, Neuralwatt, OpenRouter) as fallback. Local models show $0.0000. The running cost is shown live in the status bar as `$X.XXXX` (alongside live subagent and background-job counts, `SA:n`/`BG:n`).
 
 **Prompt caching** reduces repeated token costs:
 
@@ -671,14 +667,13 @@ Prism32 sends OpenAI-style `/chat/completions` requests (protocol is routed by e
 
 All commands require the `/` prefix. Bare text is sent to the AI.
 
-Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/skill-create`, `/auto delete|pause|resume|show`, `/shard reset`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks. (`/delegate`, `/spawn`, `/subagents`, and `/collect` are exceptions — they work for both the operator and from execute blocks.)
-
-From `execute` blocks, the model can use shell commands (the normal path), plugin-registered commands, `/quantum`, `/auto` (create/list/run automations), `/skill-list`, `/skill-load`, `/shard` (show/deploy/set/secrets/complete), `/harness scan|context|path`, `/evolve on|tools|diff|docs|context`, `/extend`, `/delegate`, `/spawn`, `/collect`, `/subagents`, and `/memory path`. (`/update` is operator-side only — run it yourself at the prompt; use the `--update` flag before starting an agent session.)
+Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/skill-create`, `/auto delete|pause|resume|show`, `/shard reset`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks. (`/delegate`, `/spawn`, `/subagents`, `/collect`, `/wait`, `/bg`, `/bgs`, `/board`, `/remember`, `/recall`, `/memories`, `/forget`, `/json`, `/quantum`, and plugin commands are exceptions — they work for both the operator and from execute blocks.)
 
 Core:
 
 ```text
 /help                 Show command reference
+/version              Show version, Python, platform, runtime dir
 /quit                 Exit
 /clear                Clear current conversation history
 /config               Show current configuration
@@ -698,13 +693,16 @@ AI and task execution:
 /mission resume       Resume a paused mission
 /mission interject <note>
                       Add a team note delivered to future shards
+/mission board        Show the active mission's shared board
 /mission wait         Block until the active mission completes
 /stream on|off        Toggle streamed responses
 /temperature <0-2>    Set model temperature
 /thinking off|low|medium|high
                       Set reasoning effort (saves to config)
 /timeout <seconds>    Set shell command timeout
+/aitimeout <seconds>  Set AI request wait timeout (default 3600s; flex models need more)
 /maxsteps <n>         Set mission per-step budget (default 1000; each shard capped at 25)
+/maxsteps sub <n>     Set subagent step budget for /spawn and /delegate (default 200)
 /cost                 Show session token usage and dollar cost
 /usage                Show API usage/cost (OpenRouter)
 /extend <goal>        AI-generate/load a temporary plugin
@@ -723,6 +721,8 @@ Manual tools:
 /grep <pat> <file>    Search file content
 /git                  Show git status and diff summary
 /image <path> [text]  Send an image file or URL to a vision-capable model
+/json <file> [--key path] [--compact]
+                      Read JSON files with smart summaries
 ```
 
 System tools:
@@ -765,13 +765,21 @@ Memory and context:
 /memories             List recent long-term memories
 ```
 
-Subagents and shared context:
+Subagents, background jobs, and shared context:
 
 ```text
 /delegate <task>      Run a synchronous subagent
 /spawn <task>         Start an asynchronous subagent
+/wait [id] [--timeout s]
+                      Block until subagents/bg jobs finish (default 600s)
+/interject <id> <msg> Steer a running subagent mid-task (no restart)
+/bg <cmd>             Run a long shell command in the background
+/bg                   List background jobs
+/bgs                  List background jobs (alias)
 /subagents            List running/completed subagents
-/collect <id>         Collect async subagent result
+/collect <id>         Show a completed subagent's or job's result (records stay for re-reads)
+/pause | /unpause    Freeze/resume the whole swarm between steps (Ctrl+P too)
+/board <text>         Post to the active mission's shared board (bare /board reads it)
 /subagent-model       Pick or show default subagent model
 /sam <model>          Alias for subagent-model
 /quantum              Show shared session context
@@ -862,24 +870,29 @@ The model can use any shell command plus these Prism32-native commands:
 | Command | Purpose |
 |---------|---------|
 | Any shell command | Full bash/POSIX access (the normal path) |
-| `/quantum key:value` | Write to shared agent context |
-| `/quantum` | Read all shared context |
-| `/auto list` | List scheduled automations |
-| `/auto run <id>` | Run an automation |
-| `/skill-list` | List available skills |
-| `/skill-load <name>` | Inject a skill into context |
-| `/shard show` | Show promptshard definition |
-| `/shard deploy` | Spawn a subagent from promptshard |
-| `/harness scan` | Detect external AI harnesses |
-| `/harness delegate <task>` | Launch a super subagent |
-| `/evolve on` | Enable self-repair context |
-| `/extend temp <goal>` | Generate and load a temporary plugin |
-| `/extend permanent <goal>` | Generate and load a persistent plugin |
-| `/update` | Pull latest from GitHub and reinstall |
+| `/quantum <key>:<value>` | Read/write shared agent context |
+| `/board <text>` | Read/append the active mission's shared board |
+| `/delegate <task>` | Run a synchronous subagent |
+| `/spawn <task>` | Start an async subagent |
+| `/subagents` | List subagents |
+| `/wait [id] [--timeout s]` | Block until subagents/background jobs finish |
+| `/interject <id> <msg>` | Steer a running subagent mid-task |
+| `/bg <cmd>` / `/bgs` | Start/list background shell jobs |
+| `/pause` / `/unpause` (Ctrl+P) | Non-destructive swarm pause/resume |
+| `/compact` | Manually compact the session context now |
+| `/collect <id>` | Show a completed subagent's or job's result |
+| `/remember`, `/recall`, `/memories`, `/forget` | Long-term memory |
+| `/auto create|list|run` | Create, list, or run automations |
+| `/skill-list`, `/skill-load <name>` | List/inject skills |
+| `/shard show|deploy|set|secrets|complete` | Promptshard management |
+| `/harness scan\|context\|path\|delegate` | Harness detection and super-subagent delegation |
+| `/evolve on\|tools\|diff\|docs\|context` | Evolve mode |
+| `/extend temp\|permanent <goal>` | Generate and load a plugin |
+| `/json <file>` | Smart JSON reads |
 | `/memory path` | Show memory file paths |
 | Any plugin command | Auto-discovered and advertised in context |
 
-Operator-only commands (`/provider`, `/config`, `/model`, `/theme`, `/save`, `/load`, `/delegate`, `/spawn`, etc.) cannot be used from execute blocks.
+Both `/delegate` and `/spawn` accept a trailing `--provider <name>` to run that subagent on a different configured provider. Operator-only commands (`/provider`, `/config`, `/model`, `/theme`, `/save`, `/load`, `/update`, etc.) cannot be used from execute blocks — `/update` in particular must be run by you at the prompt, or via the `--update` flag before starting an agent session.
 
 ### Tool Call Healing
 
@@ -991,18 +1004,7 @@ When you start a mission:
 3. **Dispatch** — every ready step (parent chain done) runs as a PARALLEL subagent shard: siblings run concurrently, children wait for their parents.
 4. **Complete structurally** — the mission ends when all leaf steps are done or failed. A failed step requeues once, then its leaf is marked failed and the mission continues.
 
-Every shard receives the mission context: the goal, the last 10 completed step results, and team notes — so shards build on each other instead of redoing work. The REPL stays live while the mission runs — `/mission` returns instantly.
-
-Mission control:
-
-```text
-/mission status       Show the todo tree, running shards, and notes
-/mission pause        Pause dispatch (running shards finish)
-/mission resume       Resume dispatch
-/mission interject <note>
-                      Add a note delivered to the next dispatched shards
-/mission wait         Block until the active mission completes
-```
+Every shard receives the mission context: the goal, the last 10 completed step results, and team notes — so shards build on each other instead of redoing work. Shards and the operator can also share scratch state through the mission board: post with `/board <text>` (or `/mission board` to read it); entries expire when the mission completes. The REPL stays live while the mission runs — `/mission` returns instantly.
 
 On completion you get a summary box (per-step results, failures marked) and the full result lands in quantum context as `mission_<id>_result` for the main agent and cross-agent handoff. `/maxsteps <n>` sets the per-step (per-todo) shard step budget — each shard is additionally capped at 25 steps. `/goal` still works as an alias for `/mission`.
 
@@ -1013,23 +1015,9 @@ prism32 --mission "audit this server and write a report to /tmp/audit.md"
 # --goal is an alias for --mission
 ```
 
-## Advanced Task Examples
-
-Prism32 is useful for tasks that need conversation plus terminal feedback:
-
-- Legacy system onboarding: detect OS, architecture, package manager, shell quirks, RAM, disk, network tools, and record the facts in `startup_memory.md`.
-- Codebase repair: inspect a repo, run tests, apply a minimal patch, rerun tests, and summarize the diff.
-- Multi-provider research: use a fast cheap model for subagents while the main session uses a stronger model.
-- Local/remote model routing: use Ollama or llama.cpp locally for private work, then switch to OpenRouter/Groq/OpenAI when needed.
-- Plugin creation: ask Prism32 to write a plugin into `~/.prism32/plugins/`, restart, and use the new slash command.
-- External harness coordination: scan installed AI CLIs with `/harness scan`, then let Prism32 choose when to delegate to one.
-- Scheduled tasks: create natural-language automations that run while Prism32 is open, such as periodic reports or checks.
-- Promptshard handoff: write a structured assignment into `promptshard.md`, then `/shard deploy` to spawn a specialized subagent.
-- Self-maintenance: enable `/evolve on`, inspect tool scans, compare against the baseline with `/evolve diff`, and apply reviewed code changes.
-
 ## Subagents
 
-Subagents are independent task runners with their own mini history. They use the same model as the main agent by default, or the subagent slot (`Config.SUBAGENT_MODEL` + `Config.SUBAGENT_PROVIDER`) if set — so subagents can deliberately run on a different, cheaper provider than the main agent. Change at runtime with `/set subagent_model <model>` and `/set subagent_provider <name>`, or pick both slots from `/model`. Each subagent run gets a TCP pre-flight check on its provider base and fails fast with an actionable fix command if the endpoint is down.
+Subagents are independent task runners with their own mini history. They use the same model as the main agent by default, or the subagent slot (`Config.SUBAGENT_MODEL` + `Config.SUBAGENT_PROVIDER`) if set — so subagents can deliberately run on a different, cheaper provider than the main agent. Change at runtime with `/set subagent_model <model>` and `/set subagent_provider <name>`, or pick both slots from `/model`. Each subagent run gets a TCP pre-flight check on its provider base and fails fast with an actionable fix command if the endpoint is down. Subagents are capped at `SUBAGENT_MAX_STEPS` steps (default 200; change with `/maxsteps sub <n>`).
 
 Run synchronously:
 
@@ -1041,16 +1029,36 @@ Run asynchronously:
 
 ```text
 /spawn scan this repository for TODO comments and group them by subsystem
-/subagents
-/collect <id>
 ```
 
-Use another configured provider:
+Use another configured provider (works for both `/delegate` and `/spawn`):
 
 ```text
 /delegate write a release checklist --provider openrouter
 /spawn inspect package manager options --provider ollama
 ```
+
+**Completion is event-driven — do not poll.** When a subagent or background job finishes, its result is pushed into the conversation automatically as a completion notice (and into quantum context as `subagent_<id>_result` / `bg_<id>_result`). The status bar shows live counts (`SA:n` for subagents, `BG:n` for background jobs). If you must block, use:
+
+```text
+/wait                 Block until ALL subagents and bg jobs finish (default 600s)
+/wait <id>            Block until one specific subagent or job finishes
+/wait --timeout 60    Use a custom timeout; Escape cancels the wait
+```
+
+Long shell commands (builds, deploys, transfers) can run detached with `/bg <command>` — the result is pushed to the agent when it finishes. `/bg` bare (or `/bgs`) lists background jobs. While subagents are running, any `sleep` command the model tries to run is capped at 30 seconds with an explanatory note — the wait primitives replace sleep-polling.
+
+`/collect <id>` shows a completed subagent's or job's result and appends it to the conversation. Collecting does not destroy the record — results stay available for re-reads (and in quantum context) and are reaped by a 1h garbage collector. `/subagents` lists status without touching records.
+
+**Steer, don't kill.** If a subagent is going the wrong way, `/interject <id> <message>` delivers a steering message into its conversation on its next step — no cancellation, no restart, no lost progress:
+
+```text
+/interject sa_3 the config file is at /etc/opt/app.conf, not /usr/local/etc
+```
+
+Subagents emit a progress heartbeat into the shared event stream every 25 steps, so the main agent (and sibling agents) see step counts and last commands instead of silence. Parallel spawns beyond `max_concurrent_subagents` (default 6, config key `max_concurrent_subagents`) queue for a free run slot instead of thrashing provider rate limits.
+
+**Pausing the swarm.** Ctrl+P during AI activity (or `/pause` and `/unpause` anytime) freezes the whole swarm between steps, non-destructively: running commands and processes finish untouched, no new agent steps start, nothing is cancelled or lost. While paused the interjection reader stays live — type a message to talk to the captain agent, or use `/interject` to steer a subagent, then Ctrl+P (or `/unpause`) to continue exactly where everything left off. The status bar shows `PAUSED` while held.
 
 Subagent results are stored into the in-memory quantum context and important results may also be stored in long-term memory.
 
@@ -1376,25 +1384,6 @@ Prism32 scans for external AI command-line harnesses and records them in `~/.pri
 
 Detected tools may include OpenCode, Codex CLI, Claude Code, KimiCode, Aider, Gemini CLI, Goose, Pi AI CLI, Hermes Agent, Cursor Agent, and related commands. Prism32 does not bundle or authenticate those tools. It only detects what exists locally and adds that information to the AI context.
 
-## Why Prism32 Can Do More Than A Plain Chat CLI
-
-Many terminal chat tools stop at sending prompts and printing responses. Prism32 combines multiple harness layers:
-
-- A command-execution feedback loop with structured `ask` and `execute` blocks.
-- Can turn any computer into a personal robot assistant with natural language
-- Can run on IOT devices and robots with low end compute on bare metal and can expand their capabilities by writing custom plugins for it's niche hardware and OS'
-- Persistent startup memory, long-term memory, and custom soul rules.
-- Runtime plugin loading without pip packages.
-- Subagents that can run synchronously or asynchronously.
-- A shared in-memory quantum context for agent handoffs.
-- Promptshard files for structured assignments.
-- Evolve files for self-documentation, tool scans, baselines, plugin templates, and diffs.
-- External harness detection so Prism32 can reason about other installed AI CLIs.
-- Cross-platform command guidance injected into startup memory.
-- Escape cancellation for long waits and runaway foreground commands.
-
-The result is a small terminal program that can operate like a conversation, a shell assistant, a task runner, a plugin host, and a multi-agent coordinator.
-
 ## Configuration
 
 Main config file:
@@ -1414,7 +1403,9 @@ Important settings:
 - `max_history`: maximum message history count.
 - `max_response_tokens`: response token limit sent to the API.
 - `cmd_timeout`: shell command timeout in seconds.
+- `ai_timeout`: AI request wait timeout in seconds (default 3600).
 - `goal_max_steps`: per-step (per-todo) shard step budget for missions (see `/maxsteps`).
+- `subagent_max_steps`: step budget for `/spawn` and `/delegate` subagents (default 200; see `/maxsteps sub`).
 - `max_memory_ctx`: character limit for injected memory context.
 - `subagent_model`: optional model override for subagents.
 - `subagent_provider`: optional provider override for subagents (empty = main provider).
@@ -1478,206 +1469,6 @@ cd /mnt/floppy && sh AUTORUN.SH
 
 The installer copies `prism32.py` to `~/.prism32/` locally, so the media can be ejected after install. Your configuration, plugins, and memory are all preserved. Total image size: ~470 KB, fits easily on 1.44 MB floppy with ~68% free.
 
-## OpenWrt Router Install
-
-One-click installer for OpenWrt routers (pure POSIX sh, busybox ash compatible):
-
-```sh
-# Interactive (prompts for provider, API key)
-wget -O /tmp/install.sh http://your-server/openwrt-install.sh
-sh /tmp/install.sh
-
-# Auto mode (no prompts)
-sh /tmp/install.sh -y
-
-# Install to USB (for routers with low flash)
-sh /tmp/install.sh /mnt/usb
-```
-
-The OpenWrt installer:
-- Auto-detects `opkg` (OpenWrt <24) or `apk` (OpenWrt >=24)
-- Bootstraps HTTPS support (`libustream-mbedtls` + `ca-bundle`)
-- Installs `python3-light` + `python3-openssl` (minimal footprint)
-- Low-flash detection: warns and suggests USB install below 8 MB free
-- USB/SD install support: installs Python + Prism32 to external storage
-- Downloads `prism32.py` from GitHub if not present locally
-- Router-tuned config: lower `max_history` (500), `max_response_tokens` (4096), `stream: false`
-- Creates `/etc/profile.d/prism32.sh` for USB PATH setup
-- Works on 4 MB+ flash (with USB), 24 MB+ RAM
-
-## ChromeOS Install
-
-ChromeOS supports Linux apps via the Crostini container (built into ChromeOS 69+). This gives you a Debian-based Linux environment that can run Prism32 natively — no Developer Mode or Crouton needed.
-
-### Option 1: Universal Bootstrap (easiest)
-
-```sh
-# In the Terminal app (Crostini), run:
-curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-```
-
-This auto-detects ChromeOS/Crostini as Linux, installs Python 3 + git if needed, clones the repo, and runs the installer — all non-interactively. Your provider config is preserved on updates.
-
-### Option 2: Manual Install
-
-```sh
-# 1. Open the Terminal app (Crostini Linux container)
-# 2. Install Python and git if not already present:
-sudo apt-get update && sudo apt-get install -y python3 git
-
-# 3. Clone and install:
-git clone https://github.com/MegaDyneSystems/prism32.git ~/prism32
-cd ~/prism32 && bash install.sh
-```
-
-### Option 3: Run Without Installing
-
-```sh
-git clone https://github.com/MegaDyneSystems/prism32.git ~/prism32
-cd ~/prism32 && python3 prism32.py --setup-runtime && python3 prism32.py
-```
-
-### ChromeOS Notes
-
-- **Crostini** is recommended over Crouton/Developer Mode — it's sandboxed, stable, and supported on all Chromebooks from 2019 onward.
-- Prism32 runs at full speed in the Crostini container (it's a real Linux environment with `apt`, `python3`, `git`, etc.).
-- To detect ChromeOS/Crostini from inside the container: `cat /etc/os-release` shows `ID=debian` but the ChromeOS host is visible via `ls /mnt/chromeos`.
-- The `bootstrap.sh` script detects ChromeOS and installs automatically.
-- Shared filesystem: files in the Crostini container's home directory are accessible from the ChromeOS Files app under "Linux files".
-- Clipboard sharing works between ChromeOS and the Crostini terminal.
-
-### Installing from Crosh (Ctrl+Alt+T shell)
-
-Crosh is the restricted ChromeOS shell (Ctrl+Alt+T). It has no Python, no package manager, and very few commands — but it can bootstrap you into the Linux container:
-
-```text
-# In Crosh (Ctrl+Alt+T):
-vmc start termina
-vmc container termina -- penguin -- sh -c "curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh"
-```
-
-Or just paste the bootstrap command — `bootstrap.sh` detects Crosh automatically and launches Crostini for you:
-
-```text
-# In Crosh (Ctrl+Alt+T):
-curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-```
-
-If Crostini isn't enabled yet, the bootstrap script prints instructions on how to enable it (Settings → Linux development environment → Turn on).
-
-If you have Developer Mode enabled, type `shell` in Crosh to get a root bash shell, then run the bootstrap command.
-
-## Termux / Android Install
-
-One-command install for Android phones, tablets, Chromecast, Wear OS watches, and other Android devices via Termux:
-
-```sh
-# 1. Install Termux from F-Droid (Google Play version is deprecated)
-# 2. In Termux, run:
-pkg install curl && curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/termux-install.sh | sh
-```
-
-This installs Python 3 + git, clones Prism32, creates a `prism32` command in `$PREFIX/bin`, and preserves existing config on updates.
-
-```sh
-# After install, start Prism32:
-prism32
-
-# Use a cloud provider (no --provider CLI flag exists — pick a model with /model
-# inside the app, then store the key with /provider key <name> <key>):
-prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
-```
-
-Works on: phones, tablets, Chromecast with Google TV, Android TV, Wear OS watches, Fire TV (sideloaded Termux), and any device that can run Termux.
-
-## Universal Bootstrap (Any Platform)
-
-A single command that auto-detects the platform and installs everything:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-# or:
-wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-```
-
-The bootstrap script auto-detects:
-
-| Platform | Package Manager | Install Path |
-|----------|----------------|-------------|
-| Termux/Android | `pkg` | `~/prism32` + `install.sh -y` |
-| OpenWrt | `opkg` or `apk` | `~/prism32` + `openwrt-install.sh -y` |
-| macOS | `brew` (auto-installs if needed) | `~/prism32` + `install.sh -y` + SSL fix |
-| Linux (Debian/Ubuntu) | `apt-get` | `~/prism32` + `install.sh -y` |
-| Linux (Fedora/RHEL) | `dnf` | `~/prism32` + `install.sh -y` |
-| Linux (Arch/Manjaro) | `pacman` | `~/prism32` + `install.sh -y` |
-| Linux (Alpine) | `apk` | `~/prism32` + `install.sh -y` |
-| Linux (Gentoo) | `emerge` | `~/prism32` + `install.sh -y` |
-| Linux (Void) | `xbps-install` | `~/prism32` + `install.sh -y` |
-| BSD (FreeBSD/NetBSD/OpenBSD) | `pkg`/`pkgin`/`pkg_add` | `~/prism32` + `install.sh -y` |
-| Synology/QNAP/WD NAS | N/A (no package manager) | Direct download via `curl`/`wget` (no git needed) |
-| Unknown | N/A | Direct download of `prism32.py` via `wget`/`curl`/`python3` |
-
-If Python 3 is not installed, the bootstrap script installs it via the system's package manager automatically. If no recognized package manager exists (e.g. Synology DSM, QNAP QTS), it falls back to downloading `prism32.py` + `install.sh` directly via `curl`/`wget`/`python3 urllib` — no git required.
-
-If the `$HOME` directory doesn't exist (common on Synology NAS where the user home may not be provisioned), the bootstrap script first probes persistent locations (`/volume1/prism32` on Synology) and only then falls back to `/tmp` as HOME.
-
-## NAS Install (Synology / QNAP / WD My Cloud)
-
-Most NAS devices ship with Python 3 and `curl`/`wget` but no `git` and no package manager (`apt-get`, `dnf`, etc.). The universal bootstrap handles this automatically:
-
-### Synology DSM
-
-```sh
-# Via SSH (Synology DSM has curl preinstalled):
-curl -fsSL https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-
-# If curl is unavailable, use wget:
-wget -qO- https://raw.githubusercontent.com/MegaDyneSystems/prism32/main/bootstrap.sh | sh
-
-# If GitHub CDN is cached, pipe directly from your local machine:
-cat bootstrap.sh | ssh user@nas "cat > /tmp/bootstrap.sh && HOME=/tmp sh /tmp/bootstrap.sh"
-```
-
-Tested on Synology DS414 (Marvell Armada XP, ARMv7l, 2GB RAM, Python 3.8.12, DSM 7.1.1 — the v7.2 full battery passed there: 165 pytest + 24 smoketests, GNU readline 8.0 with working bracketed paste). The installer:
-- Detects missing git and falls back to direct download of `prism32.py` + `install.sh`
-- Detects a broken `$HOME` (DSM's `/var/services/homes/<user>` dangles when the user home service is off) and reroutes the runtime dir to the **persistent** `/volume1/homes/<user>/.prism32` — never volatile `/tmp`, which DSM mounts noexec and wipes on reboot
-- Installs the wrapper to `/volume1/homes/<user>/.local/bin/prism32` (persistent + exec-capable)
-- Persists PATH by appending a guarded export to `.profile`/`.bashrc` (and the volume home's `.profile`) — a fresh interactive SSH login finds `prism32`
-- Writes neutral local-provider defaults in `-y` auto mode (no menu dump, no dead-endpoint config) — configure the real endpoint with `/provider` on first run
-- Verifies the wrapper it actually wrote and warns if a stale prism32 elsewhere in PATH shadows it
-- No root required (installs to user-local paths)
-
-DSM notes:
-- Best fix for a missing home: **Control Panel → User & Group → Advanced → Enable user home service**, or run with `HOME=/volume1/homes/<user>`. `/volume1/homes/<user>` exists and is user-writable even when the homes symlink dangles.
-- `/tmp` is tmpfs, **noexec**, and wiped on reboot — nothing lives there.
-- `scp` to DSM needs `-O` (SFTP subsystem is disabled by default): `scp -O file user@nas:/path`.
-- Non-interactive SSH (`ssh nas 'prism32 --version'`) sources no dotfiles on DSM — run from an interactive shell, or use the full wrapper path.
-- No pip on DSM, but the app is stdlib-only (no dependencies). For development, `python3 -m venv` works (ensurepip is bundled).
-
-After install, run with:
-
-```sh
-prism32                      # interactive shell, after PATH refresh
-# or explicitly:
-python3 /volume1/homes/<user>/.prism32/prism32.py
-```
-
-To connect to a cloud provider (since NAS likely has no local LLM):
-
-```sh
-# CLI flags are session-only overrides — persist the pick with /model and
-# /provider key <name> <key> inside the app instead:
-prism32 --api https://openrouter.ai/api/v1 --api-key sk-or-v1-...
-```
-
-### QNAP QTS
-
-Same procedure as Synology. QNAP NAS devices also ship with Python 3 and `curl`. The bootstrap script auto-detects QNAP via `/etc/config/uLinux.conf` or `/etc/qnap_config`.
-
-### WD My Cloud
-
-WD My Cloud NAS devices run busybox Linux with Python 3 available via optware. The bootstrap script detects WD via `/etc/NAS_CFG` and uses direct download.
-
 ## Safety Notes
 
 Prism32 can execute shell commands. Treat it like a powerful operator sitting at your terminal.
@@ -1739,7 +1530,7 @@ Press Escape.
 
 "Process killed" or OOM on an embedded device (router, IoT):
 
-The single-file `prism32.py` is ~507 KB. On devices with less than ~64 MB RAM, CPython's parser may not have enough memory to compile it. Use a pre-compiled `.pyc` instead (see "Embedded and Ultra-Low-RAM Devices" above), or compile on a host with the same Python version and copy the `.pyc` to the device.
+The single-file `prism32.py` is ~600 KB. On devices with less than ~64 MB RAM, CPython's parser may not have enough memory to compile it. Use a pre-compiled `.pyc` instead (see "Embedded and Ultra-Low-RAM Devices" above), or compile on a host with the same Python version and copy the `.pyc` to the device.
 
 Cost tracking shows wrong amount:
 

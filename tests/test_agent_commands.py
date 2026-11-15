@@ -21,8 +21,8 @@ from prism32 import SYSTEM_PROMPT, _try_plugin_cmd
 # Canonical agent-usable commands inside execute blocks. Keep in sync
 # with SYSTEM_PROMPT's "Commands you can use inside execute blocks" list.
 AGENT_COMMANDS = [
-    "quantum", "board", "delegate", "spawn", "collect", "subagents",
-    "remember", "recall", "memories", "forget",
+    "quantum", "board", "delegate", "spawn", "collect", "wait", "subagents",
+    "bg", "remember", "recall", "memories", "forget",
     "auto", "skill-list", "skill-load", "shard",
     "harness", "evolve", "extend", "memory", "json",
 ]

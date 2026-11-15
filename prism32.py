@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.2.9 - MegaDyne Systems Terminal Agent
+Prism32 v7.3.0 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -2464,15 +2464,24 @@ def _automation_scheduler_loop():
             _cleanup_subagents()
         except Exception:
             pass
+        try:
+            _cleanup_bg_jobs()
+        except Exception:
+            pass
     _AUTOMATION_SCHEDULER_RUNNING = False
 
 def _cleanup_subagents():
-    """Remove old completed subagents from _SUBAGENTS to prevent memory leak."""
+    """Remove old completed subagents from _SUBAGENTS to prevent memory leak.
+
+    Window was 300s while the observed main-agent poll cadence was 480s —
+    finished results were reaped before anyone collected them (forensics:
+    'No subagent with id' / 'No subagents.'). Results are now published to
+    quantum on completion, so 3600s only bounds the _SUBAGENTS registry."""
     now = time.time()
     stale_ids = []
     with _subagent_lock:
         for sid, sa in _SUBAGENTS.items():
-            if sa.done and getattr(sa, '_cleanup_time', 0) and now - sa._cleanup_time > 300:
+            if sa.done and getattr(sa, '_cleanup_time', 0) and now - sa._cleanup_time > 3600:
                 if sa._thread is None or not sa._thread.is_alive():
                     stale_ids.append(sid)
     with _subagent_lock:
@@ -4313,6 +4322,14 @@ class Config:
 
     SUBAGENT_MODEL = ""  # model for subagents (empty = use main model)
     SUBAGENT_PROVIDER = ""  # provider for subagents (empty = main provider)
+    # Step budget for /spawn and /delegate subagents. The old hard default
+    # of 1000 let doomed subagents grind for hours (forensics 2026-11:
+    # 3 of 6 collected results were "Max steps reached"). Operator:
+    # /maxsteps sub <n> — GOAL_MAX_STEPS stays for missions/automations.
+    SUBAGENT_MAX_STEPS = 200
+    # Max simultaneously-RUNNING async subagents; further spawns queue
+    # (hivemind queueing — prevents provider rate-limit thrash).
+    MAX_CONCURRENT_SUBAGENTS = 6
     ROOT_PASS = ""  # root password for su/sudo commands (auto-fed via pty; $ROOT_PASS env)
     STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
     NATIVE_TOOLS = os.environ.get("PRISM32_NATIVE_TOOLS", "1").lower() not in ("0", "false", "no", "off")
@@ -4391,6 +4408,8 @@ class Config:
                 "cmd_timeout": cls.CMD_TIMEOUT,
                 "ai_timeout": cls.AI_TIMEOUT,
                 "goal_max_steps": cls.GOAL_MAX_STEPS,
+                "subagent_max_steps": cls.SUBAGENT_MAX_STEPS,
+                "max_concurrent_subagents": cls.MAX_CONCURRENT_SUBAGENTS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
                 "stream": cls.STREAM,
                 "slow_cpu": cls.SLOW_CPU,
@@ -4608,6 +4627,11 @@ class Config:
                 cls.PROMPT_CACHING = bool(data["prompt_caching"])
             if "subagent_model" in data: cls.SUBAGENT_MODEL = data["subagent_model"]
             if "subagent_provider" in data: cls.SUBAGENT_PROVIDER = data["subagent_provider"]
+            if "subagent_max_steps" in data:
+                cls.SUBAGENT_MAX_STEPS = max(1, _tolerant_int(data["subagent_max_steps"], cls.SUBAGENT_MAX_STEPS))
+            if "max_concurrent_subagents" in data:
+                _mc = _tolerant_int(data["max_concurrent_subagents"], cls.MAX_CONCURRENT_SUBAGENTS)
+                cls.MAX_CONCURRENT_SUBAGENTS = max(1, _mc)
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
             if "custom_arch_map" in data and isinstance(data["custom_arch_map"], dict):
@@ -4859,6 +4883,17 @@ def trim_history(history, max_tokens=None):
     
     result.extend(kept)
     return result
+
+def compact_history(history):
+    """/compact — manual context squeeze. Compresses old tool turns,
+    then forces a trim down to half the context window (the automatic
+    path only fires at 75% and only trims to the full budget).
+    Mutates `history` in place; returns (before_pct, after_pct)."""
+    before = context_pct(history)
+    squeezed = compress_tool_turns(list(history))
+    squeezed = trim_history(squeezed, max(2000, Config.resolve_context_window() // 2))
+    history[:] = squeezed
+    return before, context_pct(history)
 
 def _collapse_text_middle(text, head_lines=5, tail_lines=3, max_chars=400):
     """Collapse the middle of long text, keeping the first/last lines intact.
@@ -5568,6 +5603,54 @@ def clear_agent_cancel():
 def agent_cancel_requested(cancel_event=None):
     return _AGENT_CANCEL_REQUESTED or (cancel_event is not None and cancel_event.is_set())
 
+# ── Swarm pause (Ctrl+P) ─────────────────────────────────────────
+# Non-destructive hold: running commands/processes finish untouched,
+# no new agent steps start, nothing is cancelled or lost. Lets the
+# operator talk to the captain agent while the swarm is frozen.
+_AGENT_PAUSE_REQUESTED = False
+
+def request_agent_pause():
+    global _AGENT_PAUSE_REQUESTED
+    _AGENT_PAUSE_REQUESTED = True
+
+def clear_agent_pause():
+    global _AGENT_PAUSE_REQUESTED
+    _AGENT_PAUSE_REQUESTED = False
+
+def agent_pause_requested():
+    return _AGENT_PAUSE_REQUESTED
+
+def toggle_agent_pause():
+    """Ctrl+P handler: freeze/resume the whole swarm between steps."""
+    if agent_pause_requested():
+        clear_agent_pause()
+        viz.status("SWARM RESUMED — agents continue from where they paused", "success")
+        return False
+    request_agent_pause()
+    viz.status("SWARM PAUSED (Ctrl+P or /resume to continue) — running commands finish, "
+               "no new steps start, processes untouched", "warn")
+    return True
+
+def _pause_gate(is_main=False):
+    """Block while the operator has paused the swarm. Cancel (Escape)
+    always beats the pause. On the main loop the interjection reader
+    stays live so the operator can type a message to the captain."""
+    if not agent_pause_requested():
+        return
+    if is_main and _can_cancel_foreground_input():
+        _interjection_start()
+        try:
+            while agent_pause_requested() and not agent_cancel_requested():
+                inj = _interjection_poll()
+                if inj is _INTERJECTION_CANCEL:
+                    return
+                time.sleep(0.1)
+        finally:
+            _interjection_stop()
+        return
+    while agent_pause_requested() and not agent_cancel_requested():
+        time.sleep(0.25)
+
 def agent_cancel_message():
     return _AGENT_CANCEL_REASON or "Agent stopped by Escape"
 
@@ -5746,6 +5829,11 @@ def _interjection_poll():
                     return result
                 elif ord(ch) == 3:  # Ctrl-C
                     return request_agent_cancel("Agent stopped by Ctrl-C")
+                elif ord(ch) == 16:  # Ctrl-P — pause/resume the swarm
+                    # Non-destructive: running commands finish; agents hold
+                    # between steps; the operator can then steer via /interject
+                    # or type a message to the captain agent.
+                    toggle_agent_pause()
                 elif ord(ch) == 1:  # Ctrl-A = Home
                     _INTERJECTION_CURSOR = 0
                     _INTERJECTION_HAS_TYPED = True
@@ -5814,6 +5902,8 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     if ctx > 0:
         ctx_color = t['err'] if ctx >= 90 else (t['warn'] if ctx >= 75 else t['dim'])
         parts.append(f"{ctx_color}Ctx {ctx}%{RST}")
+    if agent_pause_requested():
+        parts.append(f"{t['warn']}PAUSED{RST}")
     if _SESSION_COST > 0:
         cost_color = t['warn'] if _SESSION_COST >= 1.0 else t['dim']
         parts.append(f"{cost_color}${_SESSION_COST:.4f}{RST}")
@@ -5822,6 +5912,12 @@ def build_status_bar(spin_char=None, history=None, include_indicator=False):
     sa_count = sum(1 for s in list(_SUBAGENTS.values()) if not s.done)
     if sa_count > 0:
         parts.append(f"{t['warn']}SA:{sa_count}{RST}")
+    try:
+        bg_count = sum(1 for j in list(_BG_JOBS.values()) if not j.done)
+    except Exception:
+        bg_count = 0
+    if bg_count > 0:
+        parts.append(f"{t['warn']}BG:{bg_count}{RST}")
     if _quantum.was_used():
         parts.append(f"{t['accent']}Q{RST}")
     if include_indicator:
@@ -6386,8 +6482,16 @@ def cmd_session_save(session_id, history, cmd_log, name=None):
     return session_id
 
 def save_current_session(history, cmd_log):
-    """Silently save current session state without showing status."""
+    """Silently save current session state without showing status.
+
+    Empty sessions (history holds nothing but the system prompt) are
+    NOT saved — every REPL start + /quit or stray slash command used to
+    mint a ~15KB auto_*.json file with zero messages (user request
+    2026-11: "only save sessions where you do things")."""
     global _CURRENT_SESSION_ID
+    if not any(isinstance(m, dict) and m.get("role") != "system"
+               for m in (history or [])):
+        return
     if not _CURRENT_SESSION_ID:
         _CURRENT_SESSION_ID = generate_session_id("auto")
     try:
@@ -6631,7 +6735,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.2.9 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.3.0 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -6642,12 +6746,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.2.9 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.3.0 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.2.9 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.3.0 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -6844,15 +6948,369 @@ def _split_task_provider(task):
         return task, None
     return (task[:m.start()] or '').rstrip(' \t'), m.group(1)
 
+# Agent commands _try_plugin_cmd dispatches when they lead an execute
+# block. A compound line like `sleep 480; /subagents` is split on
+# top-level `;` so these dispatch too — session forensics 2026-11:
+# 84 such compounds failed as shell (11+ hours of dead sleeping).
+_AGENT_CMD_NAMES = frozenset((
+    'quantum', 'board', 'remember', 'recall', 'memories', 'forget',
+    'delegate', 'spawn', 'collect', 'wait', 'interject', 'subagents', 'bg', 'bgs',
+    'skill-list', 'skill-load', 'auto', 'json', 'memory',
+    'harness', 'evolve', 'extend', 'shard',
+))
+
+_RE_AGENT_SEGMENT = re.compile(r'^/([A-Za-z][\w-]*)\b')
+# Segments that signal shell control structure — splitting a for/case
+# body on `;` would produce syntax errors, so refuse to split.
+_SHELL_STRUCT_KEYWORDS = frozenset((
+    'do', 'done', 'then', 'fi', 'else', 'elif', 'esac', 'case', 'in',
+    'if', 'while', 'until', 'for', 'function', '{', '}', 'time',
+))
+
+def _split_top_level_semicolons(cmd):
+    """Split on `;` only outside quotes/escapes. Returns None if any
+    segment looks structurally unsafe to run standalone (unbalanced
+    quotes/parens, shell keywords, empty fragments from `;;`)."""
+    parts = []
+    buf = []
+    quote = None
+    i, n = 0, len(cmd)
+    while i < n:
+        ch = cmd[i]
+        if quote:
+            buf.append(ch)
+            if ch == '\\' and quote == '"' and i + 1 < n:
+                buf.append(cmd[i + 1]); i += 2; continue
+            if ch == quote:
+                quote = None
+            i += 1
+            continue
+        if ch in ('"', "'"):
+            quote = ch; buf.append(ch); i += 1; continue
+        if ch == '\\' and i + 1 < n:
+            buf.append(ch); buf.append(cmd[i + 1]); i += 2; continue
+        if ch == ';':
+            parts.append(''.join(buf)); buf = []; i += 1; continue
+        buf.append(ch); i += 1
+    parts.append(''.join(buf))
+    if quote is not None:
+        return None
+    segs = [p.strip() for p in parts]
+    for s in segs:
+        if not s:
+            return None  # `;;` (case) or trailing/double semicolons
+        if s.count('"') % 2 or s.count("'") % 2:
+            return None
+        if s.count('(') != s.count(')') or s.count('`') % 2:
+            return None
+        first = s.split(None, 1)[0] if s.split(None, 1) else s
+        if first in _SHELL_STRUCT_KEYWORDS or s in _SHELL_STRUCT_KEYWORDS:
+            return None
+    return segs
+
 def _split_plugin_block(block):
     """A multi-line execute block where every non-empty line is a Prism32
     /command is really a list of commands — split them so each runs
     separately (otherwise everything after the first line is silently
-    swallowed as arguments of the first command)."""
+    swallowed as arguments of the first command).
+
+    Single-line compounds are split on top-level `;` when at least one
+    segment is a Prism32 agent command (`sleep 480; /subagents` used to
+    run as pure shell: the sleep burned 8 minutes, the /subagents part
+    failed with 'No such file', and the agent polled nothing)."""
     lines = [ln.strip() for ln in (block or '').splitlines() if ln.strip()]
     if len(lines) > 1 and all(ln.startswith('/') for ln in lines):
         return lines
+    if not (block or '').strip():
+        return []
+    segs = _split_top_level_semicolons(block.strip())
+    if segs and len(segs) > 1:
+        has_agent = any(_RE_AGENT_SEGMENT.match(s) and
+                        _RE_AGENT_SEGMENT.match(s).group(1) in _AGENT_CMD_NAMES
+                        for s in segs)
+        if has_agent:
+            return segs
     return [block] if (block or '').strip() else []
+
+# ── Subagent completion notification ─────────────────────────────
+# Forensics 2026-11: the main agent had NO way to learn a spawned
+# subagent finished except polling /subagents (it slept 8 minutes per
+# poll, 84 times). Completed results now get published to quantum (so
+# ANY agent can read them) and appended to a per-consumer event log
+# that the main/subagent loops inject into the next model turn.
+_AGENT_EVENT_LOG = []
+_agent_events_lock = threading.Lock()
+_AGENT_EVENT_SEQ = 0
+
+def _publish_agent_event(kind, ok, ident, subject, result):
+    """Append a completion event to the per-consumer log that the
+    main/subagent loops inject into the next model turn."""
+    global _AGENT_EVENT_SEQ
+    with _agent_events_lock:
+        _AGENT_EVENT_SEQ += 1
+        _AGENT_EVENT_LOG.append({
+            "seq": _AGENT_EVENT_SEQ,
+            "kind": kind,           # "subagent" | "bg"
+            "ok": bool(ok),
+            "id": ident,
+            "subject": (subject or "")[:120],
+            "result": (result or "")[:400],
+        })
+        del _AGENT_EVENT_LOG[:-500]  # bound memory
+
+def _notify_subagent_done(sa):
+    """Publish a finished subagent's result to quantum and log a
+    completion event for delivery into the agent loops."""
+    try:
+        _quantum.put(f"subagent_{sa.id}_status", "error" if sa.error else "done")
+        _quantum.put(f"subagent_{sa.id}_task", (sa.task or "")[:200])
+        if sa.result:
+            _quantum.put(f"subagent_{sa.id}_result", sa.result[:4000])
+    except Exception:
+        pass
+    if getattr(sa, '_sync_run', False):
+        return  # sync /delegate returns its result directly
+    _publish_agent_event("subagent", not sa.error, sa.id,
+                         f"task: {sa.task}", sa.result or sa.error or "")
+
+def _drain_agent_events(cursor):
+    """Return (events since cursor, next cursor). Per-consumer cursors
+    keep concurrent agents from stealing each other's notices."""
+    with _agent_events_lock:
+        base = _AGENT_EVENT_LOG[0]["seq"] if _AGENT_EVENT_LOG else 0
+        cursor = max(cursor, base)
+        evs = [dict(e) for e in _AGENT_EVENT_LOG if e["seq"] >= cursor]
+        nxt = (_AGENT_EVENT_LOG[-1]["seq"] + 1) if _AGENT_EVENT_LOG else cursor
+    return evs[-8:], nxt
+
+_MAIN_EVENT_CURSOR = [0]  # main REPL's position in the event log
+
+def _format_agent_events(evs):
+    """Render queued completion events as a user-message injection."""
+    lines = []
+    for ev in evs:
+        status = "COMPLETED" if ev["ok"] else "FAILED"
+        if ev["kind"] == "pulse":
+            lines.append(f"[SUBAGENT PROGRESS] {ev['id']} — {ev['subject']}")
+            continue
+        label = "SUBAGENT" if ev["kind"] == "subagent" else "BACKGROUND JOB"
+        lines.append(f"[{label} {status}] {ev['id']} — {ev['subject']}")
+        if ev["result"]:
+            lines.append(f"  result: {ev['result']}")
+        key = (f"subagent_{ev['id']}_result" if ev["kind"] == "subagent"
+               else f"bg_{ev['id']}_result")
+        lines.append(f"  (full result: /collect {ev['id']} or /quantum {key}:)")
+    return "\n".join(lines)
+
+# ── Background jobs ──────────────────────────────────────────────
+# /bg <command> runs a shell command detached from the agent loop.
+# Completion pushes the result into the conversation (event log +
+# quantum), so the agent never sleep-polls a build/deploy/transfer —
+# it keeps working and is notified when the work is done (user request
+# 2026-11: "things happen when they are done, not on a static timer").
+_BG_JOBS = {}
+_bg_lock = threading.Lock()
+_next_bg_id = 0
+
+def _notify_bg_done(job):
+    try:
+        _quantum.put(f"bg_{job.id}_cmd", (job.cmd or "")[:200])
+        _quantum.put(f"bg_{job.id}_result", (job.result or job.error or "")[:4000])
+    except Exception:
+        pass
+    _publish_agent_event("bg", not job.error, job.id,
+                         f"cmd: {job.cmd}", job.result or job.error or "")
+
+class BackgroundJob:
+    def __init__(self, cmd, timeout=None):
+        global _next_bg_id
+        with _bg_lock:
+            self.id = f"bg_{_next_bg_id}"
+            _next_bg_id += 1
+        self.cmd = (cmd or '').strip()
+        self.timeout = timeout or Config.CMD_TIMEOUT
+        self.result = None
+        self.error = None
+        self.done = False
+        self._thread = None
+        self._started = time.time()
+        self._finished = None
+
+    def status_str(self):
+        elapsed = int((self._finished or time.time()) - self._started)
+        if not self.done:
+            return f"[{self.id}] RUNNING ({elapsed}s)  cmd: {self.cmd[:60]}"
+        if self.error:
+            return f"[{self.id}] ERROR ({elapsed}s)  cmd: {self.cmd[:60]}  err: {self.error[:40]}"
+        return f"[{self.id}] DONE ({elapsed}s)  cmd: {self.cmd[:60]}  result: {(self.result or '?')[:40]}"
+
+    def _worker(self):
+        try:
+            self.result = run_cmd(self.cmd, self.timeout)
+            if (self.result or "").startswith("[CANCELLED]"):
+                self.error = "cancelled"
+        except Exception as e:
+            self.error = f"{type(e).__name__}: {e}"
+        finally:
+            self.done = True
+            self._finished = time.time()
+            try:
+                _notify_bg_done(self)
+            except Exception:
+                pass
+
+    def start(self):
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        with _bg_lock:
+            _BG_JOBS[self.id] = self
+        self._thread.start()
+        return self.id
+
+def _cleanup_bg_jobs():
+    """Reap finished bg jobs after 1h — results live on in quantum."""
+    now = time.time()
+    stale = []
+    with _bg_lock:
+        for jid, job in _BG_JOBS.items():
+            if job.done and job._finished and now - job._finished > 3600:
+                if job._thread is None or not job._thread.is_alive():
+                    stale.append(jid)
+        for jid in stale:
+            _BG_JOBS.pop(jid, None)
+
+def _pending_work_running():
+    """True while any subagent or background job is still executing."""
+    try:
+        with _subagent_lock:
+            if any(not sa.done for sa in _SUBAGENTS.values()):
+                return True
+        with _bg_lock:
+            if any(not j.done for j in _BG_JOBS.values()):
+                return True
+    except Exception:
+        pass
+    return False
+
+def _list_pending_work():
+    lines = []
+    try:
+        with _subagent_lock:
+            for sa in _SUBAGENTS.values():
+                if not sa.done:
+                    lines.append(f"  {sa.status_str()}")
+        with _bg_lock:
+            for job in _BG_JOBS.values():
+                if not job.done:
+                    lines.append(f"  {job.status_str()}")
+    except Exception:
+        pass
+    return "\n".join(lines[:12])
+
+# ── Subagent concurrency cap ──────────────────────────────────────
+_SUBAGENT_SEMAPHORE = None
+
+def _acquire_subagent_slot(cancel_check=None):
+    """Take one of Config.MAX_CONCURRENT_SUBAGENTS run slots. Returns
+    False if cancelled while waiting (Escape), never deadlocks."""
+    global _SUBAGENT_SEMAPHORE
+    if _SUBAGENT_SEMAPHORE is None:
+        _SUBAGENT_SEMAPHORE = threading.Semaphore(max(1, Config.MAX_CONCURRENT_SUBAGENTS))
+    while not _SUBAGENT_SEMAPHORE.acquire(timeout=0.5):
+        if cancel_check is not None and cancel_check():
+            return False
+    return True
+
+def _release_subagent_slot():
+    global _SUBAGENT_SEMAPHORE
+    try:
+        if _SUBAGENT_SEMAPHORE is not None:
+            _SUBAGENT_SEMAPHORE.release()
+    except Exception:
+        pass
+
+def _interject_subagent(cmd_args):
+    """/interject <id> <message> — steer a RUNNING subagent without
+    killing or restarting it (hivemind steering). The message is
+    delivered into its history on the next model turn."""
+    parts = (cmd_args or '').strip().split(None, 1)
+    if len(parts) < 2 or not parts[1].strip():
+        return "Usage: /interject <subagent_id> <steering message>"
+    sid, message = parts[0], parts[1].strip()
+    with _subagent_lock:
+        sa = _SUBAGENTS.get(sid)
+    if not sa:
+        return (f"No subagent with id '{sid}'. Existing: /subagents.")
+    if sa.done:
+        return (f"Subagent {sid} already finished — use /collect {sid} for its result.")
+    try:
+        sa.steer(message)
+    except Exception as e:
+        return f"Could not deliver steering message to {sid}: {e}"
+    return (f"[Steering message delivered to {sid}: \"{message[:120]}\"]\n"
+            f"It takes effect on the subagent's next step. Use /subagents to watch progress.")
+
+def _wait_for_work(cmd_args):
+    """/wait [ids...] [--timeout sec] — block until subagents AND
+    background jobs finish.
+
+    The wait primitive the harness always lacked: without it the model
+    invented `sleep 480; /subagents` (which failed as shell and burned
+    ~13.6h in one session). Cancel-aware; returns status lines plus
+    result snippets so no second round-trip is needed."""
+    args = (cmd_args or '').split()
+    timeout = 600
+    ids = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == '--timeout':
+            if i + 1 >= len(args):
+                return "Usage: /wait [ids...] [--timeout sec]"
+            try:
+                timeout = max(1, int(args[i + 1]))
+            except ValueError:
+                return "Usage: /wait [ids...] [--timeout sec]"
+            i += 2
+            continue
+        ids.append(a)
+        i += 1
+    idset = set(ids) if ids else None
+    deadline = time.time() + timeout
+    while True:
+        with _subagent_lock:
+            targets = dict(_SUBAGENTS)
+        with _bg_lock:
+            targets.update(dict(_BG_JOBS))
+        if idset:
+            targets = {tid: t for tid, t in targets.items() if tid in idset}
+        if not targets:
+            if idset:
+                return ("No subagents or background jobs matching: " + ", ".join(sorted(idset)) +
+                        "\n(Existing: /subagents, /bg. Start work with /spawn <task> or /bg <command>.)")
+            return ("No subagents or background jobs running. "
+                    "Start work with /spawn <task> or /bg <command>.")
+        running = [t for t in targets.values() if not t.done]
+        if not running:
+            break
+        if time.time() >= deadline:
+            lines = [f"WAIT TIMEOUT after {timeout}s — still running:"]
+            for t in running:
+                lines.append(f"  {t.status_str()}")
+            lines.append("Wait again with /wait (optionally --timeout <sec>), or keep working — "
+                         "a completion notice is delivered automatically when work finishes.")
+            return "\n".join(lines)
+        if agent_cancel_requested():
+            return "[CANCELLED] /wait interrupted by operator."
+        time.sleep(0.5)
+    lines = ["Waited work finished:"]
+    for tid in sorted(targets):
+        t = targets[tid]
+        lines.append(f"  {t.status_str()}")
+        if t.done and getattr(t, 'result', None):
+            lines.append(f"    result: {t.result[:800]}")
+    lines.append("(Records stay available to /collect; results are also in quantum as "
+                 "subagent_<id>_result / bg_<id>_result.)")
+    return "\n".join(lines)
 
 def _try_plugin_cmd(c, history=None, who=None):
     """Check if c is a plugin command and dispatch it, returning result or None."""
@@ -7120,7 +7578,7 @@ def _try_plugin_cmd(c, history=None, who=None):
         if not task:
             return "Usage: /delegate <task>"
         task, provider = _split_task_provider(task)
-        sa = SubAgent(task, provider=provider)
+        sa = SubAgent(task, provider=provider, max_steps=Config.SUBAGENT_MAX_STEPS)
         sa.run()
         _quantum.put(f"subagent_{sa.id}_result", sa.result)
         if sa.result:
@@ -7131,22 +7589,71 @@ def _try_plugin_cmd(c, history=None, who=None):
         if not task:
             return "Usage: /spawn <task>"
         task, provider = _split_task_provider(task)
-        sa = SubAgent(task, provider=provider)
+        sa = SubAgent(task, provider=provider, max_steps=Config.SUBAGENT_MAX_STEPS)
         sa.run_async()
         _quantum.put(f"subagent_{sa.id}_spawned", True)
-        return f"[Subagent {sa.id} spawned async. Use /collect {sa.id} to get results.]"
+        return (f"[Subagent {sa.id} spawned async (max {Config.SUBAGENT_MAX_STEPS} steps). "
+                f"Wait for it with /wait {sa.id} — do NOT use `sleep` to wait. "
+                f"Use /collect {sa.id} to get results; you will be notified when it completes.]")
+    if cmd_name in ('/wait', 'wait'):
+        return _wait_for_work(cmd_args)
+    if cmd_name in ('/interject', 'interject'):
+        return _interject_subagent(cmd_args)
+    if cmd_name in ('/bg', 'bg'):
+        cmd = cmd_args.strip()
+        if not cmd:
+            with _bg_lock:
+                if not _BG_JOBS:
+                    return "No background jobs. Start one with /bg <command>."
+                lines = []
+                for jid, job in list(_BG_JOBS.items()):
+                    lines.append(f"  {job.status_str()}")
+                return "\n".join(lines)
+        job = BackgroundJob(cmd)
+        job.start()
+        return (f"[Background job {job.id} started: {cmd[:120]}]\n"
+                f"Keep working — you will be NOTIFIED with the result when it finishes "
+                f"(no sleeping needed). Check /bg for status, /wait {job.id} to block until done.")
+    if cmd_name in ('/bgs', 'bgs'):
+        with _bg_lock:
+            if not _BG_JOBS:
+                return "No background jobs. Start one with /bg <command>."
+            lines = []
+            for jid, job in list(_BG_JOBS.items()):
+                lines.append(f"  {job.status_str()}")
+            return "\n".join(lines)
     if cmd_name in ('/collect', 'collect'):
         sid = cmd_args.strip()
         if not sid:
-            return "Usage: /collect <subagent_id>"
+            return "Usage: /collect <subagent_or_job_id>"
         with _subagent_lock:
             sa = _SUBAGENTS.get(sid)
-            if not sa:
-                return f"No subagent with id '{sid}'"
-            if not sa.done:
-                return f"Subagent {sid} still running. Check /subagents."
-            result = sa.result or ""
-            _SUBAGENTS.pop(sid, None)
+        if sa is None:
+            # Background jobs collect through the same command.
+            with _bg_lock:
+                job = _BG_JOBS.get(sid)
+            if job is not None:
+                if not job.done:
+                    return (f"Background job {sid} still running: {job.status_str()}\n"
+                            f"Use /wait {sid} to block until it finishes — do NOT use sleep to wait.")
+                return (f"[Background job {sid} result]\n"
+                        f"{(job.result or job.error or '')[:800 if _LOW_RAM else 2000]}")
+            # Forensics: results were lost because /collect POPPED the
+            # record and a 300s GC reaped the rest before the main
+            # agent's slow poll could collect. Keep records; publish to
+            # quantum so anything collected once stays readable.
+            v = _quantum.get(f"subagent_{sid}_result") or _quantum.get(f"bg_{sid}_result")
+            if v:
+                return (f"[{sid} record already collected — cached result]\n"
+                        f"{str(v)[:2000]}")
+            return (f"No subagent or background job with id '{sid}'. Existing: /subagents, /bg. "
+                    f"(Finished results persist in quantum as subagent_<id>_result / "
+                    f"bg_<id>_result — read with /quantum {sid}_result:.)")
+        if not sa.done:
+            return (f"Subagent {sid} still running: {sa.status_str()}\n"
+                    f"Use /wait {sid} to block until it finishes — do NOT use sleep to wait.")
+        result = sa.result or ""
+        _quantum.put(f"subagent_{sid}_result", sa.result[:4000] if sa.result else "")
         return f"[Subagent {sid} result]\n{result[:800 if _LOW_RAM else 2000]}"
     if cmd_name in ('/subagents', 'subagents'):
         with _subagent_lock:
@@ -7164,6 +7671,19 @@ def _try_plugin_cmd(c, history=None, who=None):
 def _tail_cmd_output(out):
     text = bytes(out).decode(errors="replace") if isinstance(out, bytearray) else str(out)
     return text[-4000:] if len(text) > 4000 else text
+
+def _cap_result_for_model(result):
+    """Head+tail window for command results fed to the model.
+
+    The old `result[:_CMD_RESULT_CAP]` took the FIRST 1500 chars of an
+    already tail-truncated (last-4000) output — the final ~2500 chars,
+    where exit statuses, test results and error summaries live, were
+    never shown to the model (audit finding 2026-11)."""
+    if not result or len(result) <= _CMD_RESULT_CAP:
+        return result
+    head = result[:400]
+    tail = result[-(_CMD_RESULT_CAP - 450):]
+    return head + "\n[... middle truncated ...]\n" + tail
 
 def _terminate_process(proc, use_killpg=True):
     try:
@@ -7212,6 +7732,36 @@ def _child_env():
 _ROOT_PASS_PIPE_RE = re.compile(
     r'^\s*echo\s+([\'"]?)\$ROOT_PASS\1\s*\|\s*((?:sudo|su)\b.*)$', re.DOTALL)
 
+# Sleep guard (forensics 2026-11): while subagents run, a long bare
+# `sleep` is almost always a hand-rolled poll loop — one session burned
+# ~13.6h in `sleep 480; /subagents` cycles. Cap it, teach /wait.
+_SLEEP_CMD_RE = re.compile(r'^\s*sleep\s+([0-9]+(?:\.[0-9]+)?)([smhSMH]?)\s*$')
+_SLEEP_UNITS = {'': 1.0, 's': 1.0, 'm': 60.0, 'h': 3600.0}
+
+def _any_subagent_running():
+    try:
+        with _subagent_lock:
+            return any(not sa.done for sa in _SUBAGENTS.values())
+    except Exception:
+        return False
+
+def _maybe_cap_sleep(cmd):
+    """Return (replacement_cmd, note) when cmd is a long bare sleep AND
+    subagents are running; None otherwise."""
+    if not _any_subagent_running():
+        return None
+    m = _SLEEP_CMD_RE.match(cmd or '')
+    if not m:
+        return None
+    secs = float(m.group(1)) * _SLEEP_UNITS.get(m.group(2).lower(), 1.0)
+    if secs <= 30:
+        return None
+    note = (f"[PRISM32] sleep capped from {int(secs)}s to 30s — subagents are "
+            f"running. Do NOT sleep-poll: use `/wait` as a bare execute block "
+            f"(optionally /wait <id> --timeout <sec>) to block until they "
+            f"finish; you are notified automatically on completion.")
+    return "sleep 30", note
+
 def run_cmd(cmd, timeout=None):
     global _INTERJECTION_RESULT
     if timeout is None:
@@ -7225,6 +7775,10 @@ def run_cmd(cmd, timeout=None):
         _m = _ROOT_PASS_PIPE_RE.match(cmd)
         if _m:
             cmd = _m.group(2)
+    _cap = _maybe_cap_sleep(cmd)
+    if _cap:
+        _out = run_cmd(_cap[0], timeout)
+        return (_out + "\n" + _cap[1]).strip()
     try:
         if Config.ROOT_PASS and re.match(r'\s*(sudo|su)\b', cmd) and not Platform.WINDOWS:
             return _pty_su_root(cmd, timeout)
@@ -7409,11 +7963,21 @@ class QuantumContext:
             self._used = False
             return u
 
+    def is_used(self):
+        """Non-consuming check — build_context must not race the footer's
+        redraws for the consuming was_used() flag, or the main agent's
+        system prompt intermittently loses the quantum block."""
+        with self._lock:
+            return self._used
+
     def __str__(self):
         with self._lock:
             if not self._data:
                 return "(empty)"
-            return "\n".join(f"  {k}: {str(v)[:240]}" for k, v in self._data.items())
+            # 240 chars starved cross-agent transfers (results were
+            # stored full but displayed near-empty). 1500 keeps prompts
+            # sane while carrying the useful part of a result.
+            return "\n".join(f"  {k}: {str(v)[:1500]}" for k, v in self._data.items())
 
 _quantum = QuantumContext()
 _SUBAGENTS = {}  # id -> SubAgent instance
@@ -7450,7 +8014,10 @@ Commands available inside execute blocks:
 - /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
 - /delegate <task> [--provider <name>] (spawn a synchronous sub-subagent).
 - /spawn <task> [--provider <name>] (spawn an async sub-subagent).
-- /collect <id> (retrieve async sub-subagent results).
+- /wait [ids] [--timeout <sec>] (block until sub-subagents/background jobs finish — NEVER use sleep to wait).
+- /interject <id> <message> (steer a running sub-subagent mid-task without killing it).
+- /bg <command> (run a long command in the background; the result is pushed to you on completion).
+- /collect <id> (retrieve async sub-subagent / background-job results).
 - /subagents (list running/completed sub-subagents).
 - /remember <text> (store findings in long-term memory, persists across sessions).
 - /recall <query> (search past memories from any agent).
@@ -7478,9 +8045,16 @@ class _RepeatGuard:
     """Breaks degenerate agent loops: the same execute-block command,
     re-emitted unchanged round after round, must not burn the entire
     step budget (RL training surfaces this constantly). Nudges after
-    NUDGE_AT identical runs, force-stops the agent after STOP_AT."""
+    NUDGE_AT identical runs, force-stops the agent after STOP_AT.
+
+    Session forensics (2026-11): the exact-match form never fired —
+    the model varied `sleep 480; /subagents` into `sleep 540; /subagents`
+    and polled for 13+ hours. Numbers are now normalized before
+    comparing, so only the argument VALUES may differ."""
     NUDGE_AT = 3
     STOP_AT = 5
+
+    _RE_NUM = re.compile(r'\d+')
 
     def __init__(self):
         self.last = None
@@ -7490,19 +8064,28 @@ class _RepeatGuard:
         self.last = None
         self.count = 0
 
+    @classmethod
+    def normalize(cls, cmd):
+        """Blank out digit runs and drop whitespace so `sleep 480;
+        /subagents`, `sleep 540; /subagents` and `sleep 300 ; /subagents`
+        all compare equal (whitespace is not semantic for loop identity)."""
+        return cls._RE_NUM.sub('#', ''.join((cmd or '').split()))
+
     def note(self, cmd):
         """Record a command execution; return its consecutive run count."""
-        if cmd == self.last:
+        key = self.normalize(cmd)
+        if key == self.last:
             self.count += 1
         else:
-            self.last = cmd
+            self.last = key
             self.count = 1
         return self.count
 
 
 # Regex for "agent command shell-wrapped" detection: /quantum et al. passed
 # through sh -c (or as arguments) instead of standing alone in the block.
-_RE_AGENT_CMD = re.compile(r"\B/(?:quantum|board|remember|recall|memories|forget|delegate|spawn|collect|subagents|skill-list|skill-load|auto|json|memory)\b")
+_RE_AGENT_CMD = re.compile(
+    r"\B/(?:quantum|board|remember|recall|memories|forget|delegate|spawn|collect|wait|interject|subagents|bg|bgs|skill-list|skill-load|auto|json|memory|harness|evolve|extend|shard)\b")
 
 def _shell_wrap_hint(result, cmd):
     """If a command failed with 'not found' but references an agent
@@ -7513,21 +8096,33 @@ def _shell_wrap_hint(result, cmd):
         return result
     low = (result or "").lower()
     if ("no such file" in low or "not found" in low) and _RE_AGENT_CMD.search(cmd or ""):
-        result += ("\n[PRISM32 HINT] '/quantum', '/board', '/remember' etc. are Prism32 "
+        result += ("\n[PRISM32 HINT] '/quantum', '/board', '/subagents' etc. are Prism32 "
                    "agent commands, not shell programs. Put the bare command as the "
-                   "entire line of an ```execute block — do not wrap it in sh/bash.")
+                   "entire line of an ```execute block (or alone after a `;`). To wait "
+                   "for subagents use `/wait` — never `sleep`.")
     return result
+
+def _purge_nudge_marks(history, marks):
+    """Remove marked history entries by object identity.
+
+    The old index-based purge deleted ARBITRARY messages whenever
+    trim_history rebuilt the list between marking and purging (audit
+    finding 2026-11: silent history corruption mid-task)."""
+    for m in marks:
+        history[:] = [x for x in history if x is not m]
 
 
 class SubAgent:
-    def __init__(self, task, model=None, max_steps=1000, provider=None):
+    def __init__(self, task, model=None, max_steps=None, provider=None):
         global _next_sa_id
         with _subagent_lock:
             self.id = f"sa_{_next_sa_id}"
             _next_sa_id += 1
         self.task = task
         self.model = model or Config.SUBAGENT_MODEL or Config.MODEL
-        self.max_steps = max_steps
+        # Default step budget from config (was a hardcoded 1000 — doomed
+        # subagents ground for hours before reporting failure).
+        self.max_steps = max_steps if max_steps is not None else Config.SUBAGENT_MAX_STEPS
         self.provider = provider
         self.result = None
         self.error = None
@@ -7536,14 +8131,38 @@ class SubAgent:
         self._history = []
         self._thread = None
         self._repeat_guard = _RepeatGuard()
+        self._sync_run = False
+        self._event_cursor = 0  # position in the agent-event log
+        self._pending_notice_given = False  # one bg-work hold-open nudge per run
+        self._last_cmd_snippet = ""   # for progress pulses
+        self._slot_pending = False    # waiting for a concurrency slot
+        self._steer_lock = threading.Lock()
+
+    def steer(self, message):
+        """Deliver a mid-task steering message from the captain or
+        operator (hivemind concept: steer, don't kill). Seen on the
+        subagent's next model turn — no cancellation, no restart, no
+        lost progress."""
+        with self._steer_lock:
+            self._history.append({"role": "user",
+                "content": f"[STEER — from the captain agent] {message}"})
+
+    def _emit_pulse(self):
+        """Progress heartbeat into the agent-event log (graded
+        pheromone trail): siblings and the captain see step counts
+        instead of silence-until-completion."""
+        try:
+            last = self._last_cmd_snippet or "(none yet)"
+            _publish_agent_event("pulse", True, self.id,
+                                 f"step {self._step}/{self.max_steps} — last: {last}", "")
+        except Exception:
+            pass
 
     def _build_history(self):
-        ctx = build_context()
-        qctx = str(_quantum)
-        extra = ""
-        if qctx != "(empty)":
-            extra = f"\nShared quantum context:\n{qctx}\n"
-        sys = _get_subagent_system_prompt() + "\n" + ctx + extra
+        # build_context() already embeds the quantum block when keys exist
+        # — the old extra injection duplicated it (audit 2026-11: subagents
+        # paid for the shared state twice in tokens every step).
+        sys = _get_subagent_system_prompt() + "\n" + build_context()
         return [{"role": "system", "content": sys},
                 {"role": "user", "content": f"Task: {self.task}\nWork autonomously. Use execute blocks."}]
 
@@ -7573,14 +8192,24 @@ class SubAgent:
         try:
             nudges = 0
             ai_retries = 0
-            nudge_marks = []  # indices of announce/nudge exchanges in self._history
+            nudge_marks = []  # marked announce/nudge exchanges in self._history
           # (body guarded below)
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
+                # Swarm pause (Ctrl+P): non-destructive hold between steps.
+                _pause_gate()
+                # Progress heartbeat every 25 steps.
+                if self._step % 25 == 0:
+                    self._emit_pulse()
                 # Context management, trim if approaching limit
                 _ctx = context_pct(self._history)
                 if _ctx >= 75:
                     self._history[:] = trim_history(self._history, Config.resolve_context_window())
+                # Deliver completion notices from OTHER subagents (this one
+                # may itself have spawned children via /spawn).
+                _evs, self._event_cursor = _drain_agent_events(self._event_cursor)
+                if _evs:
+                    self._history.append({"role": "user", "content": _format_agent_events(_evs)})
                 with stdout_lock:
                     t2 = T()
                     print(f"  {t2['dim']}[{self.id}] Step {self._step}/{self.max_steps}{RST}")
@@ -7628,9 +8257,7 @@ class SubAgent:
                 if commands:
                     nudges = 0
                     if nudge_marks:
-                        for idx in sorted(nudge_marks, reverse=True):
-                            if idx < len(self._history):
-                                del self._history[idx]
+                        _purge_nudge_marks(self._history, nudge_marks)
                         nudge_marks = []
                     clean = clean_response(resp)
                     if clean:
@@ -7643,6 +8270,9 @@ class SubAgent:
                     _expanded = []
                     for c in commands:
                         _expanded.extend(_split_plugin_block(c))
+                    if not _expanded:
+                        self._history.append({"role": "user", "content": "Your execute block was empty. Emit a non-empty ```execute block or give your final answer."})
+                        continue
                     for c in _expanded:
                         if agent_cancel_requested():
                             self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
@@ -7650,6 +8280,7 @@ class SubAgent:
                             self.done = True
                             return
                         c = c.strip()
+                        self._last_cmd_snippet = c[:60]
                         # Loop guard: identical re-emitted command must not
                         # burn the whole budget (degenerate model loops).
                         _rc = self._repeat_guard.note(c)
@@ -7666,7 +8297,7 @@ class SubAgent:
                         result = _shell_wrap_hint(result, c)
                         success = _cmd_succeeded(result)
                         cmd_result(c, result, success)
-                        msg = f"Executed: {c}\nResult:\n{result[:_CMD_RESULT_CAP]}"
+                        msg = f"Executed: {c}\nResult:\n{_cap_result_for_model(result)}"
                         continuation = f"Command succeeded={success}. Continue with task or give final answer."
                         if _rc >= _RepeatGuard.NUDGE_AT:
                             continuation = (f"Command succeeded={success}. You have run this IDENTICAL "
@@ -7698,15 +8329,16 @@ class SubAgent:
                     if looks_like_announcement(clean):
                         nudges += 1
                         if resp.strip():
-                            self._history.append({"role": "assistant", "content": resp})
-                            nudge_marks.append(len(self._history) - 1)
+                            _m = {"role": "assistant", "content": resp}
+                            self._history.append(_m)
+                            nudge_marks.append(_m)
                         if nudges <= 3:
-                            self._history.append({"role": "user", "content": "STOP ANNOUNCING. Your ENTIRE next response must be exactly one ```execute block — copy this shape:\n\n```execute\n<the first command you keep describing>\n```\n\nNo preamble. The block ONLY."})
+                            _n = {"role": "user", "content": "STOP ANNOUNCING. Your ENTIRE next response must be exactly one ```execute block — copy this shape:\n\n```execute\n<the first command you keep describing>\n```\n\nNo preamble. The block ONLY."}
+                            self._history.append(_n)
+                            nudge_marks.append(_n)
                         elif nudges <= 6:
                             # Protocol reset: purge failed exchanges, replay surgically
-                            for idx in sorted(nudge_marks, reverse=True):
-                                if idx < len(self._history):
-                                    del self._history[idx]
+                            _purge_nudge_marks(self._history, nudge_marks)
                             nudge_marks = []
                             self._history.append({"role": "user", "content": "PROTOCOL RESET. Your recent replies contained no ```execute block and have been removed. Respond now with ONLY the ```execute block for your next action."})
                         else:
@@ -7719,9 +8351,24 @@ class SubAgent:
                         self.result = "[SUBAGENT] No actionable response."
                     else:
                         self.result = clean
+                    # Completion-driven: hold the subagent open (once) while
+                    # its own /bg jobs or child subagents are still running.
+                    if not self._pending_notice_given and _pending_work_running():
+                        self._pending_notice_given = True
+                        self._history.append({"role": "user", "content":
+                            "[HARNESS] Background work you started is still running:\n" +
+                            _list_pending_work() +
+                            "\nDo NOT finish yet and do NOT sleep-poll. Run `/wait` to block until "
+                            "it finishes (results are delivered to you), or continue other work — "
+                            "you will be notified on completion. Only finish now if these results "
+                            "are truly not needed."})
+                        continue
                     self.done = True
                     return
-            self.result = self.result or "[SUBAGENT] Max steps reached without completion."
+            self.result = self.result or (
+                f"[SUBAGENT] Max steps ({self.max_steps}) reached without completion. "
+                f"The operator can raise the budget with /maxsteps sub <n> — or re-spawn "
+                f"this task with a narrower scope so it can finish.")
             self.done = True
         except Exception as e:
             # A background thread that dies on an exception (race in shared
@@ -7733,8 +8380,15 @@ class SubAgent:
             self.done = True
         finally:
             self._cleanup_time = time.time()
+            # Publish the result so it survives /collect pops, the GC, and
+            # is readable by every agent (quantum) — plus notify the loops.
+            try:
+                _notify_subagent_done(self)
+            except Exception:
+                pass
 
     def run(self):
+        self._sync_run = True
         with stdout_lock:
             t = T()
             print(f"\n  {t['primary']}╭─ SUBAGENT [{self.id}] ─────────────────────{RST}")
@@ -7763,7 +8417,23 @@ class SubAgent:
         return self.result
 
     def run_async(self, quiet=False):
-        self._thread = threading.Thread(target=self._run_loop, daemon=True)
+        def _gated():
+            # Concurrency cap (hivemind queueing): beyond
+            # MAX_CONCURRENT_SUBAGENTS the spawn waits for a free slot
+            # instead of thrashing provider rate limits with parallel
+            # 429-retry loops.
+            if not _acquire_subagent_slot():
+                self.error = "cancelled while waiting for a free agent slot"
+                self.result = f"[SUBAGENT CANCELLED] {self.error}"
+                self.done = True
+                return
+            self._slot_pending = False
+            try:
+                self._run_loop()
+            finally:
+                _release_subagent_slot()
+        self._slot_pending = True
+        self._thread = threading.Thread(target=_gated, daemon=True)
         with _subagent_lock:
             _SUBAGENTS[self.id] = self
         self._thread.start()
@@ -7779,6 +8449,8 @@ class SubAgent:
         return self.id
 
     def status_str(self):
+        if self._slot_pending:
+            return f"[{self.id}] QUEUED (waiting for a free agent slot)  task: {self.task[:50]}"
         if not self.done:
             return f"[{self.id}] RUNNING step {self._step}/{self.max_steps}  task: {self.task[:50]}"
         if self.error:
@@ -7808,7 +8480,7 @@ df -h
 - You also have a native `execute` tool available — call it directly for commands (it is equivalent to an execute block). Prefer the tool or the block over any prose plan.
 - You can chain multiple commands in a single execute block using &&, ;, |, and redirections.
 - You can put multiple ```execute blocks in a single response — each will be executed in order.
-- Commands starting with / (like /delegate, /quantum, /remember) are executed as Prism32 commands, not shell.
+- Commands starting with / (like /delegate, /quantum, /remember) are executed as Prism32 commands, not shell — also when appended after a `;` in a compound command (e.g. `git status; /subagents`).
 - Everything else goes to the shell.
 - If you need to ask the user a question, use ```ask``` blocks. The operator will be prompted.
 
@@ -7822,11 +8494,17 @@ MULTI-AGENT SYSTEM:
 You can delegate work to subagents. Subagents run autonomously with their own execute-loop and report results.
 - /delegate <task> — synchronous subagent (blocks until done, returns result).
 - /spawn <task> — async subagent (returns immediately, use /collect <id> later).
-- /collect <id> — retrieve async subagent results.
+- /wait [ids] [--timeout <sec>] — BLOCK until subagents/background jobs finish (default: all, 600s). Returns their status and results.
+- /collect <id> — retrieve async subagent results (records persist; results also land in quantum as subagent_<id>_result).
+- /interject <id> <message> — steer a RUNNING subagent mid-task (correct it, add info, change direction) without killing or restarting it.
 - /subagents — list running/completed subagents.
+- /bg <command> — run a LONG shell command in the background (builds, deploys, transfers, service restarts). Returns a job id instantly; the result is pushed to you when it completes. /bg (bare) lists jobs.
 Add --provider <name> to use a different provider for a subagent (e.g. /delegate scan ports --provider groq).
 Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, deepseek, llamacpp-remote.
-Use /spawn + /collect for parallel work: spawn multiple subagents for independent subtasks, then collect results.
+EVENT-DRIVEN COMPLETION: when any subagent or background job finishes, its result is delivered to you automatically as a notification. You never need timers:
+- NEVER use `sleep` to wait for work — it wastes hours. Use /wait to block, or start work with /bg or /spawn and keep doing other things.
+- Subagents emit progress updates every 25 steps. If one is stuck or wrong, /interject <id> <message> to steer it immediately instead of letting it burn its step budget.
+- Use /spawn + /wait for parallel work: spawn multiple subagents for independent subtasks, then wait for all of them.
 Subagents can spawn their own subagents — use this for recursive decomposition of complex tasks.
 
 QUANTUM CONTEXT:
@@ -7835,6 +8513,7 @@ QUANTUM CONTEXT:
 - /quantum <key>:<value> — write a value.
 - /quantum <key>: — read a specific key.
 Use /quantum to pass findings between agents: one subagent discovers data, another uses it.
+Finished subagent results are published automatically as subagent_<id>_result — read them with /quantum subagent_<id>_result: without collecting.
 
 MISSION INFO BOARD (mission shards only):
 When your context contains a MISSION CONTEXT block, you are one shard of a larger mission. All shards share a mission info board:
@@ -8911,7 +9590,7 @@ def build_context():
     # mid-task to include the latest quantum state").
     quantum_block = ""
     try:
-        if _quantum.was_used():
+        if _quantum.is_used():
             quantum_block = f"\nSHARED QUANTUM CONTEXT (cross-agent state; /quantum to read or write):\n{str(_quantum)}\n"
     except Exception:
         pass
@@ -9431,9 +10110,15 @@ def get_cmd_help():
    /autosave <sec>      Set auto-save interval (>=10s)
    /maxhistory <n>      Set max conversation history length
    /maxtokens <n>       Override max context tokens (>=10000)
-    /maxsteps <n>        Set max mission steps (per-todo budget)
-    /subagent-model [m]  Show/set default subagent model (/sam <m>)
-    /rootpass <pw>       Set root password (auto-fed to agent su/sudo)
+     /maxsteps <n>        Set max mission steps (per-todo budget)
+     /maxsteps sub <n>    Set max steps for /spawn & /delegate subagents
+     /subagent-model [m]  Show/set default subagent model (/sam <m>)
+     /wait [id] [--timeout s] Block until subagents/bg jobs finish
+     /bg <cmd>            Run a long command in the background (result pushed when done)
+     /interject <id> <msg> Steer a running subagent mid-task (no restart)
+     /pause | /unpause    Freeze/resume the swarm (Ctrl+P during AI activity)
+     /compact             Manually compact the session context now
+     /rootpass <pw>       Set root password (auto-fed to agent su/sudo)
     /verify-ssl [on|off] Toggle HTTPS certificate verification
     /prompt_caching [on|off] Toggle provider prompt caching (Anthropic/OpenAI/DeepSeek)
     /json <file>          Read/pretty-print JSON files (smart summary for large)
@@ -9478,7 +10163,7 @@ def get_cmd_help():
    /loadcfg             Load config from disk
    /cost               Show session token usage and cost
    /usage               Show API usage (OpenRouter)
-   /theme               Cycle theme (32 built-in themes)
+   /theme               Cycle theme (34 built-in themes)
     /plugins             List loaded plugins
     /soul [show|set|...]  Manage persistent custom rules (soul.md)
     /harness [scan]      Detect external AI agent harness CLIs
@@ -10065,7 +10750,7 @@ def main():
     args = parser.parse_args()
 
     if args.version:
-        print("Prism32 v7.2.9 — MegaDyne Systems")
+        print("Prism32 v7.3.0 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -10282,7 +10967,7 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.2.9 — MegaDyne Systems")
+            print(f"\n  Prism32 v7.3.0 — MegaDyne Systems")
             print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
             print(f"  Runtime dir: {_PRISM32_HOME}")
             print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
@@ -11227,6 +11912,70 @@ def main():
             print()
             continue
 
+        if cmd == 'wait':
+            # Operator-side mirror of the agent /wait: block until
+            # subagents/background jobs finish (default 600s). Escape during
+            # the wait is handled by the cancel check inside _wait_for_work.
+            print(_wait_for_work(args_str))
+            print()
+            continue
+
+        if cmd == 'interject':
+            # Operator-side steering of a running subagent (same as the
+            # agent-side command — the captain can steer its swarm).
+            print(_interject_subagent(args_str))
+            print()
+            continue
+
+        if cmd in ('pause', 'unpause'):
+            # Ctrl+P equivalents — scriptable and available at the prompt
+            # (readline owns Ctrl+P there). /unpause (not /resume — that is
+            # session-resume).
+            want_pause = (cmd == 'pause')
+            if want_pause:
+                request_agent_pause()
+                print(f"  {t['warn']}SWARM PAUSED — running commands finish; no new agent steps start.{RST}")
+                print(f"  {t['dim']}Processes are untouched. Type a message to talk to the captain agent, "
+                      f"/interject <id> <msg> to steer a subagent, or /unpause (Ctrl+P) to continue.{RST}")
+            else:
+                clear_agent_pause()
+                print(f"  {t['ok'] if 'ok' in t else t['bright']}SWARM RESUMED — agents continue from where they paused.{RST}")
+            print()
+            continue
+
+        if cmd == 'compact':
+            # Manual context compaction: squeeze old tool turns, then
+            # summarize down to half the window (the automatic path only
+            # fires at 75% and only to the full budget).
+            before_msgs = len(history)
+            _before, _after = compact_history(history)
+            box("SESSION COMPACTED",
+                f"Context: {_before}% → {_after}%\n"
+                f"Messages: {before_msgs} → {len(history)}", "accent")
+            save_current_session(history, cmd_log)
+            print()
+            continue
+
+        if cmd in ('bg', 'bgs', 'background'):
+            # Operator-side /bg: start a background job, or list them bare.
+            if args_str.strip():
+                job = BackgroundJob(args_str.strip())
+                job.start()
+                t = T()
+                print(f"  {t['warn']}╭─ BG JOB [{job.id}] STARTED ──────────────{RST}")
+                print(f"  {t['warn']}│{RST}  {t['bright']}Cmd:{RST} {job.cmd[:100]}")
+                print(f"  {t['warn']}╰{'─' * 50}{RST}")
+                print(f"  {t['dim']}Result is pushed to the agent when it finishes; /wait {job.id} to block.{RST}")
+            else:
+                with _bg_lock:
+                    if not _BG_JOBS:
+                        print(f"  No background jobs. Start one with: bg <command>")
+                    else:
+                        for jid, job in list(_BG_JOBS.items()):
+                            print(f"  {job.status_str()}")
+            print()
+            continue
+
         if cmd in ('maxtokens', 'max-tokens'):
             if args_str:
                 try:
@@ -11250,6 +11999,23 @@ def main():
             continue
 
         if cmd in ('maxsteps', 'max-steps'):
+            parts = args_str.split()
+            if parts and parts[0].lower() in ('sub', 'subagents', 'subagent'):
+                if len(parts) > 1:
+                    try:
+                        val = int(parts[1])
+                        if val >= 1:
+                            Config.SUBAGENT_MAX_STEPS = val
+                            Config.save_config()
+                            print(f"  {t['bright']}+ Subagent max steps set to: {val}{RST}")
+                        else:
+                            print(f"  {t['dim']}Must be >= 1{RST}")
+                    except ValueError:
+                        print(f"  {t['dim']}Usage: maxsteps sub <count>{RST}")
+                else:
+                    print(f"  Subagent max steps: {t['bright']}{Config.SUBAGENT_MAX_STEPS}{RST}")
+                print()
+                continue
             if args_str:
                 try:
                     val = int(args_str)
@@ -11262,7 +12028,8 @@ def main():
                 except ValueError:
                     print(f"  {t['dim']}Usage: maxsteps <count>{RST}")
             else:
-                print(f"  Goal max steps: {t['bright']}{Config.GOAL_MAX_STEPS}{RST}")
+                print(f"  Goal max steps:      {t['bright']}{Config.GOAL_MAX_STEPS}{RST}")
+                print(f"  Subagent max steps:  {t['bright']}{Config.SUBAGENT_MAX_STEPS}{RST} (maxsteps sub <n>)")
             print()
             continue
 
@@ -11433,7 +12200,7 @@ def main():
                 model_str = sa.model or Config.MODEL
                 print(f"  {t['warn']}│{RST}  {t['dim']}Model:{RST} {model_str[:40]}{prov_info}")
                 print(f"  {t['warn']}╰{'─' * 50}{RST}")
-                print(f"  {t['dim']}Use /collect {sa.id} to retrieve results.{RST}")
+                print(f"  {t['dim']}Use /wait {sa.id} to block until done, /collect {sa.id} to retrieve results.{RST}")
                 _quantum.put(f"subagent_{sa.id}_spawned", True)
             else:
                 print(f"  Usage: /spawn <task description>")
@@ -11448,24 +12215,40 @@ def main():
                     for sid, sa in list(_SUBAGENTS.items()):
                         lines.append(f"  {sa.status_str()}")
                     box("SUBAGENTS", "\n".join(lines), "primary" if any(not s.done for s in list(_SUBAGENTS.values())) else "bright")
-                    # NOTE: Don't delete done agents here — /collect needs them.
-                    # Cleanup happens in /collect after results are retrieved.
+                    # NOTE: records persist for re-reads; the 1h GC in
+                    # _cleanup_subagents reaps the registry (results live
+                    # on in quantum as subagent_<id>_result).
             print()
             continue
 
         if cmd == 'collect':
             sid = args_str.strip()
             if not sid:
-                print(f"  Usage: /collect <subagent_id>")
+                print(f"  Usage: /collect <subagent_or_job_id>")
                 continue
             with _subagent_lock:
                 sa = _SUBAGENTS.get(sid)
             if not sa:
-                print(f"  No subagent with id '{sid}'")
+                with _bg_lock:
+                    job = _BG_JOBS.get(sid)
+                if job is not None:
+                    if not job.done:
+                        print(f"  Background job {sid} still running (use /wait {sid}).")
+                    else:
+                        box(f"BG JOB {sid} RESULT", (job.result or job.error or '?')[:2000], "primary")
+                        _quantum.put(f"bg_{sid}_result", job.result or job.error or "")
+                        history.append({"role": "user",
+                            "content": f"[Collected background job {sid}]\n" + (job.result or job.error or '?')[:2000]})
+                    continue
+                v = _quantum.get(f"subagent_{sid}_result") or _quantum.get(f"bg_{sid}_result")
+                if v:
+                    box(f"{sid} RESULT (cached)", str(v)[:2000], "primary")
+                else:
+                    print(f"  No subagent or background job with id '{sid}'")
                 continue
             if not sa.done:
                 print(f"  Subagent {sid} still running (step {sa._step}/{sa.max_steps}).")
-                print(f"  Use /subagents for status.")
+                print(f"  Use /wait {sid} to block until it finishes (or /subagents for status).")
                 continue
             t = T()
             result_text = (sa.result or sa.error or '?')[:2000]
@@ -11476,9 +12259,7 @@ def main():
             _quantum.put(f"subagent_{sid}_task", sa.task)
             history.append({"role": "user",
                 "content": f"[Collected subagent {sid}]\n" + (sa.result or sa.error or '?')[:2000]})
-            with _subagent_lock:
-                if sid in _SUBAGENTS:
-                    del _SUBAGENTS[sid]
+            # Records stay for later re-reads; the 1h GC reaps the registry.
             continue
 
         if cmd == 'board':
@@ -11818,13 +12599,35 @@ def main():
         nudges = 0
         asks = 0
         ai_retries = 0
-        nudge_marks = []  # history indices of announce/nudge exchanges added this turn
+        pending_notice_given = False  # one bg-work hold-open nudge per turn
+        nudge_marks = []  # marked announce/nudge exchanges added this turn
 
         for iteration in range(max_iter):
+            # Swarm pause (Ctrl+P): hold between steps, keep the interjection
+            # reader live so the operator can message the captain while frozen.
+            _pause_gate(is_main=True)
+            # A message typed while paused (or during the pause gate) goes to
+            # the captain now, before the next model call.
+            if _INTERJECTION_RESULT is not None:
+                inj = _INTERJECTION_RESULT
+                _INTERJECTION_RESULT = None
+                history.append({"role": "user", "content": inj})
+                move_to_scroll_bottom()
+                print(f" {T()['primary']}You:{RST} {inj}")
             _ctx = context_pct(history)
             if _ctx >= 75:
                 viz.status(f"Context at {_ctx}% — compressing with intelligent summary", "warning")
                 history[:] = trim_history(history, Config.resolve_context_window())
+            # Deliver subagent completion notices: while commands ran (or
+            # a /wait blocked) spawned subagents may have finished. Without
+            # this the main agent had to poll /subagents (forensics 2026-11:
+            # 84 failed `sleep 480; /subagents` polls, ~11h dead time).
+            _evs, _MAIN_EVENT_CURSOR[0] = _drain_agent_events(_MAIN_EVENT_CURSOR[0])
+            if _evs:
+                _ev_txt = _format_agent_events(_evs)
+                history.append({"role": "user", "content": _ev_txt})
+                viz.status("; ".join(f"{e['id']} {'done' if e['ok'] else 'failed'}" for e in _evs),
+                           "info" if all(e['ok'] for e in _evs) else "warning")
             spin = None
             try:
                 if Config.STREAM:
@@ -11939,9 +12742,7 @@ def main():
                 # so future turns aren't contaminated by the model's own
                 # announcements (in-context style matching).
                 if nudge_marks:
-                    for idx in sorted(nudge_marks, reverse=True):
-                        if idx < len(history):
-                            del history[idx]
+                    _purge_nudge_marks(history, nudge_marks)
                     nudge_marks = []
                 if clean and iteration == 0 and not Config.STREAM:
                     box("AI ANALYSIS", clean, "accent")
@@ -11949,9 +12750,16 @@ def main():
                     history.append({"role": "assistant", "content": resp})
 
                 command_cancelled = False
+                loop_guard_tripped = False
                 _expanded = []
                 for c in commands:
                     _expanded.extend(_split_plugin_block(c))
+                if not _expanded:
+                    # Whitespace-only blocks must not leave the history
+                    # ending on an assistant turn (audit 2026-11: some
+                    # OpenAI-compatible servers reject that sequence).
+                    history.append({"role": "user", "content": "Your execute block was empty. Emit a non-empty ```execute block or give your final answer."})
+                    continue
                 for c in _expanded:
                     c = c.strip()
                     # Loop guard (degenerate repeats) + shell-wrap hint
@@ -11960,6 +12768,7 @@ def main():
                         history.append({"role": "user", "content":
                             "LOOP GUARD: you have run this identical command "
                             f"{_rc} times. It will not run again. Give your final answer now."})
+                        loop_guard_tripped = True
                         break
                     viz.tool_call("execute", c)
                     plugin_result = _try_plugin_cmd(c, history=history, who='main')
@@ -11974,7 +12783,7 @@ def main():
                     cmd_result(c, result, success)
                     cmd_log.append(("ai", c))
 
-                    exec_msg = f"Executed: {c}\nResult:\n{result[:_CMD_RESULT_CAP]}"
+                    exec_msg = f"Executed: {c}\nResult:\n{_cap_result_for_model(result)}"
                     continuation = "Command output above. Continue with your task or give final answer."
                     if was_healed:
                         continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
@@ -11997,6 +12806,13 @@ def main():
                         box("STOPPED", msg, "warn")
                         break
                 if command_cancelled:
+                    break
+                if loop_guard_tripped:
+                    # End the TURN, not just the command batch — the old
+                    # break only exited the inner loop, so the model kept
+                    # re-emitting the guarded command and burning API
+                    # calls for up to 9999 more iterations (audit finding).
+                    viz.status("Loop guard tripped — ending turn", "error")
                     break
             else:
                 if not clean:
@@ -12028,32 +12844,47 @@ def main():
                                           "```execute\n<the first command you keep describing>\n```\n\n"
                                           "Begin with the very first action you announced. The block ONLY.")
                         if resp.strip():
-                            history.append({"role": "assistant", "content": resp})
-                            nudge_marks.append(len(history) - 1)
-                        history.append({"role": "user", "content": nudge_text})
-                        nudge_marks.append(len(history) - 1)
+                            _m = {"role": "assistant", "content": resp}
+                            history.append(_m)
+                            nudge_marks.append(_m)
+                        _n = {"role": "user", "content": nudge_text}
+                        history.append(_n)
+                        nudge_marks.append(_n)
                         continue
                     # Ladder exhausted: PROTOCOL RESET, no operator intervention.
                     # Purge the failed announce/nudge exchanges (the model gets
                     # re-reinforced by its own announcements in context) and
                     # replay the task with a surgical instruction.
                     nudges += 1
-                    for idx in sorted(nudge_marks, reverse=True):
-                        if idx < len(history):
-                            del history[idx]
+                    _purge_nudge_marks(history, nudge_marks)
                     nudge_marks = []
                     if nudges >= 20:
                         viz.status("Ending turn after 20 automatic recovery attempts", "error")
                         break
                     viz.status("Protocol reset — replaying task without the failed announcements", "warning")
                     history.append({"role": "user", "content": "PROTOCOL RESET. Your recent replies contained no ```execute block and have been removed from this conversation. Respond now with ONLY the ```execute block for your next action — no prose, no plan, no announcement."})
-                    nudge_marks.append(len(history) - 1)
                     continue
                 if not Config.STREAM:
                     t2 = T()
                     print(f" {t2['primary']}<{Config.AGENT_NAME}>:{RST} {clean}")
                 print()
                 history.append({"role": "assistant", "content": resp})
+                # Completion-driven turns (user request 2026-11: "things
+                # happen when they are done, not on a static timer"): if
+                # background work is still running, don't strand the turn —
+                # offer the wait ONCE; the model's next final answer ends it.
+                if not pending_notice_given and _pending_work_running():
+                    pending_notice_given = True
+                    viz.status("Background work still running — holding turn open", "warning")
+                    history.append({"role": "user", "content":
+                        "[HARNESS] Background work is still running:\n" + _list_pending_work() +
+                        "\nDo NOT end your turn yet and do NOT sleep-poll. Either:\n"
+                        "1. Run `/wait` (bare execute block) to block until everything finishes — "
+                        "results are delivered to you, or\n"
+                        "2. Continue other work — you will be NOTIFIED automatically when each "
+                        "job/subagent completes.\n"
+                        "Only give your final answer now if these results are truly not needed."})
+                    continue
                 break
 
         # Apply both constraints: trim to max_history count, then to token budget
@@ -12073,7 +12904,7 @@ def main():
 
 # ── HTTP Helpers ────────────────────────────────────────────
 
-PRISM32_USER_AGENT = "Prism32/7.2"
+PRISM32_USER_AGENT = "Prism32/7.3"
 PRISM32_DEFAULT_HEADERS = {
     "User-Agent": PRISM32_USER_AGENT,
     "Accept": "application/json, text/plain, text/html, */*",

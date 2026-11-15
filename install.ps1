@@ -17,7 +17,7 @@ $Target = Join-Path $InstallDir "prism32.py"
 $CmdShim = Join-Path $InstallDir "prism32.cmd"
 
 Write-Host ""
-Write-Host "  Prism32 Windows Installer v7.2.9"
+Write-Host "  Prism32 Windows Installer v7.3.0"
 Write-Host ""
 
 if (!(Test-Path $Source)) {
