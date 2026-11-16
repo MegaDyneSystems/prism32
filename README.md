@@ -781,7 +781,7 @@ Subagents, background jobs, and shared context:
 /delegate <task>      Run a synchronous subagent
 /spawn <task>         Start an asynchronous subagent
 /wait [id] [--timeout s]
-                      Block until subagents/bg jobs finish (default 600s)
+                      Block until subagents/bg jobs finish (default: indefinite)
 /interject <id> <msg> Steer a running subagent mid-task (no restart)
 /bg <cmd>             Run a long shell command in the background
 /bg                   List background jobs
@@ -1051,9 +1051,9 @@ Use another configured provider (works for both `/delegate` and `/spawn`):
 **Completion is event-driven — do not poll.** When a subagent or background job finishes, its result is pushed into the conversation automatically as a completion notice (and into quantum context as `subagent_<id>_result` / `bg_<id>_result`). The status bar shows live counts (`SA:n` for subagents, `BG:n` for background jobs). If you must block, use:
 
 ```text
-/wait                 Block until ALL subagents and bg jobs finish (default 600s)
+/wait                 Block until ALL subagents and bg jobs finish (no timeout)
 /wait <id>            Block until one specific subagent or job finishes
-/wait --timeout 60    Use a custom timeout; Escape cancels the wait
+/wait --timeout 60    Bound the wait; default is no timeout; Escape cancels
 ```
 
 Long shell commands (builds, deploys, transfers) can run detached with `/bg <command>` — the result is pushed to the agent when it finishes. `/bg` bare (or `/bgs`) lists background jobs. While subagents are running, any `sleep` command the model tries to run is capped at 30 seconds with an explanatory note — the wait primitives replace sleep-polling.

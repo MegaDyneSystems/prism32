@@ -126,6 +126,52 @@ def test_wait_routes_from_execute_blocks():
     assert _try_plugin_cmd("/wait") is not None
 
 
+def test_wait_default_is_indefinite():
+    # Live incident 2026-11-15: the 600s default made the model re-issue
+    # /wait until the loop guard killed the turn. Default must now block
+    # until cancel (no spontaneous timeout).
+    _clear_subagents()
+    _register(_FakeSA("sa_inf", done=False))
+    results = {}
+
+    def _w():
+        results['r'] = _wait_for_work("sa_inf")
+
+    th = threading.Thread(target=_w, daemon=True)
+    th.start()
+    try:
+        time.sleep(0.8)
+        assert th.is_alive(), "default /wait must NOT time out on its own"
+        prism32.request_agent_cancel("test")
+        th.join(3)
+        assert not th.is_alive()
+        assert "CANCELLED" in results.get('r', '')
+    finally:
+        prism32.clear_agent_cancel()
+        _clear_subagents()
+
+
+def test_wait_timeout_zero_is_indefinite():
+    _clear_subagents()
+    _register(_FakeSA("sa_inf2", done=False))
+    results = {}
+
+    def _w():
+        results['r'] = _wait_for_work("sa_inf2 --timeout 0")
+
+    th = threading.Thread(target=_w, daemon=True)
+    th.start()
+    try:
+        time.sleep(0.8)
+        assert th.is_alive(), "--timeout 0 must mean indefinite"
+        prism32.request_agent_cancel("test")
+        th.join(3)
+        assert "CANCELLED" in results.get('r', '')
+    finally:
+        prism32.clear_agent_cancel()
+        _clear_subagents()
+
+
 # ── compound command splitting ───────────────────────────────────
 
 def test_split_compound_poll_pattern():

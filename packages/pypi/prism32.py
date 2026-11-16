@@ -7262,29 +7262,42 @@ def _wait_for_work(cmd_args):
     """/wait [ids...] [--timeout sec] — block until subagents AND
     background jobs finish.
 
-    The wait primitive the harness always lacked: without it the model
-    invented `sleep 480; /subagents` (which failed as shell and burned
-    ~13.6h in one session). Cancel-aware; returns status lines plus
-    result snippets so no second round-trip is needed."""
+    DEFAULT IS INDEFINITE (no timeout): work is bounded by step budgets
+    (SUBAGENT_MAX_STEPS) and command timeouts (CMD_TIMEOUT), so a wait
+    always terminates; Escape cancels. The old 600s default made the
+    model re-issue the identical wait every 10 minutes until the LOOP
+    GUARD killed the turn and orphaned running subagents (live incident
+    2026-11-15: user stared at an idle prompt for a day)."""
     args = (cmd_args or '').split()
-    timeout = 600
+    timeout = None  # None = indefinite
     ids = []
     i = 0
     while i < len(args):
         a = args[i]
-        if a == '--timeout':
+        if a in ('--timeout', '--timeout='):
             if i + 1 >= len(args):
                 return "Usage: /wait [ids...] [--timeout sec]"
             try:
-                timeout = max(1, int(args[i + 1]))
+                timeout = max(0, int(args[i + 1])) or None  # 0 = indefinite
             except ValueError:
                 return "Usage: /wait [ids...] [--timeout sec]"
             i += 2
             continue
+        if a.startswith('--timeout='):
+            try:
+                timeout = max(0, int(a.split('=', 1)[1])) or None
+            except ValueError:
+                return "Usage: /wait [ids...] [--timeout sec]"
+            i += 1
+            continue
+        if a in ('--forever', 'forever'):
+            timeout = None
+            i += 1
+            continue
         ids.append(a)
         i += 1
     idset = set(ids) if ids else None
-    deadline = time.time() + timeout
+    deadline = (time.time() + timeout) if timeout else None
     # The wait blocks the main thread OUTSIDE run_cmd — the interjection
     # reader would never be running and Ctrl+P / Escape / typed messages
     # all died in this window (user report 2026-11: "buttons aren't
@@ -7314,12 +7327,13 @@ def _wait_for_work(cmd_args):
             running = [t for t in targets.values() if not t.done]
             if not running:
                 break
-            if time.time() >= deadline:
+            if deadline is not None and time.time() >= deadline:
                 lines = [f"WAIT TIMEOUT after {timeout}s — still running:"]
                 for t in running:
                     lines.append(f"  {t.status_str()}")
-                lines.append("Wait again with /wait (optionally --timeout <sec>), or keep working — "
-                             "a completion notice is delivered automatically when work finishes.")
+                lines.append("Re-waiting will trip the loop guard: use `/wait --timeout 0` to block "
+                             "until everything finishes (Escape cancels), or keep working — completion "
+                             "notices are delivered automatically.")
                 return "\n".join(lines)
             if agent_cancel_requested():
                 return "[CANCELLED] /wait interrupted by operator."
@@ -8327,6 +8341,18 @@ class SubAgent:
                         # burn the whole budget (degenerate model loops).
                         _rc = self._repeat_guard.note(c)
                         if _rc >= _RepeatGuard.STOP_AT:
+                            _c0 = c.split()[0].lstrip('/').lower() if c.split() else ''
+                            if _c0 == 'wait' and _pending_work_running():
+                                # Waiting on real work (its own children) —
+                                # ending the subagent would orphan them.
+                                self._history.append({"role": "user", "content":
+                                    "LOOP GUARD: /wait re-issued "
+                                    f"{_rc} times — converted to a single INDEFINITE wait until "
+                                    "all subagents/background jobs finish. Do not issue /wait again."})
+                                _wr = _wait_for_work("--timeout 0")
+                                self._history.append({"role": "user", "content":
+                                    f"Executed: /wait (indefinite)\nResult:\n{_cap_result_for_model(_wr)}"})
+                                continue
                             self.result = (f"[SUBAGENT LOOP GUARD] identical command repeated "
                                            f"{_rc} times: {c[:100]}. Refusing to run it again.")
                             self.done = True
@@ -8536,7 +8562,7 @@ MULTI-AGENT SYSTEM:
 You can delegate work to subagents. Subagents run autonomously with their own execute-loop and report results.
 - /delegate <task> — synchronous subagent (blocks until done, returns result).
 - /spawn <task> — async subagent (returns immediately, use /collect <id> later).
-- /wait [ids] [--timeout <sec>] — BLOCK until subagents/background jobs finish (default: all, 600s). Returns their status and results.
+- /wait [ids] [--timeout <sec>] — BLOCK until subagents/background jobs finish (default: ALL work, indefinitely — it is bounded by step budgets; Escape cancels; --timeout N bounds it). Returns their status and results.
 - /collect <id> — retrieve async subagent results (records persist; results also land in quantum as subagent_<id>_result).
 - /interject <id> <message> — steer a RUNNING subagent mid-task (correct it, add info, change direction) without killing or restarting it.
 - /subagents — list running/completed subagents.
@@ -11956,7 +11982,7 @@ def main():
 
         if cmd == 'wait':
             # Operator-side mirror of the agent /wait: block until
-            # subagents/background jobs finish (default 600s). Escape during
+            # subagents/background jobs finish (default: indefinitely). Escape during
             # the wait is handled by the cancel check inside _wait_for_work.
             print(_wait_for_work(args_str))
             print()
@@ -12815,6 +12841,25 @@ def main():
                     # Loop guard (degenerate repeats) + shell-wrap hint
                     _rc = _MAIN_REPEAT_GUARD.note(c)
                     if _rc >= _RepeatGuard.STOP_AT:
+                        _c0 = c.split()[0].lstrip('/').lower() if c.split() else ''
+                        if _c0 == 'wait' and _pending_work_running():
+                            # The model is waiting on REAL work — ending the
+                            # turn here would orphan running subagents (live
+                            # incident 2026-11-15: loop guard killed the turn,
+                            # 5 subagents finished into a dead conversation,
+                            # operator stared at an idle prompt for a day).
+                            # Convert to ONE indefinite blocking wait instead.
+                            viz.status("Loop guard on /wait — converting to indefinite wait", "warning")
+                            history.append({"role": "user", "content":
+                                "LOOP GUARD: you have re-issued /wait "
+                                f"{_rc} times. It has been converted to a single INDEFINITE wait — "
+                                "blocking until all subagents and background jobs finish (Escape "
+                                "cancels). Do not issue /wait again; every result is delivered to "
+                                "you automatically on completion."})
+                            _wr = _wait_for_work("--timeout 0")
+                            history.append({"role": "user", "content":
+                                           f"Executed: /wait (indefinite)\nResult:\n{_cap_result_for_model(_wr)}"})
+                            continue
                         history.append({"role": "user", "content":
                             "LOOP GUARD: you have run this identical command "
                             f"{_rc} times. It will not run again. Give your final answer now."})
@@ -12941,6 +12986,17 @@ def main():
         if len(history) > Config.MAX_HISTORY:
             history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
         history[:] = trim_history(history, Config.resolve_context_window())
+
+        # Turn ended while background work survives — make it LOUD. Live
+        # incident 2026-11-15: loop guard ended a turn with 5 subagents
+        # mid-flight; the prompt sat silent and the operator stared at it
+        # for a day thinking work was stuck. Nothing is lost — completions
+        # are queued and delivered on the next message.
+        if _pending_work_running():
+            box("BACKGROUND WORK STILL RUNNING",
+                "Subagents / background jobs still working:\n" + _list_pending_work() +
+                "\nTheir results are queued and delivered automatically — send any message "
+                "to receive them. Nothing is lost.", "warn")
 
         # Save session after each interaction
         save_current_session(history, cmd_log)
