@@ -33,7 +33,6 @@ stdout_lock = threading.RLock()
 import queue
 import hashlib
 import importlib.util
-import py_compile
 try:
     import pty
 except ImportError:
@@ -434,6 +433,7 @@ def _load_plugin_file(mod_path, mod_name=None, quiet=False):
     if mod_name in _PLUGINS:
         return True, f"Already loaded: {mod_name}"
     try:
+        import py_compile  # lazy: shaves ~10ms off every boot (audit 2026-11)
         py_compile.compile(mod_path, doraise=True)
     except py_compile.PyCompileError as e:
         msg = f"Syntax error in plugin file {mod_path}: {e}"
@@ -489,6 +489,7 @@ STARTUP_MEMORY_FILE = os.path.join(_PRISM32_HOME, "startup_memory.md")
 SOUL_FILE = os.path.join(_PRISM32_HOME, "soul.md")
 PROMPTSHARD_FILE = os.path.join(_PRISM32_HOME, "promptshard.md")
 HARNESS_FILE = os.path.join(_PRISM32_HOME, "harnesses.json")
+_HARNESS_SCAN_RUNNING = False  # background harness scan in flight
 EVOLVE_DIR = os.path.join(_PRISM32_HOME, "evolve")
 EVOLVE_DOC_FILE = os.path.join(EVOLVE_DIR, "evolve.md")
 EVOLVE_TOOL_FILE = os.path.join(EVOLVE_DIR, "tools.json")
@@ -1201,19 +1202,43 @@ def load_harnesses():
     return {"version": 1, "scanned_at": "", "installed": [], "missing": []}
 
 def ensure_harness_scan(force=False):
+    """Harness scan with a non-blocking boot path.
+
+    Cold-boot profiling 2026-11: the synchronous scan cost 6.2s (97% of
+    a 6.3s cold boot) — a hanging `hermes --version` burns its whole
+    subprocess timeout. Stale-refreshes now run in a daemon thread; the
+    prompt appears immediately and harness_context serves the cache
+    until the scan lands. Explicit force=True (operator /harness scan)
+    stays synchronous so the operator sees real results."""
+    global _HARNESS_SCAN_RUNNING
+    if _HARNESS_SCAN_RUNNING:
+        return load_harnesses()
     stale = True
     try:
         stale = (time.time() - os.path.getmtime(HARNESS_FILE)) > 86400
     except OSError:
         stale = True
     if force or stale:
-        # Probe versions on EVERY real scan (force only bypasses
-        # staleness): a stale-refresh rescan used to run without probing,
-        # wiping every harness's version_text to "" and persisting it —
-        # the boot path then served the emptied cache indefinitely.
-        data = detect_harnesses(probe_versions=True)
-        save_harnesses(data)
-        return data
+        if force:
+            # Probe versions on EVERY real scan (force only bypasses
+            # staleness): a stale-refresh rescan used to run without probing,
+            # wiping every harness's version_text to "" and persisting it —
+            # the boot path then served the emptied cache indefinitely.
+            data = detect_harnesses(probe_versions=True)
+            save_harnesses(data)
+            return data
+        _HARNESS_SCAN_RUNNING = True
+        def _bg_scan():
+            global _HARNESS_SCAN_RUNNING
+            try:
+                data = detect_harnesses(probe_versions=True)
+                save_harnesses(data)
+            except Exception:
+                pass
+            finally:
+                _HARNESS_SCAN_RUNNING = False
+        threading.Thread(target=_bg_scan, daemon=True).start()
+        return load_harnesses()
     return load_harnesses()
 
 def format_harnesses(data=None, verbose=True):
@@ -4339,6 +4364,14 @@ class Config:
     # Max simultaneously-RUNNING async subagents; further spawns queue
     # (hivemind queueing — prevents provider rate-limit thrash).
     MAX_CONCURRENT_SUBAGENTS = 6
+    # Bounded working context per subagent. The old trim used the MAIN
+    # model's window (up to 1M tokens) — subagent prompts grew linearly
+    # (step ~100 re-sent 40-50K tokens/step). This keeps steps flat-cost.
+    SUBAGENT_CONTEXT_TOKENS = 32768
+    # Per-request timeout for subagent model calls. The main AI_TIMEOUT
+    # (3600s, for queued flex tiers) let one pathological subagent step
+    # stall for hours; subagents get a tight bound instead.
+    SUBAGENT_AI_TIMEOUT = 300
     ROOT_PASS = ""  # root password for su/sudo commands (auto-fed via pty; $ROOT_PASS env)
     STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
     NATIVE_TOOLS = os.environ.get("PRISM32_NATIVE_TOOLS", "1").lower() not in ("0", "false", "no", "off")
@@ -4419,6 +4452,8 @@ class Config:
                 "goal_max_steps": cls.GOAL_MAX_STEPS,
                 "subagent_max_steps": cls.SUBAGENT_MAX_STEPS,
                 "max_concurrent_subagents": cls.MAX_CONCURRENT_SUBAGENTS,
+                "subagent_context_tokens": cls.SUBAGENT_CONTEXT_TOKENS,
+                "subagent_ai_timeout": cls.SUBAGENT_AI_TIMEOUT,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
                 "stream": cls.STREAM,
                 "slow_cpu": cls.SLOW_CPU,
@@ -4641,6 +4676,10 @@ class Config:
             if "max_concurrent_subagents" in data:
                 _mc = _tolerant_int(data["max_concurrent_subagents"], cls.MAX_CONCURRENT_SUBAGENTS)
                 cls.MAX_CONCURRENT_SUBAGENTS = max(1, _mc)
+            if "subagent_context_tokens" in data:
+                cls.SUBAGENT_CONTEXT_TOKENS = max(4096, _tolerant_int(data["subagent_context_tokens"], cls.SUBAGENT_CONTEXT_TOKENS))
+            if "subagent_ai_timeout" in data:
+                cls.SUBAGENT_AI_TIMEOUT = max(30, _tolerant_int(data["subagent_ai_timeout"], cls.SUBAGENT_AI_TIMEOUT))
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
             if "custom_arch_map" in data and isinstance(data["custom_arch_map"], dict):
@@ -4684,10 +4723,10 @@ def _msg_tokens(m):
             total += estimate_tokens(str(call))
     return total
 
-def context_pct(history):
+def context_pct(history, budget=None):
     total = sum(_msg_tokens(m) for m in history)
-    budget = Config.resolve_context_window()
-    return min(999, int(total / budget * 100)) if budget > 0 else 0
+    ctx = budget if budget else Config.resolve_context_window()
+    return min(999, int(total / ctx * 100)) if ctx > 0 else 0
 
 # ── Context management with intelligent summarization ──────
 
@@ -8225,6 +8264,10 @@ class SubAgent:
     def _run_loop(self):
         t = T()
         self._history = self._build_history()
+        # Snapshot of the quantum state embedded in the system prompt —
+        # later batches deliver only the delta (see the [QUANTUM UPDATE]
+        # injection below), keeping the prompt prefix stable.
+        self._qsnapshot = dict(_quantum.items())
         # Resolve provider credentials once; pass explicitly to ask_ai so
         # parallel subagents never mutate Config globals (race condition fix).
         _prov = self.provider or Config.SUBAGENT_PROVIDER or Config.PROVIDER
@@ -8257,10 +8300,14 @@ class SubAgent:
                 # Progress heartbeat every 25 steps.
                 if self._step % 25 == 0:
                     self._emit_pulse()
-                # Context management, trim if approaching limit
-                _ctx = context_pct(self._history)
+                # Bounded working context: the old trim targeted the MAIN
+                # model's window (up to 1M tokens) and never fired within
+                # 200 steps — every step re-sent a linearly growing prompt
+                # (step ~100 = 40-50K tokens, re-billed each step). The
+                # subagent budget keeps per-step cost flat like opencode's.
+                _ctx = context_pct(self._history, budget=Config.SUBAGENT_CONTEXT_TOKENS)
                 if _ctx >= 75:
-                    self._history[:] = trim_history(self._history, Config.resolve_context_window())
+                    self._history[:] = trim_history(self._history, Config.SUBAGENT_CONTEXT_TOKENS)
                 # Deliver completion notices from OTHER subagents (this one
                 # may itself have spawned children via /spawn).
                 _evs, self._event_cursor = _drain_agent_events(self._event_cursor)
@@ -8270,7 +8317,8 @@ class SubAgent:
                     t2 = T()
                     print(f"  {t2['dim']}[{self.id}] Step {self._step}/{self.max_steps}{RST}")
                 resp = ask_ai(self._history, stream=False,
-                              api_base=_api_base, api_key=_api_key, model=_model)
+                              api_base=_api_base, api_key=_api_key, model=_model,
+                              timeout=Config.SUBAGENT_AI_TIMEOUT)
                 if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
                     self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
                     self.error = agent_cancel_message()
@@ -8282,14 +8330,18 @@ class SubAgent:
                     # transient failures with backoff so a flaky API round
                     # doesn't kill the subagent mid-task. Auth/budget
                     # failures are fatal here too (operator action needed).
+                    # 'empty' (HTTP 200, no content — gateway hiccup) gets a
+                    # QUICK retry: the old exponential ladder burned up to
+                    # 195s of sleeps on what is usually one dropped response.
                     if _fail in ('retry', 'empty'):
                         ai_retries += 1
-                        if ai_retries <= _AI_AUTO_RETRIES:
-                            _delay = min(60, 5 * (2 ** (ai_retries - 1)))
+                        _max_r = 3 if _fail == 'empty' else _AI_AUTO_RETRIES
+                        if ai_retries <= _max_r:
+                            _delay = 2 if _fail == 'empty' else min(60, 5 * (2 ** (ai_retries - 1)))
                             _summary = ("No response" if _fail == 'empty'
                                         else (resp or '').splitlines()[0][:70])
                             viz.status(f"[{self.id}] {_summary} — retrying in {_delay}s "
-                                       f"({ai_retries}/{_AI_AUTO_RETRIES})", "warning")
+                                       f"({ai_retries}/{_max_r})", "warning")
                             _end_t = time.time() + _delay
                             _aborted = False
                             while time.time() < _end_t:
@@ -8380,8 +8432,22 @@ class SubAgent:
                         self.result = "[SUBAGENT CANCELLED] Command was stopped by operator."
                         self.done = True
                         return
-                    # Inject latest quantum context so subagent sees cross-agent data
-                    self._history[0] = self._build_history()[0]
+                    # Cross-agent quantum state flows as DELTAS here. The
+                    # old per-batch `self._history[0] = self._build_history()[0]`
+                    # rebuilt the whole system prompt every step (mutable
+                    # time:HH:MM + quantum growth) — re-sending ~1.9K tokens
+                    # of static prompt and invalidating any provider prefix
+                    # cache, every step, for every subagent. Appended delta
+                    # messages keep the swarm's shared brain cache-safe.
+                    _qnow = _quantum.items()
+                    _qdelta = {k: v for k, v in _qnow.items()
+                               if k not in self._qsnapshot or self._qsnapshot.get(k) != v}
+                    if _qdelta:
+                        _qtxt = "\n".join(f"  {k}: {str(v)[:1500]}"
+                                          for k, v in list(_qdelta.items())[:8])
+                        self._history.append({"role": "user", "content":
+                            f"[QUANTUM UPDATE — new/changed shared keys]\n{_qtxt}"})
+                        self._qsnapshot = dict(_qnow)
                 else:
                     if _unclosed_command_fence(resp):
                         # Truncated mid-block (finish_reason=length): don't let the
@@ -8864,10 +8930,11 @@ def _stream_anthropic_native(resp, cancel_event=None):
     """Stream a native Anthropic response, reusing the OpenAI stream renderer."""
     return stream_response(_AnthropicToOpenAIStream(resp), cancel_event=cancel_event)
 
-def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event, _api_base, _api_key, _model):
+def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event, _api_base, _api_key, _model, timeout=None):
     """Send a request to Anthropic's native /v1/messages endpoint with prompt
     caching markers applied. Handles both streaming and non-streaming responses
     and normalizes usage into the shared _track_usage() format."""
+    _timeout = timeout if timeout is not None else Config.AI_TIMEOUT
     _base = normalize_api_base(_api_base)
     url = f"{_base}/v1/messages"
     payload = _build_anthropic_payload(message_list, _model, stream)
@@ -8882,7 +8949,7 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
                 data=json.dumps(payload).encode(),
                 headers=_build_anthropic_headers(_api_key),
             )
-            with urlopen_with_ssl(req, timeout=Config.AI_TIMEOUT) as resp:
+            with urlopen_with_ssl(req, timeout=_timeout) as resp:
                 if stream if stream is not None else Config.STREAM:
                     _sr = _stream_anthropic_native(resp, cancel_event=cancel_event)
                     if _sr == RESPONSE_BUDGET_EXHAUSTED and not _budget_scaled:
@@ -8944,7 +9011,7 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
                 _local_hint = " — no local server running. Configure a provider: /model or /provider add (wizard)"
             _reason = getattr(e, 'reason', None) or e
             if 'timed out' in str(_reason).lower() or isinstance(e, TimeoutError):
-                _local_hint = (f" — the model did not send a byte within the {Config.AI_TIMEOUT}s wait "
+                _local_hint = (f" — the model did not send a byte within the {_timeout}s wait "
                                f"(flex/priority-tier models queue for a long time). Raise it: /aitimeout <seconds>")
             last_error = f"[NETWORK ERROR] {e}{_local_hint}"
             learn_error(str(e), "network")
@@ -9053,11 +9120,14 @@ _NATIVE_TOOLS_SCHEMA = [{
 }]
 
 def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
-            api_base=None, api_key=None, model=None):
-    '''Resilient AI query with retry, backoff, and history trimming.'''
+            api_base=None, api_key=None, model=None, timeout=None):
+    '''Resilient AI query with retry, backoff, and history trimming.
+    `timeout` bounds the HTTP wait (subagents pass a tight one — the main
+    AI_TIMEOUT of 3600s exists for queued flex tiers, not for swarm work).'''
     _api_base = api_base if api_base is not None else Config.API_BASE
     _api_key = api_key if api_key is not None else Config.API_KEY
     _model = model if model is not None else Config.MODEL
+    _timeout = timeout if timeout is not None else Config.AI_TIMEOUT
     # Filter empty messages
     clean_messages = []
     for m in messages:
@@ -9084,7 +9154,8 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
     # not the endpoint routing, so Anthropic stays correct even when disabled.
     if _resolve_cache_support(api_base=_api_base) == "anthropic":
         return _ask_anthropic_native(clean_messages, stream, retry, base_delay,
-                                     cancel_event, _api_base, _api_key, _model)
+                                     cancel_event, _api_base, _api_key, _model,
+                                     timeout=_timeout)
 
     _base = normalize_api_base(_api_base)
     url = f"{_base}/v1/chat/completions"
@@ -9116,7 +9187,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                 data=json.dumps(payload).encode(),
                 headers=build_headers(api_key=_api_key, api_base=_api_base),
             )
-            with urlopen_with_ssl(req, timeout=Config.AI_TIMEOUT) as resp:
+            with urlopen_with_ssl(req, timeout=_timeout) as resp:
                 if stream if stream is not None else Config.STREAM:
                     _sr = stream_response(resp, cancel_event=cancel_event)
                     if _sr == RESPONSE_BUDGET_EXHAUSTED and not budget_scaled:
@@ -9216,7 +9287,7 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                 _local_hint = " — no local server running. Configure a provider: /model or /provider add (wizard)"
             _reason = getattr(e, 'reason', None) or e
             if 'timed out' in str(_reason).lower() or isinstance(e, TimeoutError):
-                _local_hint = (f" — the model did not send a byte within the {Config.AI_TIMEOUT}s wait "
+                _local_hint = (f" — the model did not send a byte within the {_timeout}s wait "
                                f"(flex/priority-tier models queue for a long time). Raise it: /aitimeout <seconds>")
             last_error = f"[NETWORK ERROR] {e}{_local_hint}"
             learn_error(str(e), "network")
@@ -9658,7 +9729,12 @@ def build_context():
     # mid-task to include the latest quantum state").
     quantum_block = ""
     try:
-        if _quantum.is_used():
+        # Gate on DATA PRESENCE, not the consumed is_used() flag: the footer
+        # drains was_used() every 0.3s, so during quiet windows the old gate
+        # silently dropped the entire quantum block from rebuilt prompts
+        # mid-task (accuracy bug, audit 2026-11).
+        _qdata = _quantum.items()
+        if _qdata:
             quantum_block = f"\nSHARED QUANTUM CONTEXT (cross-agent state; /quantum to read or write):\n{str(_quantum)}\n"
     except Exception:
         pass
@@ -10913,7 +10989,10 @@ def main():
         ensure_startup_memory(refresh=False)
     refresh_memory_profile(save=True)
     ensure_harness_scan(force=False)
-    _fetch_api_pricing()
+    # Pricing fetch hits the provider's /models endpoint (up to 10s on a
+    # slow/blackholed network) — never block the prompt for it; the cache
+    # is only read after the first API response arrives.
+    threading.Thread(target=_fetch_api_pricing, daemon=True).start()
     _check_stale_pyc()
     if not args.no_boot:
         boot_sequence()

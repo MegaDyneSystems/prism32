@@ -1416,6 +1416,9 @@ Important settings:
 - `ai_timeout`: AI request wait timeout in seconds (default 3600).
 - `goal_max_steps`: per-step (per-todo) shard step budget for missions (see `/maxsteps`).
 - `subagent_max_steps`: step budget for `/spawn` and `/delegate` subagents (default 200; see `/maxsteps sub`).
+- `max_concurrent_subagents`: max simultaneously running async subagents (default 6); further spawns queue.
+- `subagent_context_tokens`: bounded working context per subagent (default 32768) — keeps per-step prompt cost flat instead of growing linearly.
+- `subagent_ai_timeout`: per-request timeout for subagent model calls (default 300s; the main `ai_timeout` of 3600s exists for queued flex tiers, not swarm work).
 - `max_memory_ctx`: character limit for injected memory context.
 - `subagent_model`: optional model override for subagents.
 - `subagent_provider`: optional provider override for subagents (empty = main provider).

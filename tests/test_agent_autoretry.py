@@ -58,7 +58,10 @@ class HarnessScanFixesTestCase(unittest.TestCase):
 
     def test_ensure_scan_probes_on_stale_refresh(self):
         # D1 regression: a stale-cache refresh must probe versions too,
-        # never persist an all-empty version_text wipe.
+        # never persist an all-empty version_text wipe. Since the boot-time
+        # optimization (2026-11-15) the stale refresh runs in a BACKGROUND
+        # thread — ensure_harness_scan returns the cache immediately and the
+        # refreshed file lands asynchronously. Poll for it.
         tmp = tempfile.mkdtemp(prefix="prism32_harness_test_")
         orig_file = globals()['HARNESS_FILE']
         try:
@@ -73,9 +76,22 @@ class HarnessScanFixesTestCase(unittest.TestCase):
             os.utime(hf, (0, 0))
             globals()['HARNESS_FILE'] = hf
             data = ensure_harness_scan(force=False)
-            # Whatever it found, a real scan happened and every installed
-            # entry went through the version prober (non-empty for /bin/true)
-            for h in data.get('installed', []):
+            # Immediate return serves the cache (non-blocking boot contract)
+            self.assertIsNotNone(data)
+            # Background thread must land the probed version within ~30s
+            deadline = time.time() + 30
+            probed = None
+            while time.time() < deadline:
+                time.sleep(0.25)
+                try:
+                    fresh = json.load(open(hf))
+                except Exception:
+                    continue
+                if fresh.get('scanned_at') != 'old':
+                    probed = fresh
+                    break
+            self.assertIsNotNone(probed, "background harness scan never landed")
+            for h in probed.get('installed', []):
                 if h.get('path') == '/bin/true':
                     self.assertEqual(h.get('version_text'), 'true (GNU coreutils)')
         finally:
