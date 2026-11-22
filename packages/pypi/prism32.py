@@ -4777,16 +4777,61 @@ def _build_context_refresher(history, keep_count=0):
     """Build an intelligent summary of DROPPED messages only (not the kept ones).
     
     Extracts:
-    - OBJECTIVE: the active goal
+    - OBJECTIVE: the active goal (or the original task/subagent task —
+      recovered from an earlier summary if one exists, so repeated trims
+      never lose it)
     - DISCOVERIES: key facts from command results (IPs, paths, errors)
     - ERRORS: recurring problems
     - LAST ANALYSIS: compressed key points from last assistant response
     - RECENT DROPPED: last few messages that were dropped (for continuity)
+
+    _TRIM_LOCK: the shared _SESSION_STATE facts dict is mutated here —
+    parallel subagent trims used to leak facts across agents' summaries.
     """
     global _CONTEXT_SUMMARY
+    with _TRIM_LOCK:
+        return _build_context_refresher_locked(history, keep_count)
+
+
+def _build_context_refresher_locked(history, keep_count=0):
+    global _CONTEXT_SUMMARY
     parts = []
-    
+
     obj = _ACTIVE_GOAL
+    if not obj:
+        # No mission goal: preserve the ORIGINAL request instead. The old
+        # refresher only extracted Executed-facts and [User answered] —
+        # trim_history dropped history[1] (the user's actual task, or a
+        # subagent's "Task: ..." message) with no trace, so long sessions
+        # and 200-step subagents silently forgot what they were asked to
+        # do (accuracy audit 2026-11: primary cause of "smart model fails
+        # simple tasks").
+        for m in history[1:200]:
+            if not isinstance(m, dict):
+                continue
+            role = m.get("role", "")
+            c = m.get("content", "")
+            if not isinstance(c, str) or not c.strip():
+                continue
+            # An earlier [SESSION CONTEXT] summary already baked the
+            # objective in — recover it so trims never lose it.
+            _mo = re.search(r'^OBJECTIVE: (.+)$', c, re.MULTILINE)
+            if _mo:
+                obj = _mo.group(1)[:400]
+                break
+            if role != "user":
+                continue
+            if len(c) > 2000:
+                continue
+            if c.startswith("Task:"):
+                obj = c[:400]
+                break
+            # Harness-generated user messages are not the objective.
+            if (c.startswith("Executed:") or c.startswith("[") or
+                    c.startswith("GOAL:") or c.startswith("You are in")):
+                continue
+            obj = c[:400]
+            break
     if obj:
         parts.append(f"OBJECTIVE: {obj}")
     
@@ -4845,6 +4890,8 @@ def _build_context_refresher(history, keep_count=0):
         _CONTEXT_SUMMARY = summary
     return summary if summary.strip() else ""
 
+_TRIM_LOCK = threading.RLock()  # re-entrant: trim_history → _build_context_refresher
+
 def trim_history(history, max_tokens=None):
     """Aggressive intelligent trimming with multi-level summarization.
     
@@ -4864,7 +4911,17 @@ def trim_history(history, max_tokens=None):
     total = sum(_msg_tokens(m) for m in history)
     if total <= max_tokens:
         return history
-    
+
+    # Cross-thread serialization: parallel subagent loops all trim against
+    # the SHARED _SESSION_STATE facts dict — unlocked, one agent's extracted
+    # discoveries leaked into every other agent's summary (audit 2026-11).
+    # Each trim is sub-ms, so holding the lock for the whole build is safe.
+    with _TRIM_LOCK:
+        return _trim_history_locked(history, max_tokens, total)
+
+
+def _trim_history_locked(history, max_tokens, total):
+    global _SESSION_STATE
     _SESSION_STATE["trim_count"] = _SESSION_STATE.get("trim_count", 0) + 1
     
     system_prompt = history[0]
@@ -4990,8 +5047,13 @@ def compress_tool_turns(messages, recent_keep=None, head_lines=4, tail_lines=3,
         content = m.get("content")
         if not isinstance(content, str) or not content:
             continue
-        if role == "user" and ("Executed:" in content or "Result:" in content):
-            # Tool-result message. Collapse as a whole: the head keeps the
+        if role == "user" and content.startswith("Executed:"):
+            # Tool-result message (harness format ONLY — the old predicate
+            # `("Executed:" in content or "Result:" in content)` also
+            # collapsed REAL user messages that merely mentioned the word
+            # "Result:", silently mangling pasted logs and quoted output
+            # back to head/tail lines).
+            # Collapse as a whole: the head keeps the
             # "Executed: <cmd>" header + first result lines; the tail keeps the
             # trailing continuation ("Command output above. Continue...").
             # Operating on the whole string is robust to blank lines WITHIN the
@@ -5164,6 +5226,7 @@ register_provider("groq", display_name="Groq", api_base="https://api.groq.com/op
 register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", cheap_model="meta-llama/Llama-3-8b-chat-hf", description="Together AI inference", cache_support=None)
 register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", cheap_model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)", cache_support=None)
 register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
+register_provider("opencode", display_name="OpenCode Zen", api_base="https://opencode.ai/zen/v1", model="glm-5.3-flash", cheap_model="glm-5.3-flash", description="OpenCode Zen models gateway — Claude/GPT/Gemini/Grok/Qwen/free tiers, OpenAI-compatible (oc_sk_... key from opencode.ai/console)", cache_support=None)
 register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-chat", cheap_model="deepseek-chat", description="DeepSeek V3 / R1 (requires API key)", cache_support="deepseek_auto")
 register_provider("llamacpp-remote", display_name="llama.cpp (remote server)", api_base="", model="", description="Remote llama.cpp server (OpenAI-compatible). Set its address first: /provider api llamacpp-remote http://<host>:8080/v1", cache_support=None)
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
@@ -5706,15 +5769,20 @@ _AI_AUTO_RETRIES = 6  # transient-failure resends before giving the turn back
 
 def _ai_failure_kind(resp):
     """Classify an ask_ai result for the agent loops.
-    Returns 'empty' for no response, 'auth' for wrong/missing key (401),
-    'budget' for reasoning-budget exhaustion (needs /maxtokens), 'retry'
-    for other transient errors (5xx, network, timeouts), or None for
-    normal model content. Auth and budget failures cannot heal by
-    resending — they need operator action, so the loops break on them."""
+    Returns 'empty' for no response, 'auth' for wrong/missing key (401)
+    or unpaid balance (402), 'budget' for reasoning-budget exhaustion
+    (needs /maxtokens), 'retry' for other transient errors (5xx, network,
+    timeouts), or None for normal model content. Auth/budget/payment
+    failures cannot heal by resending — they need operator action
+    (top up credits / fix the key), so the loops break on them."""
     if not resp:
         return 'empty'
     if resp.startswith(('[HTTP ERROR', '[NETWORK ERROR', '[ERROR]')):
         if '401' in resp:
+            return 'auth'
+        if '402' in resp:
+            # Payment Required (e.g. opencode Zen "Insufficient balance") —
+            # retrying burns 135s of exponential backoff for a billing state.
             return 'auth'
         if 'exhausted its entire response budget' in resp:
             return 'budget'
@@ -6981,10 +7049,28 @@ def _pty_su_root(cmd, timeout=None):
         output = out.decode(errors="replace")
         return output[-4000:] if len(output) > 4000 else output
 
+_RE_ZERO_FAILURE = re.compile(
+    r'\b(?:0|no|zero)\s+(?:errors?|failures?|failed|issues?|problems?|warnings?)\b',
+    re.IGNORECASE)
+
 def _cmd_succeeded(result):
-    """Check if a command result indicates success."""
+    """Check if a command result indicates success.
+
+    Zero-inversion guard (accuracy audit 2026-11): `grep error app.log`
+    printing matches, or a clean run reporting '0 errors', used to be
+    fed back to the model as Command succeeded=False — the model was
+    told its WORKING command failed, triggering retry loops and
+    abandoned correct paths. Lines that report the ABSENCE of problems
+    are not failures."""
     low = (result or "").lower()[:4000]
-    return not any(w in low for w in ["error", "blocked", "timeout", "failed", "failure", "not found", "cancelled", "denied"])
+    if not any(w in low for w in ["error", "blocked", "timeout", "failed", "failure", "not found", "cancelled", "denied"]):
+        return True
+    # Strip zero/negation phrases before re-checking so '0 errors found'
+    # or 'no failures detected' counts as success.
+    if _RE_ZERO_FAILURE.search(low):
+        stripped = _RE_ZERO_FAILURE.sub(' ', low)
+        return not any(w in stripped for w in ["error", "blocked", "timeout", "failed", "failure", "not found", "cancelled", "denied"])
+    return False
 
 def _split_task_provider(task):
     """Split a trailing '--provider <name>' switch off a delegate/spawn task.
@@ -7123,15 +7209,46 @@ def _notify_subagent_done(sa):
 
 def _drain_agent_events(cursor):
     """Return (events since cursor, next cursor). Per-consumer cursors
-    keep concurrent agents from stealing each other's notices."""
+    keep concurrent agents from stealing each other's notices.
+
+    Window is 8 events; COMPLETIONS outrank pulses (a pulse is
+    disposable, a completion notice is not). The cursor never advances
+    past an undelivered completion — the old version advanced past
+    everything and, in a busy swarm (pulses crowding the window),
+    silently dropped earlier completion notices for good."""
     with _agent_events_lock:
         base = _AGENT_EVENT_LOG[0]["seq"] if _AGENT_EVENT_LOG else 0
         cursor = max(cursor, base)
-        evs = [dict(e) for e in _AGENT_EVENT_LOG if e["seq"] >= cursor]
-        nxt = (_AGENT_EVENT_LOG[-1]["seq"] + 1) if _AGENT_EVENT_LOG else cursor
-    return evs[-8:], nxt
+        evs_all = [dict(e) for e in _AGENT_EVENT_LOG if e["seq"] >= cursor]
+        if not evs_all:
+            return [], cursor
+        comps = [e for e in evs_all if e["kind"] != "pulse"]
+        pulses = [e for e in evs_all if e["kind"] == "pulse"]
+        if len(evs_all) <= 8:
+            delivered = evs_all
+            nxt = evs_all[-1]["seq"] + 1
+        elif len(comps) > 8:
+            # Completion backlog: deliver FIFO (oldest 8) and advance past
+            # them — picking the newest 8 instead starved the oldest ones
+            # forever in a busy swarm.
+            delivered = comps[:8]
+            nxt = delivered[-1]["seq"] + 1
+        else:
+            delivered = comps + pulses[-(8 - len(comps)):]
+            delivered = sorted(delivered, key=lambda e: e["seq"])
+            nxt = evs_all[-1]["seq"] + 1  # everything else was a skipped pulse
+    return delivered, nxt
 
 _MAIN_EVENT_CURSOR = [0]  # main REPL's position in the event log
+
+_RE_QUANTUM_BOOKKEEPING = re.compile(
+    r'^(?:subagent_\w+_(?:spawned|status|task)|bg_\w+_(?:cmd)|harness_super_\w+_result)$')
+
+def _is_quantum_bookkeeping(key):
+    """Lifecycle keys the harness itself writes to quantum. They carry no
+    task data — sibling agents don't need them as delta injections (the
+    completion notices deliver the same information, structured)."""
+    return bool(_RE_QUANTUM_BOOKKEEPING.match(key or ''))
 
 def _format_agent_events(evs):
     """Render queued completion events as a user-message injection."""
@@ -7772,13 +7889,18 @@ def _cap_result_for_model(result):
 
     The old `result[:_CMD_RESULT_CAP]` took the FIRST 1500 chars of an
     already tail-truncated (last-4000) output — the final ~2500 chars,
-    where exit statuses, test results and error summaries live, were
-    never shown to the model (audit finding 2026-11)."""
+    where exit statuses and error summaries live, were never shown
+    (audit finding 2026-11). The marker now discloses the skipped
+    volume so the model knows to re-run with grep/head/tail instead of
+    assuming a two-line gap."""
     if not result or len(result) <= _CMD_RESULT_CAP:
         return result
-    head = result[:400]
-    tail = result[-(_CMD_RESULT_CAP - 450):]
-    return head + "\n[... middle truncated ...]\n" + tail
+    head = result[:500]
+    tail = result[-(_CMD_RESULT_CAP - 600):]
+    skipped = len(result) - len(head) - len(tail)
+    marker = (f"\n[... {skipped} chars in the middle truncated — re-run with "
+              f"grep/head/tail/cat if you need the omitted part ...]\n")
+    return head + marker + tail
 
 def _terminate_process(proc, use_killpg=True):
     try:
@@ -8439,14 +8561,22 @@ class SubAgent:
                     # of static prompt and invalidating any provider prefix
                     # cache, every step, for every subagent. Appended delta
                     # messages keep the swarm's shared brain cache-safe.
+                    # Bookkeeping keys (spawned/status/task/cmd flags) are
+                    # filtered: they are lifecycle noise about siblings,
+                    # not shared task data — unfiltered they flooded every
+                    # subagent's history with 3K-token user-role dumps
+                    # (accuracy audit 2026-11).
                     _qnow = _quantum.items()
                     _qdelta = {k: v for k, v in _qnow.items()
-                               if k not in self._qsnapshot or self._qsnapshot.get(k) != v}
+                               if (k not in self._qsnapshot or self._qsnapshot.get(k) != v)
+                               and not _is_quantum_bookkeeping(k)}
                     if _qdelta:
-                        _qtxt = "\n".join(f"  {k}: {str(v)[:1500]}"
-                                          for k, v in list(_qdelta.items())[:8])
+                        _qtxt = "\n".join(f"  {k}: {str(v)[:600]}"
+                                          for k, v in list(_qdelta.items())[:6])
                         self._history.append({"role": "user", "content":
-                            f"[QUANTUM UPDATE — new/changed shared keys]\n{_qtxt}"})
+                            f"[QUANTUM UPDATE — new/changed shared keys; /quantum for full values]\n{_qtxt}"})
+                        # Snapshot EVERYTHING (including filtered keys) so
+                        # bookkeeping churn doesn't re-trigger deltas.
                         self._qsnapshot = dict(_qnow)
                 else:
                     if _unclosed_command_fence(resp):
@@ -8457,6 +8587,16 @@ class SubAgent:
                         self._history.append({"role": "user", "content": "Your last response ended with an UNCLOSED ```execute block (truncated). Re-emit the complete block, continuing exactly where you left off."})
                         continue
                     clean = clean_response(resp)
+                    # A subagent that asked a question (its ask block was
+                    # converted by the harness to "[SUBAGENT NEEDS INPUT]")
+                    # must not be dragged through the nudge/protocol-reset
+                    # ladder to death — the question IS a legitimate final
+                    # answer; the captain reads it and can re-spawn with
+                    # the answer (accuracy audit 2026-11).
+                    if clean.startswith("[SUBAGENT NEEDS INPUT]"):
+                        self.result = clean
+                        self.done = True
+                        return
                     # Text-only announcement ("I'll read the files now:") must not
                     # silently complete the subagent — nudge (then reset) until
                     # it acts. Options are handled by the harness, not the operator.
@@ -8634,7 +8774,7 @@ You can delegate work to subagents. Subagents run autonomously with their own ex
 - /subagents — list running/completed subagents.
 - /bg <command> — run a LONG shell command in the background (builds, deploys, transfers, service restarts). Returns a job id instantly; the result is pushed to you when it completes. /bg (bare) lists jobs.
 Add --provider <name> to use a different provider for a subagent (e.g. /delegate scan ports --provider groq).
-Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, deepseek, llamacpp-remote.
+Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, opencode, deepseek, llamacpp-remote.
 EVENT-DRIVEN COMPLETION: when any subagent or background job finishes, its result is delivered to you automatically as a notification. You never need timers:
 - NEVER use `sleep` to wait for work — it wastes hours. Use /wait to block, or start work with /bg or /spawn and keep doing other things.
 - Subagents emit progress updates every 25 steps. If one is stuck or wrong, /interject <id> <message> to steer it immediately instead of letting it burn its step budget.
@@ -9656,19 +9796,27 @@ def heal_response(text):
 
         # Flat JSON objects containing a command key (any position, extra
         # keys allowed): {"command": "ls -la", "explanation": "..."}
-        def _replace_flat(m):
-            nonlocal healed
-            try:
-                obj = json.loads(m.group(0))
-            except Exception:
+        # GUARD (accuracy audit 2026-11): only heal when the bare JSON IS the
+        # response — a model writing a JSON *example* in prose (documentation,
+        # config snippets) must not have its example executed. When there is
+        # real prose around the object, the announce/nudge machinery asks for
+        # a proper execute block instead (a safe failure mode).
+        _prose_outside = re.sub(r'\{[^{}]+\}', '', text)
+        _prose_outside = re.sub(r'```[\w]*', '', _prose_outside).strip()
+        if len(_prose_outside) < 40:
+            def _replace_flat(m):
+                nonlocal healed
+                try:
+                    obj = json.loads(m.group(0))
+                except Exception:
+                    return m.group(0)
+                if isinstance(obj, dict):
+                    cmd = obj.get('command')
+                    if isinstance(cmd, str) and cmd.strip():
+                        healed = True
+                        return f"```execute\n{cmd}\n```"
                 return m.group(0)
-            if isinstance(obj, dict):
-                cmd = obj.get('command')
-                if isinstance(cmd, str) and cmd.strip():
-                    healed = True
-                    return f"\n```execute\n{cmd}\n```"
-            return m.group(0)
-        text = re.sub(r'\{[^{}]+\}', _replace_flat, text)
+            text = re.sub(r'\{[^{}]+\}', _replace_flat, text)
 
     return text, healed
 
@@ -13063,7 +13211,25 @@ def main():
 
         # Apply both constraints: trim to max_history count, then to token budget
         if len(history) > Config.MAX_HISTORY:
-            history[:] = [history[0]] + history[-(Config.MAX_HISTORY - 1):]
+            # Summarize what the count-cap drops. The old blind slice
+            # deleted the earliest messages (including the original task!)
+            # with no trace — confirmed on a live 2000-message session whose
+            # objective vanished: the context counter plateaued ("frozen")
+            # and the model forgot what it was doing mid-task.
+            _keep = Config.MAX_HISTORY - 1
+            _dropped = history[1:-_keep]
+            _refresher = ""
+            if _dropped:
+                try:
+                    _refresher = _build_context_refresher(history, keep_count=_keep)
+                except Exception:
+                    _refresher = ""
+            _capped = [history[0]]
+            if _refresher.strip():
+                _capped.append({"role": "system", "content":
+                    f"[SESSION CONTEXT — older messages summarized to save space]\n{_refresher}\n[END SUMMARY — continue working.]"})
+            _capped.extend(history[-_keep:])
+            history[:] = _capped
         history[:] = trim_history(history, Config.resolve_context_window())
 
         # Turn ended while background work survives — make it LOUD. Live

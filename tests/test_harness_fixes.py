@@ -469,6 +469,134 @@ def test_hint_not_added_on_success():
     assert out == "all good"
 
 
+# ── opencode (Zen) provider ──────────────────────────────────────
+
+def test_opencode_provider_registered():
+    from prism32 import PROVIDER_REGISTRY
+    row = PROVIDER_REGISTRY.get("opencode")
+    assert row is not None, "opencode provider missing from registry"
+    assert row.get("api_base") == "https://opencode.ai/zen/v1"
+
+
+# ── objective preservation (accuracy audit) ───────────────────────
+
+def test_context_refresher_preserves_objective():
+    prism32._ACTIVE_GOAL = ""
+    hist = [{"role": "system", "content": "sys"}]
+    hist.append({"role": "user", "content": "Fix the voice bridge on the Echo Show 5"})
+    for i in range(40):
+        hist.append({"role": "user", "content": f"Executed: cmd{i}\nResult:\nnoise {i}"})
+    summary = prism32._build_context_refresher(hist, keep_count=10)
+    assert "OBJECTIVE:" in summary
+    assert "Fix the voice bridge" in summary, "original task must survive trims"
+
+
+def test_context_refresher_recovers_objective_from_prior_summary():
+    prism32._ACTIVE_GOAL = ""
+    baked = ("[SESSION CONTEXT — prior conversation summarized]\n"
+             "OBJECTIVE: Fix the voice bridge on the Echo Show 5\n"
+             "[END SUMMARY — continue working.]")
+    hist = [{"role": "system", "content": "sys"},
+            {"role": "system", "content": baked}]
+    for i in range(30):
+        hist.append({"role": "user", "content": f"Executed: cmd{i}\nResult:\nn{i}"})
+    summary = prism32._build_context_refresher(hist, keep_count=10)
+    assert "Fix the voice bridge" in summary, "objective must survive repeated trims"
+
+
+def test_max_history_slice_summarizes_not_deletes():
+    prism32._ACTIVE_GOAL = ""
+    cap = prism32.Config.MAX_HISTORY
+    hist = [{"role": "system", "content": "sys"}]
+    hist.append({"role": "user", "content": "Tune the wakeword engine"})
+    for i in range(cap + 30):
+        hist.append({"role": "user", "content": f"Executed: cmd{i}\nResult:\nr{i}"})
+        hist.append({"role": "assistant", "content": f"ok {i}"})
+    assert len(hist) > cap
+    # replicate the end-of-turn cap logic's core: refresher must retain the task
+    keep = cap - 1
+    summary = prism32._build_context_refresher(hist, keep_count=keep)
+    assert "Tune the wakeword engine" in summary
+
+
+# ── compress_tool_turns predicate ────────────────────────────────
+
+def test_compress_leaves_real_user_messages():
+    long_paste = "Result: " + ("x" * 800)  # user pasted a log mentioning 'Result:'
+    msgs = [{"role": "system", "content": "s"},
+            {"role": "user", "content": long_paste}]
+    out = prism32.compress_tool_turns(msgs, recent_keep=0)
+    assert out[1]["content"] == long_paste, "real user text must never be collapsed"
+
+
+def test_compress_collapses_executed_messages():
+    tool_msg = {"role": "user", "content": "Executed: cat big.log\nResult:\n" + "\n".join(f"line{i}" for i in range(60))}
+    filler = {"role": "assistant", "content": "ok"}
+    msgs = [{"role": "system", "content": "s"}, tool_msg, filler]
+    out = prism32.compress_tool_turns(msgs, recent_keep=1)
+    assert len(out[1]["content"]) < len(tool_msg["content"])
+    assert "trimmed" in out[1]["content"]
+
+
+# ── false-failure detection ─────────────────────────────────────
+
+def test_cmd_succeeded_zero_errors_is_success():
+    assert prism32._cmd_succeeded("PASS: 42 tests\n0 errors, 0 failures") is True
+    assert prism32._cmd_succeeded("no issues found in 3 files") is True
+
+
+def test_cmd_succeeded_real_failures():
+    assert prism32._cmd_succeeded("Traceback: ValueError\n1 failed") is False
+    assert prism32._cmd_succeeded("make: *** [all] Error 1") is False
+
+
+# ── event-log completion priority ────────────────────────────────
+
+def test_drain_events_completions_outrank_pulses():
+    _clear_events()
+    # More than 8 completions: the window must keep the OLDEST undelivered
+    # completion reachable (cursor goes back to it), never skip past it.
+    for i in range(10):
+        prism32._publish_agent_event("subagent", True, f"sa_done{i}", "task", "result")
+    for i in range(5):
+        prism32._publish_agent_event("pulse", True, f"sa_p{i}", "step", "")
+    try:
+        evs, nxt = _drain_agent_events(0)
+        kinds = [e["kind"] for e in evs]
+        assert len(evs) <= 8
+        assert all(k == "subagent" for k in kinds), "backlog: completions outrank pulses"
+        ids = [e["id"] for e in evs]
+        assert ids == [f"sa_done{i}" for i in range(8)], "FIFO: oldest completions deliver first"
+        # second drain delivers the remaining 2
+        evs2, nxt2 = _drain_agent_events(nxt)
+        ids2 = [e["id"] for e in evs2 if e["kind"] == "subagent"]
+        assert ids2 == ["sa_done8", "sa_done9"], "every completion must eventually deliver"
+    finally:
+        _clear_events()
+
+
+# ── quantum bookkeeping filter ───────────────────────────────────
+
+def test_quantum_bookkeeping_keys_filtered():
+    assert prism32._is_quantum_bookkeeping("subagent_sa_1_spawned") is True
+    assert prism32._is_quantum_bookkeeping("subagent_sa_1_status") is True
+    assert prism32._is_quantum_bookkeeping("subagent_sa_1_task") is True
+    assert prism32._is_quantum_bookkeeping("bg_bg_0_cmd") is True
+    assert prism32._is_quantum_bookkeeping("subagent_sa_1_result") is False
+    assert prism32._is_quantum_bookkeeping("my_shared_finding") is False
+
+
+# ── result cap disclosure ─────────────────────────────────────────
+
+def test_cap_result_discloses_skipped_volume():
+    result = "HEAD\n" + "x" * 3000 + "\nTAIL"
+    capped = prism32._cap_result_for_model(result)
+    assert "HEAD" in capped and "TAIL" in capped
+    import re as _re
+    m = _re.search(r'\[... (\d+) chars in the middle truncated', capped)
+    assert m and int(m.group(1)) > 1000, "marker must disclose the skipped size"
+
+
 # ── swarm pause (Ctrl+P) ─────────────────────────────────────────
 
 def test_pause_gate_blocks_until_resumed():
