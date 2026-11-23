@@ -232,8 +232,11 @@ def test_sleep_capped_while_subagents_run():
     try:
         cap = _maybe_cap_sleep("sleep 480")
         assert cap is not None
-        assert cap[0] == "sleep 30"
+        assert cap[0] == "sleep 300"
         assert "capped" in cap[1] and "/wait" in cap[1]
+        # A 90s external-process wait is LEGIT work — must NOT be capped
+        # (timers audit 2026-11: the old 30s cap cut service-restart waits).
+        assert _maybe_cap_sleep("sleep 90") is None
     finally:
         _clear_subagents()
 
@@ -584,6 +587,71 @@ def test_quantum_bookkeeping_keys_filtered():
     assert prism32._is_quantum_bookkeeping("bg_bg_0_cmd") is True
     assert prism32._is_quantum_bookkeeping("subagent_sa_1_result") is False
     assert prism32._is_quantum_bookkeeping("my_shared_finding") is False
+
+
+# ── interruptor relaxation (timers audit) ─────────────────────────
+
+def test_repeat_guard_changing_output_is_progress():
+    g = _RepeatGuard()
+    for i in range(10):
+        g.note("adb shell getprop sys.boot_completed")
+        g.observe("adb shell getprop sys.boot_completed", f"output-{i}")
+        assert g.count == 1, "changing output must reset the count"
+
+
+def test_repeat_guard_identical_output_climbs():
+    g = _RepeatGuard()
+    for i in range(5):
+        rc = g.note("cat /tmp/lock")
+        g.observe("cat /tmp/lock", "same-output")
+    assert rc == 5, "identical command + identical output must still trip"
+
+
+def test_bg_job_timeout_floor():
+    job = BackgroundJob("echo long-build")
+    assert job.timeout >= 1800, "bg jobs are the long ones — 30min floor"
+
+
+def test_bg_timeout_override():
+    job = BackgroundJob("echo x", timeout=42)
+    assert job.timeout == 42
+
+
+def test_mission_budget_config():
+    assert prism32.Config.MISSION_MAX_STEPS >= 1
+    old = prism32.Config.MISSION_MAX_STEPS
+    prism32.Config.MISSION_MAX_STEPS = 60
+    assert prism32.Config.MISSION_MAX_STEPS == 60
+    prism32.Config.MISSION_MAX_STEPS = old
+
+
+def _run_cmd_threaded(cmd, timeout):
+    """Run run_cmd from a non-main thread so it takes the Popen+select path
+    (the main-thread/no-tty path is a plain subprocess.run fallback)."""
+    box = {}
+
+    def _w():
+        box['r'] = prism32.run_cmd(cmd, timeout=timeout)
+
+    th = threading.Thread(target=_w, daemon=True)
+    th.start()
+    th.join(20)
+    return box.get('r', '')
+
+
+def test_run_cmd_idle_based_timeout_lets_streamers_live():
+    # Streams every 0.3s for ~1.8s total with a 1s timeout: the old
+    # total-wall deadline killed it at 1s; the idle deadline must let it
+    # finish (timers audit 2026-11 — long builds were dying mid-work).
+    out = _run_cmd_threaded("for i in 1 2 3 4 5 6; do echo tick$i; sleep 0.3; done", 1)
+    assert "tick6" in out, f"streaming command must not be killed by idle timeout: {out[:80]!r}"
+
+
+def test_run_cmd_silent_command_still_dies():
+    t0 = time.time()
+    out = _run_cmd_threaded("sleep 8", 1)
+    assert time.time() - t0 < 5, "a silent command must still be killed at the idle deadline"
+    assert "[TIMEOUT]" in out and "silent" in out, out[:120]
 
 
 # ── result cap disclosure ─────────────────────────────────────────

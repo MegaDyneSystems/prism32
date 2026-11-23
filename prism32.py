@@ -128,12 +128,20 @@ class CommandRegistry:
             return True
         return False
 
-    def dispatch_capture(self, name, args_str):
-        """Dispatch a command and return its output as a string (for AI use)."""
+    def dispatch_capture(self, name, args_str, history=None, cmd_log=None):
+        """Dispatch a command and return its output as a string (for AI use).
+        history/cmd_log pass the caller's real conversation/command state to
+        the handler (the /extend contract promises (args_str, history,
+        cmd_log)); None keeps the old throwaway-empty-list behavior for
+        external API callers."""
         import io
         cmd = self.get(name)
         if not cmd:
             return None
+        if history is None:
+            history = []
+        if cmd_log is None:
+            cmd_log = []
         # Serialize the stdout swap: two concurrent captures (subagent
         # threads) used to restore each other's stdout and corrupt both
         # results. Foreign prints during the window are cosmetic noise;
@@ -143,7 +151,7 @@ class CommandRegistry:
             captured = io.StringIO()
             sys.stdout = captured
             try:
-                cmd.handler(args_str, [], [])
+                cmd.handler(args_str, history, cmd_log)
                 result = captured.getvalue()
             finally:
                 sys.stdout = old_stdout
@@ -643,9 +651,11 @@ def _fetch_api_pricing():
                     except (ValueError, TypeError):
                         pass
         if _API_PRICING_CACHE:
-            with stdout_lock:
-                t = T()
-                print(f"  {t['dim']}Cached {len(_API_PRICING_CACHE)} model prices from API{RST}")
+            # Daemon-thread context (boot): a print here lands seconds after
+            # boot while the operator is at the readline prompt and splits
+            # the prompt/footer line. Informational only — debug_log, never
+            # the terminal.
+            debug_log(f"Cached {len(_API_PRICING_CACHE)} model prices from API")
     except Exception:
         pass  # silently fall back to hardcoded pricing
 
@@ -1561,7 +1571,7 @@ def plugin_cheat_sheet_text():
 
     Available PluginAPI:
     - api.registry.register(name, handler, aliases=[], description="", category="", hidden=False)
-    - api.registry.dispatch_capture(name, args_str) -> str or None
+    - api.registry.dispatch_capture(name, args_str, history=None, cmd_log=None) -> str or None
     - api.register_provider(id, **config)
     - api.register_theme(name, **colors)
     - api.config: runtime config class
@@ -2442,9 +2452,12 @@ def automation_execute(auto_id):
     if not auto or auto["status"] != "active":
         return
     
-    with stdout_lock:
-        t = T()
-        print(f"\n {t['bright']}[AUTO] Executing: {auto['description']}{RST}")
+    # Scheduler/timer-thread context: a print here fires while the operator
+    # may be idle at the readline prompt and splits the prompt line (same
+    # garble class as the boot pricing message). /automation run already
+    # announced the run on the main thread; the record (last_run/last_result)
+    # and debug.log keep the audit trail.
+    debug_log(f"[AUTO] Executing: {auto['description']}")
     
     sa = SubAgent(auto["task"], max_steps=Config.GOAL_MAX_STEPS)
     sa.run()
@@ -2454,11 +2467,17 @@ def automation_execute(auto_id):
         return
     auto["last_run"] = time.time()
     auto["last_result"] = (sa.result or "")[:500]
-    auto["last_success"] = sa.result is not None
+    # A subagent that ended by ASKING A QUESTION is not a success — the old
+    # check recorded it as one and oneshot automations silently 'completed'
+    # (timers audit 2026-11).
+    _needs_input = str(sa.result or "").startswith("[SUBAGENT NEEDS INPUT]")
+    auto["last_success"] = sa.result is not None and not _needs_input
+    if _needs_input:
+        debug_log(f"[AUTO] {auto['description']} ended needing input — recorded as not-successful", "WARN")
     auto["run_count"] = auto.get("run_count", 0) + 1
     history_entry = {
         "timestamp": datetime.now().isoformat(),
-        "success": sa.result is not None,
+        "success": sa.result is not None and not _needs_input,
         "snippet": (sa.result or "")[:200],
     }
     auto.setdefault("history", []).append(history_entry)
@@ -2469,11 +2488,10 @@ def automation_execute(auto_id):
     _automation_next_run(auto)
     automation_save(auto)
     
-    with stdout_lock:
-        if sa.result:
-            print(f" {t['ok']}[AUTO] Completed: {auto['description']}{RST}")
-        else:
-            print(f" {t['err']}[AUTO] Failed: {auto['description']}{RST}")
+    if sa.result:
+        debug_log(f"[AUTO] Completed: {auto['description']}")
+    else:
+        debug_log(f"[AUTO] Failed: {auto['description']}", "WARN")
 
 def _automation_scheduler_loop():
     """Daemon thread: check for due automations every 30s + cleanup."""
@@ -4372,6 +4390,10 @@ class Config:
     # (3600s, for queued flex tiers) let one pathological subagent step
     # stall for hours; subagents get a tight bound instead.
     SUBAGENT_AI_TIMEOUT = 300
+    # Per-todo mission shard budget. Default 25; raise with
+    # /maxsteps mission <n> when device-automation shards legitimately
+    # need more steps (the old hardcoded ceiling marked them failed).
+    MISSION_MAX_STEPS = 25
     ROOT_PASS = ""  # root password for su/sudo commands (auto-fed via pty; $ROOT_PASS env)
     STREAM = True  # live streaming of AI responses (default ON; /stream off or --slow-cpu to disable)
     NATIVE_TOOLS = os.environ.get("PRISM32_NATIVE_TOOLS", "1").lower() not in ("0", "false", "no", "off")
@@ -4454,6 +4476,7 @@ class Config:
                 "max_concurrent_subagents": cls.MAX_CONCURRENT_SUBAGENTS,
                 "subagent_context_tokens": cls.SUBAGENT_CONTEXT_TOKENS,
                 "subagent_ai_timeout": cls.SUBAGENT_AI_TIMEOUT,
+                "mission_max_steps": cls.MISSION_MAX_STEPS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
                 "stream": cls.STREAM,
                 "slow_cpu": cls.SLOW_CPU,
@@ -4680,6 +4703,8 @@ class Config:
                 cls.SUBAGENT_CONTEXT_TOKENS = max(4096, _tolerant_int(data["subagent_context_tokens"], cls.SUBAGENT_CONTEXT_TOKENS))
             if "subagent_ai_timeout" in data:
                 cls.SUBAGENT_AI_TIMEOUT = max(30, _tolerant_int(data["subagent_ai_timeout"], cls.SUBAGENT_AI_TIMEOUT))
+            if "mission_max_steps" in data:
+                cls.MISSION_MAX_STEPS = max(1, _tolerant_int(data["mission_max_steps"], cls.MISSION_MAX_STEPS))
             if "root_pass" in data: cls.ROOT_PASS = data["root_pass"]
             if "agent_name" in data: cls.AGENT_NAME = data["agent_name"]
             if "custom_arch_map" in data and isinstance(data["custom_arch_map"], dict):
@@ -6462,7 +6487,10 @@ class ToolVisualizer:
             "load": f"{t['primary']}\U0001f4c2{RST}"
         }
         icon = icons.get(msg_type, icons["info"])
-        print(f" {icon} {message}")
+        # stdout_lock (an RLock): concurrent subagent/monitor threads call
+        # status() — without it their lines interleave mid-print.
+        with stdout_lock:
+            print(f" {icon} {message}")
 
 # ── Animated Spinner Thread ─────────────────────────────────
 
@@ -7293,7 +7321,11 @@ class BackgroundJob:
             self.id = f"bg_{_next_bg_id}"
             _next_bg_id += 1
         self.cmd = (cmd or '').strip()
-        self.timeout = timeout or Config.CMD_TIMEOUT
+        # Background jobs are BY DEFINITION the long ones (builds, pulls,
+        # flashes) — the old default of CMD_TIMEOUT (600s) killed them
+        # mid-work. 30 min floor; run_cmd's idle-based deadline makes a
+        # streaming job effectively unbounded anyway.
+        self.timeout = timeout or max(Config.CMD_TIMEOUT, 1800)
         self.result = None
         self.error = None
         self.done = False
@@ -7821,9 +7853,17 @@ def _try_plugin_cmd(c, history=None, who=None):
                 for jid, job in list(_BG_JOBS.items()):
                     lines.append(f"  {job.status_str()}")
                 return "\n".join(lines)
-        job = BackgroundJob(cmd)
+        # Optional per-job bound: '/bg <cmd> --timeout 7200' (idle-based —
+        # output keeps it alive, silence kills it).
+        _bg_timeout = None
+        _m = re.search(r'\s+--timeout\s+(\d+)\s*$', cmd)
+        if _m:
+            _bg_timeout = max(1, int(_m.group(1)))
+            cmd = cmd[:_m.start()].rstrip()
+        job = BackgroundJob(cmd, timeout=_bg_timeout)
         job.start()
-        return (f"[Background job {job.id} started: {cmd[:120]}]\n"
+        return (f"[Background job {job.id} started: {cmd[:120]}\n"
+                f"Timeout: silence for {job.timeout}s (output resets the clock).]\n"
                 f"Keep working — you will be NOTIFIED with the result when it finishes "
                 f"(no sleeping needed). Check /bg for status, /wait {job.id} to block until done.")
     if cmd_name in ('/bgs', 'bgs'):
@@ -7877,7 +7917,10 @@ def _try_plugin_cmd(c, history=None, who=None):
             return "\n".join(lines)
     reg_name = cmd_name[1:] if cmd_name.startswith('/') else cmd_name
     if registry.get(reg_name):
-        return registry.dispatch_capture(reg_name, cmd_args)
+        # Pass the real history through: plugins called from execute
+        # blocks used to get throwaway [] lists while the /extend
+        # contract promises (args_str, history, cmd_log).
+        return registry.dispatch_capture(reg_name, cmd_args, history=history)
     return None
 
 def _tail_cmd_output(out):
@@ -7901,6 +7944,12 @@ def _cap_result_for_model(result):
     marker = (f"\n[... {skipped} chars in the middle truncated — re-run with "
               f"grep/head/tail/cat if you need the omitted part ...]\n")
     return head + marker + tail
+
+def _result_digest(result):
+    """Cheap identity probe for RepeatGuard.observe(): a command whose
+    output keeps changing is making progress, not looping."""
+    r = result or ''
+    return (len(r), r[:120], r[-60:] if len(r) > 180 else '')
 
 def _terminate_process(proc, use_killpg=True):
     try:
@@ -7971,13 +8020,15 @@ def _maybe_cap_sleep(cmd):
     if not m:
         return None
     secs = float(m.group(1)) * _SLEEP_UNITS.get(m.group(2).lower(), 1.0)
-    if secs <= 30:
+    if secs <= 300:
         return None
-    note = (f"[PRISM32] sleep capped from {int(secs)}s to 30s — subagents are "
-            f"running. Do NOT sleep-poll: use `/wait` as a bare execute block "
-            f"(optionally /wait <id> --timeout <sec>) to block until they "
-            f"finish; you are notified automatically on completion.")
-    return "sleep 30", note
+    note = (f"[PRISM32] sleep capped from {int(secs)}s to 300s — subagents are "
+            f"running. Do NOT sleep-poll Prism32 work: use `/wait` as a bare "
+            f"execute block (optionally /wait <id>) to block until subagents/"
+            f"background jobs finish — you are notified automatically on "
+            f"completion. A bounded sleep for EXTERNAL processes (service "
+            f"restarts, reboots) is fine and uncapped up to 300s.")
+    return "sleep 300", note
 
 def run_cmd(cmd, timeout=None):
     global _INTERJECTION_RESULT
@@ -8006,10 +8057,16 @@ def run_cmd(cmd, timeout=None):
         # any non-main POSIX thread so subagents can be cancelled mid-command.
         can_poll_cancel = use_interjection or (not is_main and os.name == 'posix' and select is not None)
 
-        if can_poll_cancel and is_main:
+        if can_poll_cancel:
+            # (was `and is_main` — subagent threads fell to the raw
+            # subprocess.run fallback with a TOTAL-wall timeout: long
+            # streaming builds inside subagents were killed mid-work at
+            # exactly CMD_TIMEOUT. The Popen path's inner guards are already
+            # is_main-scoped; timers audit 2026-11.)
             # Only the main thread may clear a pending cancel — a subagent
             # clearing it wipes the operator's Escape for the main agent.
-            clear_agent_cancel()
+            if is_main:
+                clear_agent_cancel()
             out = bytearray()
             popen_kwargs = {
                 "shell": True,
@@ -8023,7 +8080,13 @@ def run_cmd(cmd, timeout=None):
             if os.name == 'posix' and is_main:
                 popen_kwargs["start_new_session"] = True
             proc = subprocess.Popen(cmd, **popen_kwargs)
-            deadline = time.time() + timeout
+            _start_t = time.time()
+            deadline = _start_t + timeout
+            # Runaway ceiling: idle-based timeouts make a chatty build
+            # effectively unbounded; this bounds total wall time at 4x
+            # the configured timeout (>= 1h) so a degenerate infinite
+            # streamer still dies.
+            _hard_ceiling = _start_t + max(timeout * 4, 3600)
             if use_interjection:
                 _interjection_start()
             if is_main:
@@ -8062,6 +8125,14 @@ def run_cmd(cmd, timeout=None):
                         data = os.read(proc.stdout.fileno(), 4096)
                         if data:
                             out.extend(data)
+                            # IDLE-based timeout (timers audit 2026-11): a
+                            # healthy streaming build is effectively unbounded
+                            # — the old total-wall deadline killed `make -j`,
+                            # docker pulls and adb flashes at exactly 600s
+                            # mid-work. The deadline now resets on every byte;
+                            # only a command that goes SILENT for the timeout
+                            # (or hits the 4x runaway ceiling) is killed.
+                            deadline = time.time() + timeout
 
                     if proc.poll() is not None:
                         if proc.stdout is not None:
@@ -8074,11 +8145,13 @@ def run_cmd(cmd, timeout=None):
                                     break
                                 out.extend(data)
                         break
-                    if time.time() > deadline:
+                    if time.time() > deadline or time.time() > _hard_ceiling:
                         _terminate_process(proc, use_killpg=is_main)
                         output = _tail_cmd_output(out)
                         suffix = ("\n" + output) if output else ""
-                        return f"[TIMEOUT] Command exceeded {timeout}s{suffix}"
+                        _why = "went silent for" if time.time() > deadline else "hit the hard ceiling of"
+                        _lim = timeout if time.time() > deadline else (_hard_ceiling - _start_t)
+                        return f"[TIMEOUT] Command {_why} {_lim}s{suffix}"
             finally:
                 if is_main:
                     _footer_animate_stop()
@@ -8261,13 +8334,15 @@ _MAIN_REPEAT_GUARD = None  # created in main(); reset per user turn
 class _RepeatGuard:
     """Breaks degenerate agent loops: the same execute-block command,
     re-emitted unchanged round after round, must not burn the entire
-    step budget (RL training surfaces this constantly). Nudges after
-    NUDGE_AT identical runs, force-stops the agent after STOP_AT.
+    step budget. Nudges after NUDGE_AT identical runs, force-stops after
+    STOP_AT.
 
     Session forensics (2026-11): the exact-match form never fired —
     the model varied `sleep 480; /subagents` into `sleep 540; /subagents`
     and polled for 13+ hours. Numbers are now normalized before
-    comparing, so only the argument VALUES may differ."""
+    comparing, so only the argument VALUES may differ. observe() further
+    resets the count when the identical command's OUTPUT changes (timers
+    audit 2026-11) — changing output is progress, not a loop."""
     NUDGE_AT = 3
     STOP_AT = 5
 
@@ -8276,10 +8351,12 @@ class _RepeatGuard:
     def __init__(self):
         self.last = None
         self.count = 0
+        self.last_digest = None
 
     def reset(self):
         self.last = None
         self.count = 0
+        self.last_digest = None
 
     @classmethod
     def normalize(cls, cmd):
@@ -8296,7 +8373,21 @@ class _RepeatGuard:
         else:
             self.last = key
             self.count = 1
+            self.last_digest = None
         return self.count
+
+    def observe(self, cmd, result_digest):
+        """Post-execution result tracking (timers audit 2026-11): when the
+        identical command produces CHANGING output, reset the counter —
+        that is progress (a device booting, a deploy flipping state),
+        not a runaway loop. Only identical-command-with-identical-output
+        climbs toward STOP_AT."""
+        if result_digest is None:
+            return
+        if self.normalize(cmd) == self.last:
+            if result_digest != self.last_digest:
+                self.count = 1
+            self.last_digest = result_digest
 
 
 # Regex for "agent command shell-wrapped" detection: /quantum et al. passed
@@ -8438,9 +8529,16 @@ class SubAgent:
                 with stdout_lock:
                     t2 = T()
                     print(f"  {t2['dim']}[{self.id}] Step {self._step}/{self.max_steps}{RST}")
+                # Flex/priority-tier models legally queue >5 min before their
+                # first byte — a flat 300s cut them mid-task (timers audit
+                # 2026-11). Adapt: flex-tier subagents inherit the main
+                # AI_TIMEOUT (3600s); fast tiers keep the tight bound.
+                _sa_timeout = Config.SUBAGENT_AI_TIMEOUT
+                if "flex" in (self.model or "").lower():
+                    _sa_timeout = max(Config.SUBAGENT_AI_TIMEOUT, Config.AI_TIMEOUT)
                 resp = ask_ai(self._history, stream=False,
                               api_base=_api_base, api_key=_api_key, model=_model,
-                              timeout=Config.SUBAGENT_AI_TIMEOUT)
+                              timeout=_sa_timeout)
                 if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
                     self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
                     self.error = agent_cancel_message()
@@ -8537,13 +8635,17 @@ class SubAgent:
                         else:
                             result = run_cmd(c)
                         result = _shell_wrap_hint(result, c)
+                        # Changing output on an identical command = progress,
+                        # not a loop — resets the repeat counter.
+                        self._repeat_guard.observe(c, _result_digest(result))
                         success = _cmd_succeeded(result)
                         cmd_result(c, result, success)
                         msg = f"Executed: {c}\nResult:\n{_cap_result_for_model(result)}"
                         continuation = f"Command succeeded={success}. Continue with task or give final answer."
                         if _rc >= _RepeatGuard.NUDGE_AT:
                             continuation = (f"Command succeeded={success}. You have run this IDENTICAL "
-                                            f"command {_rc} times — do NOT repeat it. Give your final answer now.")
+                                            f"command {_rc} times with the same output — do NOT repeat it. "
+                                            "Continue with a different command, or report your current status.")
                         elif was_healed:
                             continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
                         self._history.append({"role": "user", "content": f"{msg}\n\n{continuation}"})
@@ -9103,13 +9205,19 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
                         viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
                         continue
                     if _sr == RESPONSE_BUDGET_EXHAUSTED:
-                        # Second exhaustion: operator-actionable error (same
-                        # wording as the OpenAI-compat path) — the raw
-                        # sentinel used to leak into the conversation as if
-                        # it were the model's reply.
+                        # Second exhaustion (timers audit 2026-11): one more
+                        # escalation to the 65536 cap before failing — a
+                        # reasoning-heavy model burning 32K on thinking is
+                        # mid-task, not broken; ending the turn here abandoned
+                        # real work.
+                        _mt = payload.get("max_tokens", Config.MAX_RESPONSE_TOKENS)
+                        if _mt < 65536:
+                            payload["max_tokens"] = 65536
+                            viz.status("Budget exhausted twice — final retry with max_tokens=65536", "warning")
+                            continue
                         return (f"[ERROR] The model exhausted its entire response budget "
-                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
-                                f"without producing output twice. Raise it: /maxtokens 32768")
+                                f"(max_tokens={_mt}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 65536")
                     return _sr
                 data = json.loads(resp.read().decode())
                 if agent_cancel_requested(cancel_event):
@@ -9337,9 +9445,18 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                         viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
                         continue
                     if _sr == RESPONSE_BUDGET_EXHAUSTED:
+                        # Second exhaustion (timers audit 2026-11): escalate
+                        # once more to the 65536 cap before failing —
+                        # reasoning-heavy models burn mid-task, and breaking
+                        # here abandoned real work.
+                        _mt = payload.get("max_tokens", Config.MAX_RESPONSE_TOKENS)
+                        if _mt < 65536:
+                            payload["max_tokens"] = 65536
+                            viz.status("Budget exhausted twice — final retry with max_tokens=65536", "warning")
+                            continue
                         return (f"[ERROR] The model exhausted its entire response budget "
-                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
-                                f"without producing output twice. Raise it: /maxtokens 32768")
+                                f"(max_tokens={_mt}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 65536")
                     if (budget_scaled and _sr
                             and not _sr.startswith(('[ERROR', '[CANCELLED', '[HTTP ERROR', '[NETWORK ERROR'))):
                         # Recovery worked — keep the larger budget for the rest
@@ -9373,9 +9490,16 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                             payload["max_tokens"] = max(_prev_mt, min(65536, _prev_mt * 4))
                             viz.status("Model spent its budget on reasoning — retrying with a larger budget", "warning")
                             continue
+                        # Second exhaustion: escalate to the 65536 cap before
+                        # failing (timers audit 2026-11 — mid-task abandonment).
+                        _mt = payload.get("max_tokens", Config.MAX_RESPONSE_TOKENS)
+                        if _mt < 65536:
+                            payload["max_tokens"] = 65536
+                            viz.status("Budget exhausted twice — final retry with max_tokens=65536", "warning")
+                            continue
                         return (f"[ERROR] The model exhausted its entire response budget "
-                                f"(max_tokens={payload.get('max_tokens', Config.MAX_RESPONSE_TOKENS)}) on reasoning "
-                                f"without producing output twice. Raise it: /maxtokens 32768")
+                                f"(max_tokens={_mt}) on reasoning "
+                                f"without producing output twice. Raise it: /maxtokens 65536")
                     if (budget_scaled and content
                             and threading.current_thread() is threading.main_thread()):
                         Config.MAX_RESPONSE_TOKENS = payload["max_tokens"]
@@ -9405,8 +9529,24 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             else:
                 last_error = f"[HTTP ERROR {e.code}] {body}"
             if e.code in (400, 413, 429, 503) and attempt < retry:
+                # Honor Retry-After when the provider sends it (timers audit
+                # 2026-11): flex tiers answer over-quota with minutes-long
+                # windows; a 2s re-hit just burns the attempts.
                 delay = base_delay * (2 ** attempt)
-                viz.status(f"API error {e.code}, retrying in {delay}s...", "warning")
+                if e.code in (429, 503):
+                    _ra = None
+                    try:
+                        _ra = e.headers.get('Retry-After') or e.headers.get('retry-after')
+                    except Exception:
+                        pass
+                    if _ra:
+                        try:
+                            delay = max(delay, min(float(_ra), 120.0))
+                        except (ValueError, TypeError):
+                            pass
+                    if delay < 30:
+                        delay = 30
+                viz.status(f"API error {e.code}, retrying in {int(delay)}s...", "warning")
                 _end_t = time.time() + delay
                 while time.time() < _end_t:
                     if agent_cancel_requested(cancel_event):
@@ -9888,8 +10028,9 @@ def build_context():
         pass
     
     # List available plugin commands that the AI can invoke via execute blocks
+    # (hidden commands are deliberately not advertised to the model)
     plugin_cmds = [cmd.name for cmd in registry.all()
-                   if cmd.name not in ("help", "quit", "goal")]
+                   if cmd.name not in ("help", "quit", "goal") and not cmd.hidden]
     plugin_block = ""
     if plugin_cmds:
         plugin_block = f"\nAvailable plugin commands (use in ```execute blocks): {', '.join(sorted(plugin_cmds))}\n"
@@ -9919,12 +10060,15 @@ def ask_user(question):
         set_scroll_region()
     return answer
 
+_LAST_ASK_ALL_EMPTY = False  # set by handle_ask_blocks: every answer empty (stdin EOF?)
+
 def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_asked=False):
+    global _LAST_ASK_ALL_EMPTY
     t = T()
     questions = extract_blocks(resp, 'ask')
     if not questions:
         return (resp, False) if return_asked else resp
-    
+
     if goal_mode or not allow_input:
         # In missions, don't ask questions - strip them and continue
         cleaned = clean_ask_blocks(resp)
@@ -9938,11 +10082,17 @@ def handle_ask_blocks(resp, history, goal_mode=False, allow_input=True, return_a
         if goal_mode:
             viz.status("Stripped question blocks in mission mode", "warning")
         return (cleaned, True) if return_asked else cleaned
-    
+
+    # Interactive: the asks-cap must count only UNANSWERED rounds (timers
+    # audit 2026-11) — a human answering 5+ legit questions in one turn
+    # used to hit the "AI KEEPS ASKING" break mid-intake.
+    _answers = []
     for q in questions:
         answer = ask_user(q.strip())
+        _answers.append((answer or "").strip())
         history.append({"role": "assistant", "content": f"[User was asked]: {q.strip()}"})
         history.append({"role": "user", "content": f"[User answered]: {answer}"})
+    _LAST_ASK_ALL_EMPTY = all(not a for a in _answers)
     cleaned = clean_ask_blocks(resp)
     return (cleaned, True) if return_asked else cleaned
 
@@ -10297,8 +10447,13 @@ def _mission_monitor(mission):
                 if not mission.paused:
                     for todo in mission.next_ready():
                         todo.state = "running"
+                        # Per-todo shard budget (default 25) — the old
+                        # min(GOAL_MAX_STEPS, 25) made 25 an unraisable
+                        # ceiling: device-automation shards needing 40 steps
+                        # died and were marked failed (timers audit 2026-11).
+                        # Operator knob: /maxsteps mission <n>.
                         sa = SubAgent(mission.step_prompt(todo),
-                                      max_steps=min(Config.GOAL_MAX_STEPS, Mission.MAX_TODO_STEPS))
+                                      max_steps=Config.MISSION_MAX_STEPS)
                         todo.shard = sa
                         sa.run_async(quiet=True)
                         with stdout_lock:
@@ -10373,6 +10528,22 @@ def mission_take(goal, wait=False):
 def get_cmd_help():
     bold = "\x1b[1m"
     reset = "\x1b[0m"
+    # Plugin Commands: operator discovery for loaded plugin commands.
+    # Built-ins (help/quit/goal) are documented above; hidden commands
+    # are deliberately excluded.
+    plugin_cmds = [cmd for cmd in registry.all()
+                   if cmd.name not in ("help", "quit", "goal") and not cmd.hidden]
+    plugin_section = ""
+    if plugin_cmds:
+        plugin_lines = []
+        for cmd in sorted(plugin_cmds, key=lambda c: c.name):
+            pad = " " * max(1, 20 - len(cmd.name))
+            desc = cmd.description or ""
+            if len(desc) > 62:
+                desc = desc[:59] + "..."
+            plugin_lines.append(f"    /{cmd.name}{pad}{desc}")
+        plugin_section = ("\n {bold}Plugin Commands{reset}\n"
+                           + "\n".join(plugin_lines) + "\n")
     return f"""{bold}== Prism32 by MegaDyne Systems (MDS) =={reset}
  All commands require the / prefix.
 
@@ -10497,8 +10668,7 @@ def get_cmd_help():
     /shard complete      Mark promptshard as done
     /shard reset         Reset to active
     /shard set <k>:<v>   Update a promptshard field
-    /shard secrets       Manage secrets vault
-    """
+    /shard secrets       Manage secrets vault{plugin_section}    """
 
 
  
@@ -11247,7 +11417,17 @@ def main():
 
 
         # ── Plugin command dispatch ─────────────────────────────
-        if is_slash and registry.dispatch(cmd, args_str, history, cmd_log):
+        # Guarded: an exception in a plugin handler must not kill the
+        # whole REPL (it used to propagate out of main() and end the
+        # session). registry.get() first so a raising handler does not
+        # fall through to the built-in path below.
+        if is_slash and registry.get(cmd):
+            try:
+                registry.dispatch(cmd, args_str, history, cmd_log)
+            except (KeyboardInterrupt, SystemExit):
+                raise
+            except Exception as e:
+                viz.status(f"Plugin {cmd} error: {e}", "error")
             learn_command(cmd, success=True, duration=0)
             _PluginHooks.fire_command(cmd, args_str, None)
             save_current_session(history, cmd_log)
@@ -12125,6 +12305,28 @@ def main():
             continue
 
         if cmd == 'aitimeout':
+            parts_a = args_str.split()
+            if parts_a and parts_a[0].lower() in ('sub', 'subagents', 'subagent'):
+                # Per-request timeout for /spawn & /delegate model calls.
+                # Flex-tier subagent models automatically inherit the main
+                # AI_TIMEOUT (they queue for minutes); this sets the floor
+                # for fast-tier subagents.
+                if len(parts_a) > 1:
+                    try:
+                        val = int(parts_a[1])
+                        if val >= 30:
+                            Config.SUBAGENT_AI_TIMEOUT = val
+                            Config.save_config()
+                            print(f"  {t['bright']}+ Subagent AI timeout set to: {val}s{RST}")
+                        else:
+                            print(f"  {t['dim']}Must be >= 30 seconds{RST}")
+                    except ValueError:
+                        print(f"  {t['dim']}Usage: aitimeout sub <seconds>{RST}")
+                else:
+                    print(f"  Subagent AI timeout: {t['bright']}{Config.SUBAGENT_AI_TIMEOUT}s{RST} "
+                          f"(flex-tier subagent models use {Config.AI_TIMEOUT}s)")
+                print()
+                continue
             if args_str:
                 try:
                     val = int(args_str)
@@ -12140,7 +12342,7 @@ def main():
                 print(f"  AI request timeout: {t['bright']}{Config.AI_TIMEOUT}s{RST}")
                 print(f"  {t['dim']}How long to wait for a model response before giving up.{RST}")
                 print(f"  {t['dim']}Raise it for flex/priority-tier models that queue (default 3600s).{RST}")
-                print(f"  {t['dim']}Usage: aitimeout <seconds>{RST}")
+                print(f"  {t['dim']}Subagent calls: aitimeout sub <seconds> (flex subagents inherit the main timeout){RST}")
             print()
             continue
 
@@ -12295,6 +12497,24 @@ def main():
 
         if cmd in ('maxsteps', 'max-steps'):
             parts = args_str.split()
+            if parts and parts[0].lower() in ('mission', 'missions', 'shard', 'shards'):
+                # Per-todo mission shard budget (default 25). The old
+                # hardcoded ceiling marked 40-step device shards failed.
+                if len(parts) > 1:
+                    try:
+                        val = int(parts[1])
+                        if val >= 1:
+                            Config.MISSION_MAX_STEPS = val
+                            Config.save_config()
+                            print(f"  {t['bright']}+ Mission shard max steps set to: {val}{RST}")
+                        else:
+                            print(f"  {t['dim']}Must be >= 1{RST}")
+                    except ValueError:
+                        print(f"  {t['dim']}Usage: maxsteps mission <count>{RST}")
+                else:
+                    print(f"  Mission shard max steps: {t['bright']}{Config.MISSION_MAX_STEPS}{RST}")
+                print()
+                continue
             if parts and parts[0].lower() in ('sub', 'subagents', 'subagent'):
                 if len(parts) > 1:
                     try:
@@ -12999,12 +13219,53 @@ def main():
                             time.sleep(0.5)
                         if not _cancelled_during_wait:
                             continue  # resend — history/session intact
-                box("AI ERROR", resp or "No response from AI", "err")
-                if _fail == 'auth':
-                    print(f"  {T()['dim']}Tip: /provider key <key> sets it — or pick models/providers with /model{RST}")
-                elif _fail == 'empty':
-                    print(f"\n  {T()['warn']}No response from AI — press Enter to retry or type /quit to exit{RST}\n")
-                break
+                    if _fail == 'retry':
+                        # Transient provider failure (5xx/429/network) that
+                        # outlasted the ~4-minute ladder: ENDING THE TURN here
+                        # abandoned real work mid-task (timers audit 2026-11).
+                        # Extended park: keep retrying every 60s for up to 30
+                        # minutes, cancel-aware, visible — work continues when
+                        # the provider recovers.
+                        _park_end = time.time() + 1800
+                        _park_n = 0
+                        _recovered = False
+                        while time.time() < _park_end:
+                            if agent_cancel_requested():
+                                break
+                            _park_n += 1
+                            viz.status(f"Provider still failing — extended retry every 60s "
+                                       f"({_park_n}, ~{int((_park_end - time.time())/60)}min left; "
+                                       "Escape to stop)", "warning")
+                            _w_end = time.time() + 60
+                            while time.time() < _w_end:
+                                if agent_cancel_requested():
+                                    break
+                                time.sleep(0.5)
+                            if agent_cancel_requested():
+                                break
+                            resp = ask_ai(history)
+                            _fail2 = _ai_failure_kind(resp)
+                            if _fail2 is None:
+                                _recovered = True
+                                break
+                            if _fail2 in ('auth', 'budget'):
+                                break
+                        if _recovered:
+                            # Process the recovered response (no extra call)
+                            _fail = None
+                            ai_retries = 0
+                        else:
+                            box("AI ERROR", (resp or "No response from AI") +
+                                "\nProvider failed for 30+ minutes — turn ended. "
+                                "Your session is intact; send any message to resume.", "err")
+                            break
+                if _fail is not None:
+                    box("AI ERROR", resp or "No response from AI", "err")
+                    if _fail == 'auth':
+                        print(f"  {T()['dim']}Tip: /provider key <key> sets it — or pick models/providers with /model{RST}")
+                    elif _fail == 'empty':
+                        print(f"\n  {T()['warn']}No response from AI — press Enter to retry or type /quit to exit{RST}\n")
+                    break
 
             resp, asked = handle_ask_blocks(resp, history, return_asked=True)
             commands = extract_blocks(resp, 'execute')
@@ -13026,16 +13287,19 @@ def main():
                 if resp.strip():
                     history.append({"role": "assistant", "content": resp})
                 save_current_session(history, cmd_log)
-                # Cap consecutive asks: with stdin at EOF every answer comes
-                # back empty and the model re-asks forever (unbounded API
-                # loop). Give up after 4 unanswered questions.
-                asks += 1
-                if asks > 4:
-                    box("AI KEEPS ASKING",
-                        "The AI asked 4 questions in a row without receiving an answer "
-                        "(stdin may be closed). Ending this turn. Re-send your request "
-                        "or answer the questions in a normal interactive session.", "warn")
-                    break
+                # Cap consecutive UNANSWERED asks: with stdin at EOF every
+                # answer comes back empty and the model re-asks forever
+                # (unbounded API loop). A human actually answering 5+ legit
+                # questions must NOT hit this (timers audit 2026-11) — only
+                # rounds where every answer came back empty count.
+                if _LAST_ASK_ALL_EMPTY:
+                    asks += 1
+                    if asks > 4:
+                        box("AI KEEPS ASKING",
+                            "The AI asked 4 questions in a row without receiving an answer "
+                            "(stdin may be closed). Ending this turn. Re-send your request "
+                            "or answer the questions in a normal interactive session.", "warn")
+                        break
                 continue
 
             if commands:
@@ -13088,17 +13352,33 @@ def main():
                                            f"Executed: /wait (indefinite)\nResult:\n{_cap_result_for_model(_wr)}"})
                             continue
                         history.append({"role": "user", "content":
-                            "LOOP GUARD: you have run this identical command "
-                            f"{_rc} times. It will not run again. Give your final answer now."})
+                            "LOOP GUARD: this exact command will not run again "
+                            f"({_rc} identical runs, same output). Continue the task "
+                            "with a DIFFERENT command, or summarize your current "
+                            "status and results."})
                         loop_guard_tripped = True
                         break
                     viz.tool_call("execute", c)
-                    plugin_result = _try_plugin_cmd(c, history=history, who='main')
+                    # Guarded: a plugin handler exception used to propagate
+                    # out of main() via _try_plugin_cmd → dispatch_capture;
+                    # report it as a failed command instead and keep the
+                    # agent loop alive.
+                    _pc_name = c.split()[0].lstrip('/').lower() if c.split() else c
+                    try:
+                        plugin_result = _try_plugin_cmd(c, history=history, who='main')
+                    except (KeyboardInterrupt, SystemExit):
+                        raise
+                    except Exception as e:
+                        viz.status(f"Plugin {_pc_name} error: {e}", "error")
+                        plugin_result = f"Plugin {_pc_name} error: {e}"
                     if plugin_result is not None:
                         result = plugin_result.strip()
                     else:
                         result = run_cmd(c)
                         result = _shell_wrap_hint(result, c)
+                    # Changing output on an identical command = progress,
+                    # not a loop — resets the repeat counter.
+                    _MAIN_REPEAT_GUARD.observe(c, _result_digest(result))
                     command_cancelled = agent_cancel_requested() or (result or "").startswith("[CANCELLED]")
                     success = _cmd_succeeded(result)
                     viz.tool_result(success, result[:100])
@@ -13107,6 +13387,13 @@ def main():
 
                     exec_msg = f"Executed: {c}\nResult:\n{_cap_result_for_model(result)}"
                     continuation = "Command output above. Continue with your task or give final answer."
+                    if _rc >= _RepeatGuard.NUDGE_AT:
+                        # Soft pressure at 3 (main-loop parity with the
+                        # subagent loop; the old main loop's first notice
+                        # was the kill at 5).
+                        continuation = (f"Command succeeded={success}. You have run this IDENTICAL "
+                                        f"command {_rc} times with the same output — do NOT repeat it "
+                                        "again. Continue with a different command or give your final answer.")
                     if was_healed:
                         continuation += "\n\nNOTE: Use ```execute blocks for commands. Do not use native tool-call format."
                     if exec_msg.strip():
@@ -14213,7 +14500,9 @@ def cmd_image(args_str):
         if path.startswith(('http://', 'https://')):
             print(f"  {t['dim']}Downloading image...{RST}")
             req = urllib.request.Request(path, headers=PRISM32_DEFAULT_HEADERS)
-            with urlopen_with_ssl(req, timeout=30) as r:
+            # 120s: large photos over tethered/device networks died at 30s
+            # (timers audit 2026-11).
+            with urlopen_with_ssl(req, timeout=120) as r:
                 data = r.read()
             ext = os.path.splitext(path.split('?')[0])[1].lower()
         else:

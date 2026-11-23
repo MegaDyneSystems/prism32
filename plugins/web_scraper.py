@@ -8,6 +8,7 @@ import os
 import re
 import shlex
 import ssl
+import threading
 import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
@@ -496,24 +497,41 @@ def cmd_scrape(args_str, history, cmd_log):
         print(f"  \x1b[2mInjected up to {opts['context']} chars into AI context.\x1b[0m")
 
 
+_SCRAPE_CMD_RE = re.compile(r"/(?:scrape|web|crawl|fetch-url)\b", re.IGNORECASE)
+
+
 def on_message(api_ref, text):
     urls = _extract_urls(text)
-    if not urls or "/scrape" in (text or "").lower():
+    # Skip when the message itself runs a scrape-family command
+    # (/scrape /web /crawl /fetch-url) — the command does its own fetch,
+    # so auto-fetching here would double-fetch and duplicate context.
+    # (\b so /websearch — the web_search alias — is not a false match.)
+    if not urls or _SCRAPE_CMD_RE.search(text or ""):
         return
     for url in urls[:2]:
         if url in _AUTO_SEEN:
             continue
         _AUTO_SEEN.append(url)
         del _AUTO_SEEN[:-_AUTO_SEEN_MAX]
-        fetched = _fetch(url, 8)
-        if not fetched.get("ok"):
-            continue
-        data = _process_content(url, fetched)
-        snippet = data.get("text", "")[:2000]
-        if snippet:
-            api_ref.inject_context(
-                f"[Auto-scraped URL: {url}]\nType: {data.get('kind')}\nContent-Type: {data.get('content_type')}\n{snippet}\n"
-            )
+
+        def _auto_fetch(u=url):
+            try:
+                fetched = _fetch(u, 8)
+                if not fetched.get("ok"):
+                    return
+                data = _process_content(u, fetched)
+                snippet = data.get("text", "")[:2000]
+                if snippet:
+                    api_ref.inject_context(
+                        f"[Auto-scraped URL: {u}]\nType: {data.get('kind')}\nContent-Type: {data.get('content_type')}\n{snippet}\n"
+                    )
+            except Exception:
+                pass
+
+        # Daemon thread: this ran synchronously on the REPL thread
+        # before (2 URLs x 8s = up to 16s frozen prompt on any message
+        # containing a URL).
+        threading.Thread(target=_auto_fetch, daemon=True).start()
 
 
 def register(api_ref):

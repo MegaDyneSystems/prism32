@@ -712,7 +712,9 @@ AI and task execution:
                       Set reasoning effort (saves to config)
 /timeout <seconds>    Set shell command timeout
 /aitimeout <seconds>  Set AI request wait timeout (default 3600s; flex models need more)
+/aitimeout sub <sec>  Set subagent per-request timeout (default 300s; flex-tier subagent models inherit the main 3600s automatically)
 /maxsteps <n>         Set mission per-step budget (default 1000; each shard capped at 25)
+/maxsteps mission <n> Set per-shard mission budget (default 25 — raise for long device-automation shards)
 /maxsteps sub <n>     Set subagent step budget for /spawn and /delegate (default 200)
 /cost                 Show session token usage and dollar cost
 /usage                Show API usage/cost (OpenRouter)
@@ -1057,7 +1059,7 @@ Use another configured provider (works for both `/delegate` and `/spawn`):
 /wait --timeout 60    Bound the wait; default is no timeout; Escape cancels
 ```
 
-Long shell commands (builds, deploys, transfers) can run detached with `/bg <command>` — the result is pushed to the agent when it finishes. `/bg` bare (or `/bgs`) lists background jobs. While subagents are running, any `sleep` command the model tries to run is capped at 30 seconds with an explanatory note — the wait primitives replace sleep-polling.
+Long shell commands (builds, deploys, transfers) can run detached with `/bg <command>` — the result is pushed to the agent when it finishes; a per-job idle bound is available as `/bg <cmd> --timeout <sec>`. `/bg` bare (or `/bgs`) lists background jobs. Command timeouts are IDLE-based: output resets the clock, so a streaming build runs as long as it keeps producing; only a command that goes silent for the timeout (default 600s; bg jobs 1800s) is killed. While subagents are running, bare `sleep` beyond 300s is capped with an explanatory note (shorter waits for external processes are untouched) — the wait primitives replace sleep-polling.
 
 `/collect <id>` shows a completed subagent's or job's result and appends it to the conversation. Collecting does not destroy the record — results stay available for re-reads (and in quantum context) and are reaped by a 1h garbage collector. `/subagents` lists status without touching records.
 
