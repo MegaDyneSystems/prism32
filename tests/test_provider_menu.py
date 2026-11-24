@@ -170,7 +170,7 @@ def test_menu_switch_to_registry_provider():
     si = ScriptedInput([str(idx), "s", "q"])
     cmd_provider_menu(input_fn=si, detect_fn=lambda: [])
     assert Config.PROVIDER == "openai"
-    assert Config.MODEL == "gpt-4o"
+    assert Config.MODEL == "gpt-5.5"  # follows the openai factory default (registry modernized Nov 2026)
     assert Config.API_BASE == "https://api.openai.com/v1"
     Config.PROVIDER = "local"
 

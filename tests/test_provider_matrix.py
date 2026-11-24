@@ -483,8 +483,11 @@ class F5_SubagentRouting(MatrixHarness):
                 if expect_native:
                     c_ok = (hdr_name == "x-api-key" and hdr_val == kB)
                 else:
+                    # Gemini's OpenAI-compat endpoint has no /v1 segment
+                    # (generativelanguage.../v1beta/openai/chat/completions).
+                    _chat_path = "/chat/completions" if "v1beta/openai" in bB else "/v1/chat/completions"
                     c_ok = (hdr_name == "authorization" and hdr_val == f"Bearer {kB}"
-                            and "/v1/chat/completions" in self.captured[-1]["url"])
+                            and _chat_path in self.captured[-1]["url"])
                 good = a_ok and b_ok and c_ok
                 record("F5", name, good,
                        f"A(active): key={kA if a_ok else key!r} base={bA if a_ok else base!r} | "
@@ -522,23 +525,21 @@ class F5_SubagentRouting(MatrixHarness):
         self.assertEqual(key, "sk-cli-session")
 
     def test_foreign_keyless_provider_inherits_session_key(self):
-        """S-2 (documented behavior): a foreign provider with a base but NO
-        registered key inherits the session/main key — the main provider's
-        key is sent (Bearer) to that provider's endpoint. Cross-inherit guard
-        at L12056 only applies when the foreign provider HAS its own key."""
+        """S-2 FIXED (bugsweep C11, 2026-11-24): a foreign provider with a
+        base but NO registered key must NOT inherit the session/main key —
+        the old behavior sent the main provider's credential (Bearer) to a
+        foreign endpoint (credential-leak vector, previously documented as
+        a WARN). The key is now blanked for keyless foreign providers."""
         self.factory_reset()
         Config.PROVIDER = "openai"
         Config.API_KEY = "sk-openai-session"
         Config.API_BASE = "https://api.openai.com/v1"
         base, key, mdl = resolve_runtime("groq")   # factory groq: base, no key
         self.captured = []
-        self.ask(base, key, mdl)
-        hdr_name, hdr_val = self.captured_auth()
-        good = (key == "sk-openai-session"
-                and hdr_val == "Bearer sk-openai-session"
-                and "api.groq.com" in self.captured[-1]["url"])
+        good = (key == ""
+                and "api.groq.com" in base)
         record("F5", "groq(keyless foreign)", good,
-               f"resolve→({base},{key!r}); header {hdr_val!r} sent to {self.captured[-1]['url']}  [S-2 WARN]")
+               f"resolve→({base},{key!r}) — session key NOT cross-inherited  [S-2 FIXED]")
         self.assertTrue(good)
 
     def test_keyonly_provider_entry_ignored_for_routing(self):

@@ -564,27 +564,52 @@ _MODEL_PRICING = {
     "gpt-4-turbo": (0.01, 0.03), "gpt-4": (0.03, 0.06),
     "gpt-3.5-turbo": (0.0005, 0.0015),
     "o1": (0.015, 0.06), "o1-mini": (0.003, 0.012), "o3-mini": (0.0011, 0.0044),
+    # OpenAI current gen (Nov 2026; verified via public gateway catalogs)
+    "gpt-5.5": (0.005, 0.03), "gpt-5.5-pro": (0.03, 0.18),
+    "gpt-5.4-mini": (0.00075, 0.0045),
     # Anthropic
     "claude-sonnet-4-20250514": (0.003, 0.015),
     "claude-3-5-sonnet-20241022": (0.003, 0.015),
     "claude-3-opus-20240229": (0.015, 0.075),
     "claude-3-haiku-20240307": (0.00025, 0.00125),
+    # Anthropic current gen (Nov 2026; verified via public gateway catalogs)
+    "claude-sonnet-5-5": (0.002, 0.01), "claude-sonnet-5": (0.002, 0.01),
+    "claude-haiku-5-5": (0.0001, 0.0005),
+    "claude-opus-5-5": (0.004, 0.02),
     # Groq
     "llama-3.3-70b-versatile": (0.00059, 0.00079),
     "llama-3.1-70b-versatile": (0.00059, 0.00079),
     "mixtral-8x7b-32768": (0.00024, 0.00024),
+    # Groq llama-4 class (host-rate estimate; same lowercase key also covers
+    # Together's meta-llama/Llama-4-Scout-17B-16E-Instruct cheap default)
+    "meta-llama/llama-4-maverick-17b-128e-instruct": (0.00027, 0.00085),
+    "meta-llama/llama-4-scout-17b-16e-instruct": (0.00011, 0.00034),
     # Together AI
     "meta-llama/Llama-3.3-70b": (0.00088, 0.00088),
     "meta-llama/Llama-3-70b-chat-hf": (0.00088, 0.00088),
     "meta-llama/Llama-3-70b": (0.00088, 0.00088),
+    "deepseek-ai/deepseek-v4": (0.00027, 0.0011),
+    # DeepSeek official (V-class lineage estimate; -flash verified via catalogs)
+    "deepseek-v4.1": (0.00027, 0.0011), "deepseek-v4.1-flash": (0.00015, 0.0006),
     # Neuralwatt (fallbacks — actual pricing fetched from API at startup)
     "glm-5.2": (0.00145, 0.0045), "glm-5.2-fast": (0.00145, 0.0045),
+    "glm-5.3": (0.00145, 0.0045), "glm-5.3-flash": (0.00015, 0.0005),
     "kimi-k2.6": (0.00069, 0.00322), "kimi-k2.6-fast": (0.00069, 0.00322),
     "kimi-k2.7-code": (0.00095, 0.004),
     "qwen3.5-397b": (0.00069, 0.00414), "qwen3.5-397b-fast": (0.00069, 0.00414),
     "qwen3.6-35b": (0.00029, 0.00115), "qwen3.6-35b-fast": (0.00029, 0.00115),
+    # 2026 current-gen cloud defaults (verified via public catalogs where the
+    # provider publishes prices; class-lineage estimates otherwise — real
+    # pricing still gets fetched from keyed providers' /models endpoints)
+    "grok-4.7": (0.002, 0.006),
+    "mistral-large-4": (0.0007, 0.0021),
+    "command-a-03-2025": (0.0025, 0.01),
+    "sonar-pro": (0.003, 0.015),
+    "kimi-k3": (0.0002, 0.016),
+    "llama4-maverick": (0.00027, 0.00085),
+    "deepseek-ai/deepseek-v4.1-flash": (0.00014, 0.00042),
     # OpenRouter fallback
-    "deepseek/deepseek-v4-flash": (0.00014, 0.00028),
+    "deepseek/deepseek-v4-flash": (0.00009, 0.00018),
     "openai/gpt-4o": (0.0025, 0.01),
 }
 
@@ -663,15 +688,24 @@ def _get_model_pricing():
     """Return (input_per_1k, output_per_1k) for current model.
     Priority: API-fetched pricing > hardcoded table > heuristic estimate."""
     model_lower = (Config.MODEL or "").lower()
+    # 3-first (bugsweep C8): local/free must be checked BEFORE substring
+    # matching — an EMPTY model on a fresh local install used to match
+    # ('' in 'gpt-4o') and price a free local server at gpt-4o rates.
+    if not Config.API_KEY or "local" in (Config.PROVIDER or "").lower() or "ollama" in (Config.PROVIDER or "").lower():
+        if not model_lower:
+            return (0.0, 0.0)
     # 1. API-fetched real pricing (most accurate)
     if model_lower in _API_PRICING_CACHE:
         return _API_PRICING_CACHE[model_lower]
-    # 2. Hardcoded pricing table
+    # 2. Hardcoded pricing table: exact, then forward-substring only
+    # (bugsweep C8: the reverse 'model in key' direction mispriced
+    # 'o3' → o3-mini rates and 'gpt-4o-mini-…' → full gpt-4o rates).
     if model_lower in _MODEL_PRICING:
         return _MODEL_PRICING[model_lower]
-    for key, val in _MODEL_PRICING.items():
-        if key.lower() in model_lower or model_lower in key.lower():
-            return val
+    if model_lower:
+        for key, val in _MODEL_PRICING.items():
+            if key.lower() in model_lower:
+                return val
     # 3. Heuristic fallback for unknown models
     # Free/local models (llama.cpp, ollama, local)
     if not Config.API_KEY or "local" in (Config.PROVIDER or "").lower() or "ollama" in (Config.PROVIDER or "").lower():
@@ -750,29 +784,36 @@ def _track_usage(usage_dict):
         input_cost += (cache_create / 1000.0) * in_rate * create_mult
     output_cost = (out / 1000.0) * out_rate
 
+    # Savings = what these input tokens would have cost at full price minus what they cost now
+    if is_anthropic:
+        full_input_cost = ((inp + cache_hit + cache_create) / 1000.0) * in_rate
+    else:
+        full_input_cost = (inp / 1000.0) * in_rate
+    _savings_delta = max(0.0, full_input_cost - input_cost)
+
+    # Bugsweep C10: the savings += used to run OUTSIDE _usage_lock (6-22%
+    # of updates lost with parallel subagents) and _reset_session_cost
+    # never took the lock at all.
     with _usage_lock:
         _SESSION_INPUT_TOKENS += inp
         _SESSION_OUTPUT_TOKENS += out
         _SESSION_CACHE_HIT_TOKENS += cache_hit
         _SESSION_CACHE_CREATION_TOKENS += cache_create
         _SESSION_COST += input_cost + output_cost
-
-    # Savings = what these input tokens would have cost at full price minus what they cost now
-    if is_anthropic:
-        full_input_cost = ((inp + cache_hit + cache_create) / 1000.0) * in_rate
-    else:
-        full_input_cost = (inp / 1000.0) * in_rate
-    _SESSION_CACHE_SAVINGS += max(0.0, full_input_cost - input_cost)
+        _SESSION_CACHE_SAVINGS += _savings_delta
 
 def _reset_session_cost():
     global _SESSION_INPUT_TOKENS, _SESSION_OUTPUT_TOKENS, _SESSION_COST
     global _SESSION_CACHE_HIT_TOKENS, _SESSION_CACHE_CREATION_TOKENS, _SESSION_CACHE_SAVINGS
-    _SESSION_INPUT_TOKENS = 0
-    _SESSION_OUTPUT_TOKENS = 0
-    _SESSION_COST = 0.0
-    _SESSION_CACHE_HIT_TOKENS = 0
-    _SESSION_CACHE_CREATION_TOKENS = 0
-    _SESSION_CACHE_SAVINGS = 0.0
+    # Under the lock (bugsweep C10): a parallel _track_usage could
+    # interleave mid-reset otherwise.
+    with _usage_lock:
+        _SESSION_INPUT_TOKENS = 0
+        _SESSION_OUTPUT_TOKENS = 0
+        _SESSION_COST = 0.0
+        _SESSION_CACHE_HIT_TOKENS = 0
+        _SESSION_CACHE_CREATION_TOKENS = 0
+        _SESSION_CACHE_SAVINGS = 0.0
 
 def _flush_memory():
     global _MEMORY_DIRTY, _MEMORY_FLUSH_COUNTER
@@ -953,29 +994,37 @@ def _lock_for(path):
             _file_write_locks[path] = threading.Lock()
         return _file_write_locks[path]
 
-def _atomic_write(path, write_fn):
+def _atomic_write(path, write_fn, _skip_lock=False):
     """Power-loss-safe write: temp file + fsync + atomic os.replace.
 
     A process kill or power loss mid-write leaves the OLD intact file
-    instead of a truncated one. All state writers route through this."""
+    instead of a truncated one. All state writers route through this.
+    _skip_lock: the caller already holds the per-path lock (re-entrant
+    use from _safe_write_json)."""
+    if _skip_lock:
+        _atomic_write_body(path, write_fn)
+        return
     lock = _lock_for(path)
     with lock:
-        d = os.path.dirname(path)
-        if d:
-            os.makedirs(d, exist_ok=True)
-        tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+        _atomic_write_body(path, write_fn)
+
+def _atomic_write_body(path, write_fn):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    tmp = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            write_fn(f)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                write_fn(f)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(tmp, path)
-        finally:
-            try:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-            except OSError:
-                pass
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except OSError:
+            pass
 
 def _safe_read(path, default=""):
     try:
@@ -988,8 +1037,19 @@ def _safe_write(path, text):
     _atomic_write(path, lambda f: f.write(text))
 
 def _safe_write_json(path, data, timeout=5):
-    """Write JSON atomically (temp + fsync + replace) under a per-path lock."""
-    _atomic_write(path, lambda f: json.dump(data, f, indent=2))
+    """Write JSON atomically (temp + fsync + replace) under a per-path lock.
+    The timeout is honored (bugsweep C20): it used to be accepted and
+    dropped, so a wedged writer (fsync hang) blocked every save forever."""
+    lock = _lock_for(path)
+    got = lock.acquire(timeout=max(0.05, timeout))
+    if not got:
+        debug_log(f"_safe_write_json: could not acquire lock for {path} within {timeout}s — skipping write", "WARN")
+        return False
+    try:
+        _atomic_write(path, lambda f: json.dump(data, f, indent=2), _skip_lock=True)
+        return True
+    finally:
+        lock.release()
 
 def _startup_auto_block():
     try:
@@ -1127,7 +1187,14 @@ def _probe_version(exe_path):
         try:
             # 5s: mise-shimmed Node CLIs can take >2s cold (kimi measured
             # 1.2s warm); 2s silently emptied their version_text.
-            result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+            # stdin=DEVNULL (bugsweep A1): probes used to inherit the REPL's
+            # stdin — measured on this machine, `opencode --version` flips
+            # the shared fd 0 to O_NONBLOCK (persists after exit) and all
+            # installed CLIs drain pending stdin bytes: piped/CI sessions
+            # silently died and input vanished. Probe children never need
+            # our stdin.
+            result = subprocess.run(args, capture_output=True, text=True, timeout=5,
+                                    stdin=subprocess.DEVNULL)
             # rc==0 required: a failing CLI's stderr (e.g. a mise "no
             # version set for shim" error) is not a version string.
             if result.returncode != 0:
@@ -2844,6 +2911,17 @@ def _hot_reload():
 def _handle_sigterm(sig, frame):
     global _shutdown_flag
     _shutdown_flag = True
+    # Ctrl-C (SIGINT) used to be a SILENT UNSAVED exit — no message, no
+    # session save, mid-turn work gone (bugsweep A2: 3/3 pty repros lost
+    # the turn with no STOPPED box, no 'Shutting down', sessions/ empty).
+    # Best-effort save; no stdout writes here (races SpinnerThread).
+    if sig == getattr(signal, 'SIGINT', None):
+        try:
+            hist = getattr(_PluginHooks, '_history', None)
+            if hist and any(isinstance(m, dict) and m.get("role") != "system" for m in hist):
+                save_current_session(hist, list(_MAIN_CMD_LOG))
+        except Exception:
+            pass
     # Do NOT write to stdout here -- can race with SpinnerThread
     sys.exit(0)
 
@@ -3575,7 +3653,8 @@ class Platform:
                 result = subprocess.run(
                     ['powershell', '-NoProfile', '-Command',
                      '(Get-CimInstance Win32_ComputerSystem).Model'],
-                    capture_output=True, text=True, timeout=5)
+                    capture_output=True, text=True, timeout=5,
+                    stdin=subprocess.DEVNULL)
                 if result.returncode == 0:
                     model = result.stdout.strip()
                     if 'Xbox' in model or 'Xbox' in result.stdout:
@@ -3716,7 +3795,10 @@ class Platform:
     @staticmethod
     def _run_cmd(args):
         try:
-            result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+            # stdin=DEVNULL: CLI probes must never touch the REPL's stdin
+            # (bugsweep A1 — fd-0 poisoning / input theft).
+            result = subprocess.run(args, capture_output=True, text=True, timeout=5,
+                                    stdin=subprocess.DEVNULL)
             return result.stdout.strip()
         except Exception:
             return ""
@@ -4409,6 +4491,7 @@ class Config:
         # Pattern -> context window in tokens (used for history trimming)
         "deepseek/deepseek-v4": 262144,
         "deepseek/deepseek-chat": 65536,
+        "deepseek-chat": 65536,  # bare old-provider default (bugsweep C18)
         "qwen": 131072, "qwen3": 131072, "qwen3.5": 131072,
         "claude": 200000,
         "gpt-4o": 128000, "gpt-4": 128000, "gpt-4-turbo": 128000,
@@ -4421,6 +4504,20 @@ class Config:
         "kimi": 262144,
         "glm-5": 1048576, "glm": 1048576,
         "nemotron": 1000000,
+        # 2026 current-gen defaults (probed Nov 2026; conservative windows where
+        # the provider's own /models catalog is auth-gated). glm-5.3 and the
+        # opencode-go/ namespace inherit the glm/glm-5 1M rows above; cerebras/
+        # fireworks llama-4 defaults inherit the llama 131072 row (~128K).
+        "gpt-5.5": 256000, "gpt-6": 256000,
+        "claude-5": 200000, "claude-opus-5": 200000,
+        "claude-sonnet-5": 200000, "claude-haiku-5": 200000,
+        "gemini-4": 1048576,
+        "grok-4": 256000,
+        "kimi-k3": 262144,
+        "mistral-large-4": 256000,
+        "deepseek-v4": 262144,
+        "qwen3.8": 262144,
+        "sonar": 200000,
     }
 
     # Computed: context budget = min(model_window, MAX_CONTEXT_TOKENS)
@@ -4571,6 +4668,13 @@ class Config:
             provs[name] = entry
             # Setting the ACTIVE provider's key wires it into the request
             # path too (top-level api_key), not just the registry entry.
+            # Bugsweep C1: the same must hold for a BASE edit — the operator
+            # could fix a dead endpoint with /provider api or the edit
+            # wizard, watch /provider list show the new URL, and requests
+            # kept hitting the old one forever (live Config.API_BASE).
+            if (cls.PROVIDER or "").strip() == name and api_base:
+                cls.API_BASE = str(api_base).strip()
+                cls.CUSTOM_API_BASE = False
             if (cls.PROVIDER or "").strip() == name and api_key is not None:
                 data["api_key"] = str(api_key).strip()
                 cls.API_KEY = str(api_key).strip()
@@ -4693,8 +4797,10 @@ class Config:
                 # reintroduce the flex-model drop this setting fixes.
                 cls.AI_TIMEOUT = max(60, _tolerant_int(data["ai_timeout"], cls.AI_TIMEOUT))
             if "goal_max_steps" in data:
-                loaded_steps = _tolerant_int(data["goal_max_steps"], cls.GOAL_MAX_STEPS)
-                cls.GOAL_MAX_STEPS = max(1000, loaded_steps) if loaded_steps == 50 else loaded_steps
+                # Accept the operator's value (bugsweep C5): the old
+                # value-sniff migration ('50 means the ancient default')
+                # silently turned /maxsteps 50 into 1000 on every reload.
+                cls.GOAL_MAX_STEPS = max(1, _tolerant_int(data["goal_max_steps"], cls.GOAL_MAX_STEPS))
             if "auto_save_interval" in data:
                 cls.AUTO_SAVE_INTERVAL = _tolerant_int(data["auto_save_interval"], cls.AUTO_SAVE_INTERVAL)
             if "stream" in data: cls.STREAM = bool(data["stream"])
@@ -4743,25 +4849,43 @@ if _LOW_RAM:
 
 # ── Resilient helpers ──
 def estimate_tokens(text):
-    '''Rough token count (4 chars per token average). Handles str / list / None / other.'''
+    '''Rough token count. Handles str / list / None / other.
+
+    Two corrections (bugsweep C6/C14): image parts used to be counted as
+    raw base64 (a 300KB PNG scored ~102K tokens vs a real ~1-2K — trim
+    then DROPPED the multimodal turn); CJK-heavy text was counted at
+    len//4 while real BPE yields ~1 token per CJK char (4x underestimate
+    → trim never fired → provider-side overflow mid-task).'''
     if text is None:
         return 0
     if isinstance(text, str):
-        return len(text) // 4
+        return _estimate_str_tokens(text)
     if isinstance(text, list):
         total = 0
         for part in text:
             if isinstance(part, dict):
                 if part.get("type") == "image_url":
-                    total += len(str(part.get("image_url", "")))
+                    # Vision models bill images ~1-2K tokens, never base64
+                    # length — a fixed 1500 keeps multimodal turns alive.
+                    total += 1500
                 else:
-                    total += len(str(part.get("text", "")))
+                    total += _estimate_str_tokens(str(part.get("text", "")))
             elif isinstance(part, str):
-                total += len(part)
+                total += _estimate_str_tokens(part)
             else:
-                total += len(str(part))
-        return total // 4
-    return len(str(text)) // 4
+                total += _estimate_str_tokens(str(part))
+        return total
+    return _estimate_str_tokens(str(text))
+
+def _estimate_str_tokens(s):
+    """len//4 for ASCII; non-ASCII (CJK etc.) costs ~1 token per char."""
+    if not s:
+        return 0
+    non_ascii = sum(1 for ch in s if ord(ch) > 127)
+    if non_ascii > len(s) // 8:
+        # Heavy non-ASCII: mixed estimate — CJK ~1 token/char, ASCII //4.
+        return non_ascii + (len(s) - non_ascii) // 4
+    return len(s) // 4
 
 def _msg_tokens(m):
     """Estimate tokens for a full message dict (content + tool_calls)."""
@@ -4906,7 +5030,8 @@ def _build_context_refresher_locked(history, keep_count=0):
             continue
         if (c.startswith("Executed:") or c.startswith("[") or
                 c.startswith("GOAL:") or c.startswith("Task:") or
-                c.startswith("You are in")):
+                c.startswith("You are in") or c.startswith("PROTOCOL RESET") or
+                c.startswith("LOOP GUARD")):
             continue
         _req = " ".join(c.split())[:200]
         if _req and _req not in [r[:80] for r in _user_reqs]:
@@ -5012,8 +5137,12 @@ def _trim_history_locked(history, max_tokens, total):
     summary_budget = max_tokens - system_tokens - recent_floor
     
     if summary_budget < 2000:
-        # Very tight context — reduce recent floor
-        recent_floor = max(Config.CONTEXT_RECENT_FLOOR // 2, int(max_tokens * 0.50))
+        # Very tight context — reduce recent floor, but CLAMP it to the
+        # budget (bugsweep C7): the old floor could exceed max_tokens
+        # itself, so trim_history RETURNED more tokens than its budget —
+        # tiny-window models got the overflow-400s the trim exists to stop.
+        recent_floor = min(max(Config.CONTEXT_RECENT_FLOOR // 2, int(max_tokens * 0.50)),
+                           max(1000, max_tokens - system_tokens - 500))
         summary_budget = max(1000, max_tokens - system_tokens - recent_floor)
     
     # Keep the newest messages up to recent_floor tokens
@@ -5124,6 +5253,14 @@ def _collapse_text_middle(text, head_lines=5, tail_lines=3, max_chars=400):
         return text
     lines = text.split('\n')
     if len(lines) <= head_lines + tail_lines:
+        # Few lines but MANY chars (bugsweep C9): minified JSON, base64,
+        # single long error lines — the line-based check used to leave
+        # them verbatim, re-billing thousands of tokens every call. Fall
+        # back to a char-level head/tail slice.
+        if len(text) > max_chars * 2:
+            return (text[:max_chars // 2] +
+                    f"\n[... {len(text) - max_chars} chars trimmed ...]\n" +
+                    text[-max_chars // 2:])
         return text
     head = lines[:head_lines]
     tail = lines[-tail_lines:]
@@ -5334,14 +5471,23 @@ def _register_extended_themes():
 # ── Provider Registry (built-ins) ──────────────────────
 register_provider("local", display_name="Local (llama.cpp)", api_base="http://127.0.0.1:8080", model="deepseek-v4-flash", description="Local llama.cpp server", cache_support=None)
 register_provider("ollama", display_name="Ollama (localhost)", api_base="http://localhost:11434/v1", model="deepseek-v4-flash", description="Local Ollama server", cache_support=None)
-register_provider("openai", display_name="OpenAI", api_base="https://api.openai.com/v1", model="gpt-4o", cheap_model="gpt-4o-mini", description="OpenAI GPT-4o (requires API key)", cache_support="openai_auto")
-register_provider("anthropic", display_name="Anthropic", api_base="https://api.anthropic.com/v1", model="claude-sonnet-4-20250514", cheap_model="claude-3-haiku-20240307", description="Anthropic Claude (requires API key)", cache_support="anthropic")
-register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="llama-3.3-70b-versatile", cheap_model="llama-3.3-70b-versatile", description="Groq fast inference (free tier available)", cache_support=None)
-register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", cheap_model="meta-llama/Llama-3-8b-chat-hf", description="Together AI inference", cache_support=None)
+register_provider("openai", display_name="OpenAI", api_base="https://api.openai.com/v1", model="gpt-5.5", cheap_model="gpt-5.4-mini", description="OpenAI GPT-5.5 (requires API key; model id may vary — check /model after adding a key)", cache_support="openai_auto")
+register_provider("anthropic", display_name="Anthropic", api_base="https://api.anthropic.com/v1", model="claude-sonnet-5-5", cheap_model="claude-haiku-5-5", description="Anthropic Claude Sonnet 5.5 (requires API key; model id may vary — check /model after adding a key)", cache_support="anthropic")
+register_provider("groq", display_name="Groq", api_base="https://api.groq.com/openai/v1", model="meta-llama/llama-4-maverick-17b-128e-instruct", cheap_model="meta-llama/llama-4-scout-17b-16e-instruct", description="Groq fast inference, Llama-4 class (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="deepseek-ai/DeepSeek-V4", cheap_model="meta-llama/Llama-4-Scout-17B-16E-Instruct", description="Together AI inference (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
 register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", cheap_model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)", cache_support=None)
-register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
+register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.3", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
 register_provider("opencode", display_name="OpenCode Zen", api_base="https://opencode.ai/zen/v1", model="opencode-go/glm-5.3-flash", cheap_model="opencode-go/glm-5.3-flash", description="OpenCode Zen models gateway — Claude/GPT/Gemini/Grok/Qwen/free tiers, OpenAI-compatible (oc_sk_... key from opencode.ai/console). OpenCode Go plans cover the opencode-go/ model namespace; plain ids bill credits", cache_support=None)
-register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-chat", cheap_model="deepseek-chat", description="DeepSeek V3 / R1 (requires API key)", cache_support="deepseek_auto")
+register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-v4.1", cheap_model="deepseek-v4.1-flash", description="DeepSeek V4.1 (requires API key; model id may vary — check /model after adding a key)", cache_support="deepseek_auto")
+register_provider("xai", display_name="xAI (Grok)", api_base="https://api.x.ai/v1", model="grok-4.7", description="xAI Grok-4.7 (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("mistral", display_name="Mistral", api_base="https://api.mistral.ai/v1", model="mistral-large-4", description="Mistral Large 4 (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("cohere", display_name="Cohere", api_base="https://api.cohere.ai/compatibility/v1", model="command-a-03-2025", description="Cohere Command A — command-r+ successor (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("perplexity", display_name="Perplexity", api_base="https://api.perplexity.ai", model="sonar-pro", description="Perplexity Sonar online-search models (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("moonshot", display_name="Moonshot (Kimi)", api_base="https://api.moonshot.ai/v1", model="kimi-k3", description="Moonshot Kimi K3 (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("cerebras", display_name="Cerebras", api_base="https://api.cerebras.ai/v1", model="llama4-maverick-17b-128e", description="Cerebras wafer-scale fast inference (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("fireworks", display_name="Fireworks AI", api_base="https://api.fireworks.ai/inference/v1", model="accounts/fireworks/models/llama4-maverick-instruct-basic", description="Fireworks AI fast serving (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("deepinfra", display_name="DeepInfra", api_base="https://api.deepinfra.com", model="deepseek-ai/DeepSeek-V4.1-Flash", description="DeepInfra cheap open-model hosting (requires API key; model id may vary — check /model after adding a key)", cache_support=None)
+register_provider("gemini", display_name="Google Gemini", api_base="https://generativelanguage.googleapis.com/v1beta/openai", model="gemini-4-argon", cheap_model="gemini-3.8-flash", description="Google Gemini via its OpenAI-compatible surface (requires API key from aistudio.google.com; model id may vary — check /model after adding a key)", cache_support=None)
 register_provider("llamacpp-remote", display_name="llama.cpp (remote server)", api_base="", model="", description="Remote llama.cpp server (OpenAI-compatible). Set its address first: /provider api llamacpp-remote http://<host>:8080/v1", cache_support=None)
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
 
@@ -5914,20 +6060,35 @@ def _ai_failure_kind(resp):
     if not resp:
         return 'empty'
     if resp.startswith(('[HTTP ERROR', '[NETWORK ERROR', '[ERROR]')):
-        if '401' in resp:
-            return 'auth'
-        if '402' in resp:
-            # Payment Required (e.g. opencode Zen "Insufficient balance") —
-            # retrying burns 135s of exponential backoff for a billing state.
-            return 'auth'
+        # Parse the code from the prefix (bugsweep C13): substring matching
+        # misclassified a 500 whose body merely contained the digits '401'
+        # as a fatal auth error.
+        import re as _re
+        _m = _re.match(r'\[HTTP ERROR (\d+)\]', resp)
+        if _m:
+            _code = _m.group(1)
+            if _code in ('401', '402'):
+                # 402 = Payment Required (e.g. opencode Zen "Insufficient
+                # balance") — retrying burns backoff for a billing state.
+                return 'auth'
+            return 'retry'
         if 'exhausted its entire response budget' in resp:
             return 'budget'
         return 'retry'
     return None
 
+_INTERJECTION_DEPTH = 0  # owner nesting (bugsweep A4)
+
 def _interjection_start():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
+    global _INTERJECTION_ACTIVE, _INTERJECTION_DEPTH, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
     if _INTERJECTION_ACTIVE:
+        # Bugsweep A4: nested ownership. run_cmd inside run_cancelable_blocking
+        # (operator /delegate) used to start as a no-op but its finally's
+        # _interjection_stop() tore down the OUTER reader unconditionally —
+        # the operator's Escape/typed-message control died silently for the
+        # rest of the delegated run and typed bytes leaked to the prompt.
+        # Ref-count: only the outermost owner sets up / tears down.
+        _INTERJECTION_DEPTH += 1
         return
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
@@ -5951,11 +6112,20 @@ def _interjection_start():
         new[6][termios.VTIME] = 0
         termios.tcsetattr(fd, termios.TCSADRAIN, new)
         _INTERJECTION_ACTIVE = True
+        _INTERJECTION_DEPTH = 1  # outermost owner
     except Exception:
         _INTERJECTION_ACTIVE = False
+        _INTERJECTION_DEPTH = 0
 
 def _interjection_stop():
-    global _INTERJECTION_ACTIVE, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
+    global _INTERJECTION_ACTIVE, _INTERJECTION_DEPTH, _INTERJECTION_BUF, _INTERJECTION_CURSOR, _INTERJECTION_RESULT, _SAVED_TERMIOS, _INTERJECTION_HAS_TYPED, _INTERJECTION_ESCAPE, _INTERJECTION_ESCAPE_BUF, _INTERJECTION_HISTORY_IDX, _INTERJECTION_SAVED_BUF
+    # Bugsweep A4: only the outermost owner tears down — a nested stop
+    # (run_cmd's finally inside a run_cancelable_blocking owner) just
+    # releases its claim and leaves the reader + termios alone.
+    if _INTERJECTION_DEPTH > 1:
+        _INTERJECTION_DEPTH -= 1
+        return
+    _INTERJECTION_DEPTH = 0
     _INTERJECTION_ACTIVE = False
     _INTERJECTION_BUF = ""
     _INTERJECTION_CURSOR = 0
@@ -6399,7 +6569,12 @@ def generate_session_id(name=None):
     if name:
         clean_name = "".join(c if c.isalnum() or c in ('-', '_') else '_' for c in name)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        return f"{clean_name}_{timestamp}"
+        # Uniqueness suffix (bugsweep A11): two '/save work' within the same
+        # second silently overwrote each other — the unnamed branch already
+        # had this guard, the named one didn't.
+        import hashlib
+        random_hash = hashlib.md5(str(time.time()).encode()).hexdigest()[:6]
+        return f"{clean_name}_{timestamp}_{random_hash}"
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         import hashlib
@@ -6424,6 +6599,10 @@ def _extract_title(history, metadata=None):
         if role == "user" and content.startswith("GOAL:"):
             return content[5:65].strip().replace('\n', ' ')
         if role == "user" and not content.startswith("You are in") and len(content) > 10:
+            # Harness-generated command results are not human titles
+            # (bugsweep A13: '/sessions' showed raw 'Executed: ls -la…').
+            if content.startswith(("Executed:", "GOAL:", "[")):
+                continue
             return content[:60].replace('\n', ' ')
     return "untitled"
 
@@ -6877,6 +7056,10 @@ def cmd_session_load(session_id):
 def replay_session(history):
     """Re-render saved session history so /resume feels like the session never closed."""
     t = T()
+    # Session files are user-editable: a non-dict element used to crash the
+    # whole REPL from /load and /resume (bugsweep A6) — guard like every
+    # sibling function already does.
+    history = [m for m in (history or []) if isinstance(m, dict)]
     non_sys = [m for m in history if m.get("role") != "system"]
     if not non_sys:
         return
@@ -7652,16 +7835,24 @@ def _wait_for_work(cmd_args):
             if i + 1 >= len(args):
                 return "Usage: /wait [ids...] [--timeout sec]"
             try:
-                timeout = max(0, int(args[i + 1])) or None  # 0 = indefinite
+                _tv = int(args[i + 1])
             except ValueError:
                 return "Usage: /wait [ids...] [--timeout sec]"
+            # Bugsweep F11: a negative bound silently became an indefinite
+            # hang (max(0,-5)=0 → None). Reject it as a usage error.
+            if _tv < 0:
+                return "Usage: /wait [ids...] [--timeout sec]  (negative bounds are not a thing)"
+            timeout = _tv or None  # 0 = indefinite
             i += 2
             continue
         if a.startswith('--timeout='):
             try:
-                timeout = max(0, int(a.split('=', 1)[1])) or None
+                _tv = int(a.split('=', 1)[1])
             except ValueError:
                 return "Usage: /wait [ids...] [--timeout sec]"
+            if _tv < 0:
+                return "Usage: /wait [ids...] [--timeout sec]  (negative bounds are not a thing)"
+            timeout = _tv or None  # 0 = indefinite
             i += 1
             continue
         if a in ('--forever', 'forever'):
@@ -7824,7 +8015,8 @@ def _try_plugin_cmd(c, history=None, who=None):
                 return "Usage: /harness delegate <task>"
             ensure_harness_scan(force=False)
             sa = SubAgent(_harness_super_task(task))
-            _res = run_cancelable_blocking(lambda: sa.run(), message=f"harness subagent {sa.id}")
+            _ev = threading.Event()
+            _res = run_cancelable_blocking(lambda: sa.run(cancel_event=_ev), message=f"harness subagent {sa.id}", cancel_event=_ev)
             if _res == AGENT_CANCELLED_RESPONSE:
                 return (f"[Harness subagent {sa.id} cancelled by operator — partial result (if any)]\n"
                         f"{(sa.result or '')[:500]}")
@@ -8006,7 +8198,8 @@ def _try_plugin_cmd(c, history=None, who=None):
         # reader on the main thread, so Escape/Ctrl-P/typing work while a
         # sync delegate runs (the old direct sa.run() left the keyboard
         # dead for the whole subagent run).
-        _res = run_cancelable_blocking(lambda: sa.run(), message=f"subagent {sa.id}")
+        _ev = threading.Event()
+        _res = run_cancelable_blocking(lambda: sa.run(cancel_event=_ev), message=f"subagent {sa.id}", cancel_event=_ev)
         if _res == AGENT_CANCELLED_RESPONSE:
             return (f"[Subagent {sa.id} cancelled by operator — partial result (if any)]\n"
                     f"{(sa.result or '')[:500]}")
@@ -8631,6 +8824,7 @@ class SubAgent:
         self._last_cmd_snippet = ""   # for progress pulses
         self._slot_pending = False    # waiting for a concurrency slot
         self._steer_lock = threading.Lock()
+        self._cancel_event = None     # per-run cancel (sync /delegate Escape)
 
     def steer(self, message):
         """Deliver a mid-task steering message from the captain or
@@ -8661,37 +8855,49 @@ class SubAgent:
                 {"role": "user", "content": f"Task: {self.task}\nWork autonomously. Use execute blocks."}]
 
     def _run_loop(self):
-        t = T()
-        self._history = self._build_history()
-        # Snapshot of the quantum state embedded in the system prompt —
-        # later batches deliver only the delta (see the [QUANTUM UPDATE]
-        # injection below), keeping the prompt prefix stable.
-        self._qsnapshot = dict(_quantum.items())
-        # Resolve provider credentials once; pass explicitly to ask_ai so
-        # parallel subagents never mutate Config globals (race condition fix).
-        _prov = self.provider or Config.SUBAGENT_PROVIDER or Config.PROVIDER
-        self.resolved_provider = _prov
-        if _prov and _prov not in PROVIDER_REGISTRY:
-            viz.status(f"Unknown provider '{_prov}' for {self.id} — using main provider ({Config.PROVIDER})",
-                       "warning")
-            _prov = Config.PROVIDER
-        _api_base, _api_key, _model = resolve_runtime(_prov, self.model)
-        # TCP pre-flight: a dead local server (e.g. llama.cpp not running)
-        # used to surface as a cryptic '<Errno 111> Connection refused'
-        # after burning every retry. Fail fast with an actionable message.
-        _ok, _why = check_endpoint_reachable(_api_base)
-        if not _ok:
-            self.error = f"provider '{_prov}' unreachable at {_api_base} ({_why})"
-            self.result = (f"[SUBAGENT ERROR] Provider '{_prov}' is unreachable at {_api_base} "
-                           f"({_why}). Is the server running? Fix it: /model (pick a reachable "
-                           f"model) or /provider api {_prov} <url>")
-            self.done = True
-            return
+        # Everything below must be inside the guarded region (bugsweep F3):
+        # the async prelude (_build_history, resolve_runtime, pre-flight)
+        # used to run OUTSIDE it, so any exception left the subagent in
+        # done=False 'RUNNING' limbo forever — /collect said 'still running',
+        # /wait blocked indefinitely, and the reaper never collected it.
         try:
+            t = T()
+            self._history = self._build_history()
+            # Snapshot of the quantum state embedded in the system prompt —
+            # later batches deliver only the delta (see the [QUANTUM UPDATE]
+            # injection below), keeping the prompt prefix stable.
+            self._qsnapshot = dict(_quantum.items())
+            # Bugsweep F10: start at the event-log HEAD, not 0 — a newborn
+            # subagent used to receive up to 8 stale pre-birth completion
+            # notices as its first user message (prompt pollution + tokens).
+            with _agent_events_lock:
+                self._event_cursor = (_AGENT_EVENT_LOG[-1]["seq"] + 1) if _AGENT_EVENT_LOG else 0
+            # Resolve provider credentials once; pass explicitly to ask_ai so
+            # parallel subagents never mutate Config globals (race condition fix).
+            _prov = self.provider or Config.SUBAGENT_PROVIDER or Config.PROVIDER
+            self.resolved_provider = _prov
+            if _prov and _prov not in PROVIDER_REGISTRY:
+                viz.status(f"Unknown provider '{_prov}' for {self.id} — using main provider ({Config.PROVIDER})",
+                           "warning")
+                _prov = Config.PROVIDER
+            _api_base, _api_key, _model = resolve_runtime(_prov, self.model)
+            # TCP pre-flight: a dead local server (e.g. llama.cpp not running)
+            # used to surface as a cryptic '<Errno 111> Connection refused'
+            # after burning every retry. Fail fast with an actionable message.
+            _ok, _why = check_endpoint_reachable(_api_base)
+            if not _ok:
+                # Bugsweep F2: the early return used to skip the finally
+                # bookkeeping — no [SUBAGENT FAILED] event, no quantum
+                # publish, never reaped. Publish like every other failure.
+                self.error = f"provider '{_prov}' unreachable at {_api_base} ({_why})"
+                self.result = (f"[SUBAGENT ERROR] Provider '{_prov}' is unreachable at {_api_base} "
+                               f"({_why}). Is the server running? Fix it: /model (pick a reachable "
+                               f"model) or /provider api {_prov} <url>")
+                self.done = True
+                return
             nudges = 0
             ai_retries = 0
             nudge_marks = []  # marked announce/nudge exchanges in self._history
-          # (body guarded below)
             for iteration in range(self.max_steps):
                 self._step = iteration + 1
                 # Swarm pause (Ctrl+P): non-destructive hold between steps.
@@ -8706,7 +8912,12 @@ class SubAgent:
                 # subagent budget keeps per-step cost flat like opencode's.
                 _ctx = context_pct(self._history, budget=Config.SUBAGENT_CONTEXT_TOKENS)
                 if _ctx >= 75:
-                    self._history[:] = trim_history(self._history, Config.SUBAGENT_CONTEXT_TOKENS)
+                    # Bugsweep F12: hold the steer lock across the replace —
+                    # a steering message appended in the window between
+                    # trim's snapshot and the [:]= assignment was silently
+                    # dropped ("no lost progress" is steer()'s contract).
+                    with self._steer_lock:
+                        self._history[:] = trim_history(self._history, Config.SUBAGENT_CONTEXT_TOKENS)
                 # Deliver completion notices from OTHER subagents (this one
                 # may itself have spawned children via /spawn).
                 _evs, self._event_cursor = _drain_agent_events(self._event_cursor)
@@ -8724,8 +8935,8 @@ class SubAgent:
                     _sa_timeout = max(Config.SUBAGENT_AI_TIMEOUT, Config.AI_TIMEOUT)
                 resp = ask_ai(self._history, stream=False,
                               api_base=_api_base, api_key=_api_key, model=_model,
-                              timeout=_sa_timeout)
-                if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested():
+                              timeout=_sa_timeout, cancel_event=self._cancel_event)
+                if resp == AGENT_CANCELLED_RESPONSE or agent_cancel_requested(self._cancel_event):
                     self.result = "[SUBAGENT CANCELLED] " + agent_cancel_message()
                     self.error = agent_cancel_message()
                     self.done = True
@@ -8739,6 +8950,10 @@ class SubAgent:
                     # 'empty' (HTTP 200, no content — gateway hiccup) gets a
                     # QUICK retry: the old exponential ladder burned up to
                     # 195s of sleeps on what is usually one dropped response.
+                    # Reset-on-success (bugsweep F1 2026-11-24): the budget
+                    # used to be CUMULATIVE over the whole run — four
+                    # lifetime gateway hiccups killed a healthy 200-step
+                    # subagent no matter how many successes came between.
                     if _fail in ('retry', 'empty'):
                         ai_retries += 1
                         _max_r = 3 if _fail == 'empty' else _AI_AUTO_RETRIES
@@ -8760,6 +8975,11 @@ class SubAgent:
                     self.error = resp or "No response"
                     self.result = f"[SUBAGENT ERROR] {self.error}"
                     break
+                else:
+                    # Success (bugsweep F1): reset the retry budget — it
+                    # used to accumulate over the whole run, so four
+                    # lifetime gateway hiccups killed a healthy subagent.
+                    ai_retries = 0
                 resp, _asked = handle_ask_blocks(resp, self._history, allow_input=False, return_asked=True)
                 commands = extract_blocks(resp, 'execute')
                 was_healed = False
@@ -8949,8 +9169,21 @@ class SubAgent:
             except Exception:
                 pass
 
-    def run(self):
+    def run(self, cancel_event=None):
+        # Bugsweep F6: an Escape during a sync /delegate used to orphan the
+        # worker — 'cancelled' was reported while the subagent kept burning
+        # its full step budget, because the sticky global cancel flag gets
+        # cleared before the orphan's next checkpoint. A per-run event
+        # survives that clear and kills the run at its next ask_ai/loop
+        # checkpoint.
+        self._cancel_event = cancel_event
         self._sync_run = True
+        # Bugsweep F9: a running sync delegate used to be invisible —
+        # /subagents said 'No subagents.' and /interject couldn't steer it,
+        # even while the banner showed its id. Register like run_async;
+        # the 1h reaper collects it afterwards.
+        with _subagent_lock:
+            _SUBAGENTS[self.id] = self
         with stdout_lock:
             t = T()
             print(f"\n  {t['primary']}╭─ SUBAGENT [{self.id}] ─────────────────────{RST}")
@@ -8984,14 +9217,24 @@ class SubAgent:
             # MAX_CONCURRENT_SUBAGENTS the spawn waits for a free slot
             # instead of thrashing provider rate limits with parallel
             # 429-retry loops.
-            if not _acquire_subagent_slot():
+            # Bugsweep F4: pass the cancel check — the parameter existed but
+            # the production caller never passed it, so Escape while queued
+            # was lost and the task ran to completion once a slot freed.
+            if not _acquire_subagent_slot(cancel_check=agent_cancel_requested):
                 self.error = "cancelled while waiting for a free agent slot"
                 self.result = f"[SUBAGENT CANCELLED] {self.error}"
                 self.done = True
                 return
             self._slot_pending = False
+            # Bugsweep F3: any exception here (slot machinery, pre-run code)
+            # used to kill the thread with done=False → ghost 'RUNNING'
+            # forever. Same guard contract as _run_loop's body.
             try:
                 self._run_loop()
+            except Exception as e:
+                self.error = f"{type(e).__name__}: {e}"
+                self.result = f"[SUBAGENT ERROR] Internal failure: {self.error}"
+                self.done = True
             finally:
                 _release_subagent_slot()
         self._slot_pending = True
@@ -9062,7 +9305,7 @@ You can delegate work to subagents. Subagents run autonomously with their own ex
 - /subagents — list running/completed subagents.
 - /bg <command> — run a LONG shell command in the background (builds, deploys, transfers, service restarts). Returns a job id instantly; the result is pushed to you when it completes. /bg (bare) lists jobs.
 Add --provider <name> to use a different provider for a subagent (e.g. /delegate scan ports --provider groq).
-Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, opencode, deepseek, llamacpp-remote.
+Built-in providers: local, ollama, openai, anthropic, groq, together, openrouter, neuralwatt, opencode, deepseek, xai, mistral, cohere, perplexity, moonshot, cerebras, fireworks, deepinfra, gemini, llamacpp-remote.
 EVENT-DRIVEN COMPLETION: when any subagent or background job finishes, its result is delivered to you automatically as a notification. You never need timers:
 - NEVER use `sleep` to wait for work — it wastes hours. Use /wait to block, or start work with /bg or /spawn and keep doing other things.
 - Subagents emit progress updates every 25 steps. If one is stuck or wrong, /interject <id> <message> to steer it immediately instead of letting it burn its step budget.
@@ -9645,7 +9888,13 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                                      timeout=_timeout)
 
     _base = normalize_api_base(_api_base)
-    url = f"{_base}/v1/chat/completions"
+    # Google Gemini's OpenAI-compat surface lives at
+    # /v1beta/openai/chat/completions (no extra /v1). normalize_api_base
+    # preserves that suffix — append the endpoint without the /v1 for it.
+    if _base.lower().endswith('/v1beta/openai'):
+        url = f"{_base}/chat/completions"
+    else:
+        url = f"{_base}/v1/chat/completions"
     payload = {
         "model": _model,
         "messages": clean_messages,
@@ -10434,10 +10683,13 @@ def mission_board_append(text, who="agent"):
     except OSError as e:
         return f"Board: append failed ({e})."
 
-def mission_board_read(tail=40):
-    """Return the ACTIVE mission's board tail (or a not-active message)."""
-    m = _ACTIVE_MISSION
-    if not m or m.state != "active":
+def mission_board_read(mission=None, tail=40):
+    """Return the ACTIVE mission's board tail (or a not-active message).
+    `mission` override lets a completing mission read its own board after
+    state left 'active' (bugsweep F8: the completion summary's final board
+    snapshot used to silently read nothing)."""
+    m = mission or _ACTIVE_MISSION
+    if not m:
         return "Board: no active mission. Boards exist only during missions (/mission <goal>)."
     try:
         with open(mission_board_path(m.id), "r", encoding="utf-8") as f:
@@ -10685,10 +10937,24 @@ def _mission_monitor(mission):
                 # todos (bugtest finding 3a).
                 for todo in list(mission.todos.values()):
                     if todo.state == "running" and todo.shard is not None and todo.shard.done:
-                        ok = bool(todo.shard.result) and not todo.shard.error
+                        # Bugsweep F5: three failure paths (max-steps, loop
+                        # guard, needs-input) set `result` but NOT `error`,
+                        # so unfinished shards were harvested as SUCCESS and
+                        # the mission completed ✓ over dead steps. Classify
+                        # by the result prefix — it is the harness's own
+                        # failure vocabulary.
+                        _sr = str(todo.shard.result or "")
+                        _soft_fail = _sr.startswith(("[SUBAGENT] Max steps",
+                                                     "[SUBAGENT LOOP GUARD]",
+                                                     "[SUBAGENT NEEDS INPUT]"))
+                        ok = bool(todo.shard.result) and not todo.shard.error and not _soft_fail
                         _mission_report(mission, todo, ok, todo.shard.result or todo.shard.error or "")
                 # Dispatch is what pause freezes — new shards wait.
-                if not mission.paused:
+                # Bugsweep F7: the swarm-wide /pause (Ctrl+P) flag must also
+                # freeze dispatch — the mission monitor used to keep spawning
+                # shards while the operator believed nothing new was starting,
+                # and each parked shard hoarded a concurrency slot.
+                if not mission.paused and not agent_pause_requested():
                     for todo in mission.next_ready():
                         todo.state = "running"
                         # Per-todo shard budget (default 25) — the old
@@ -10708,6 +10974,12 @@ def _mission_monitor(mission):
                     break
             time.sleep(0.5)
         # completion summary (tesseract.py:1618 structural completion)
+        # Bugsweep F8: read the board BEFORE state flips to 'complete' —
+        # mission_board_read rejects non-active missions, so the old order
+        # returned 'no active mission' and the startswith('Board:') guard
+        # silently ate it; every board finding was destroyed with the
+        # workspace despite the comment promising preservation.
+        board_tail = mission_board_read(mission=mission, tail=10)
         failed = [t for t in mission.leaves() if t.state == "failed"]
         summary_lines = [f"Goal: {mission.goal}"]
         for label, output in mission.reports:
@@ -10717,7 +10989,6 @@ def _mission_monitor(mission):
         # Final board snapshot before the workspace expires: the board's
         # last findings are folded into the summary so nothing is lost the
         # instant the files are deleted.
-        board_tail = mission_board_read(tail=10)
         if not board_tail.startswith("Board:"):
             summary_lines.append("Board highlights:\n" + board_tail)
         summary = "\n".join(summary_lines)
@@ -10770,8 +11041,12 @@ def mission_take(goal, wait=False):
 
 
 def get_cmd_help():
-    bold = "\x1b[1m"
-    reset = "\x1b[0m"
+    # Theme-aware (bugsweep A9): the hardcoded ANSI leaked raw ESC bytes
+    # in piped/non-tty output (logs, tee, screen readers) while every other
+    # path went through T().
+    _t = T()
+    bold = _t['bright']
+    reset = RST
     # Plugin Commands: operator discovery for loaded plugin commands.
     # Built-ins (help/quit/goal) are documented above; hidden commands
     # are deliberately excluded.
@@ -11457,6 +11732,11 @@ def main():
     parser.add_argument("--evolve-setup", action="store_true", help="Create evolve docs/baseline/tool scan, then exit")
     args = parser.parse_args()
 
+    # Stale-bytecode guard BEFORE the version early-exit (bugsweep A10):
+    # running a month-old prism32.pyc used to report the old version with
+    # no warning — the exact confusion this check exists to prevent.
+    _check_stale_pyc()
+
     if args.version:
         print("Prism32 v7.3.0 — MegaDyne Systems")
         sys.exit(0)
@@ -11514,7 +11794,13 @@ def main():
     if args.theme:
         Config.THEME = args.theme
     if args.temperature is not None:
-        Config.TEMPERATURE = args.temperature
+        # Clamp like /temperature does (bugsweep A14): a CLI value of 99
+        # used to reach the provider raw.
+        try:
+            _temp = float(args.temperature)
+        except (TypeError, ValueError):
+            _temp = Config.TEMPERATURE
+        Config.TEMPERATURE = max(0.0, min(2.0, _temp))
     apply_ansi_compat()
     if args.set_timeout is not None:
         Config.CMD_TIMEOUT = max(1, args.set_timeout)
@@ -11596,6 +11882,9 @@ def main():
         _rs = load_session(args.resume_session)
         if _rs and (_rs.get('history') or _rs.get('cmd_log')):
             _hist = _rs.get('history') or []
+            # User-editable file: non-dict entries used to crash BOOT
+            # before the REPL started (bugsweep A7) — guard + drop them.
+            _hist = [m for m in _hist if isinstance(m, dict)]
             if _hist and _hist[0].get('role') == 'system':
                 _hist = _hist[1:]
             history = [{"role": "system", "content": SYSTEM_PROMPT + "\n" + build_context()}] + _hist
@@ -11843,7 +12132,11 @@ def main():
             if data:
                 history[:] = data.get("history", [])
                 _PluginHooks._history = history
-                cmd_log = data.get("cmd_log", [])
+                # In-place (bugsweep A5): rebinding cmd_log locally left the
+                # autosaver's _MAIN_CMD_LOG alias pointing at the OLD
+                # session's log — timed saves wrote the wrong log into the
+                # loaded session's file.
+                cmd_log[:] = data.get("cmd_log", [])
                 _reset_session_cost()
                 _CURRENT_SESSION_ID = data.get("id")
                 release_footer_for_output()
@@ -11858,7 +12151,8 @@ def main():
                 if loaded_history is not None:
                     history[:] = loaded_history
                     _PluginHooks._history = history
-                    cmd_log = loaded_cmd_log if loaded_cmd_log else []
+                    # In-place — see the /resume note above (bugsweep A5).
+                    cmd_log[:] = (loaded_cmd_log if loaded_cmd_log else [])
                     _reset_session_cost()
                     _CURRENT_SESSION_ID = args_str.strip()
                     viz.status("Session restored", "success")
@@ -12131,7 +12425,7 @@ def main():
             else:
                 show_api_base()
                 print(_set_usage)
-                print(f"  {t['dim']}Usage: /set <key> <value>  (e.g. /set subagent_model gpt-4o-mini){RST}")
+                print(f"  {t['dim']}Usage: /set <key> <value>  (e.g. /set subagent_model glm-5.3-flash){RST}")
             print()
             continue
 
@@ -12985,7 +13279,8 @@ def main():
                 # Cancelable run: Escape stops waiting, Ctrl-P pauses the
                 # swarm, typing reaches the captain (run_cancelable_blocking
                 # drives the interjection reader on the main thread).
-                _res = run_cancelable_blocking(lambda: sa.run(), message=f"subagent {sa.id}")
+                _ev = threading.Event()
+                _res = run_cancelable_blocking(lambda: sa.run(cancel_event=_ev), message=f"subagent {sa.id}", cancel_event=_ev)
                 if _res == AGENT_CANCELLED_RESPONSE:
                     history.append({"role": "user",
                         "content": f"[Subagent {sa.id} cancelled by operator]\nPartial result: {(sa.result or '')[:800]}"})
@@ -13421,6 +13716,15 @@ def main():
             # Swarm pause (Ctrl+P): hold between steps, keep the interjection
             # reader live so the operator can message the captain while frozen.
             _pause_gate(is_main=True)
+            # Bugsweep A3: Escape during the pause used to be swallowed —
+            # run_cancelable_blocking clears the sticky flag on its next
+            # entry, and the loop proceeded straight into another model
+            # call with the cancel lost (docstring promises cancel beats
+            # pause). Honor it here.
+            if agent_cancel_requested():
+                clear_agent_cancel()
+                box("STOPPED", "Agent stopped by Escape (while paused)", "warn")
+                break
             # A message typed while paused (or during the pause gate) goes to
             # the captain now, before the next model call.
             if _INTERJECTION_RESULT is not None:
@@ -13936,8 +14240,13 @@ def resolve_runtime(provider=None, model=None):
             # to a foreign endpoint (wrong-key-401). The session key stays
             # in charge for the main provider when set (rotation-safe), but
             # a registry key beats an EMPTY session key (fresh installs).
-            if _rk and (prov != Config.PROVIDER or not (key or "").strip()):
+            # Bugsweep C11: the old guard only replaced the key when the
+            # foreign provider HAD one — a keyless foreign endpoint still
+            # received the main provider's credential.
+            if _rk:
                 key = _rk
+            else:
+                key = ""
         elif _rk:
             # Key-only entry with no base: misconfigured — sending this key
             # to the main provider's base is a guaranteed wrong-key 401.
@@ -13975,13 +14284,17 @@ def fetch_models_from(api_base, api_key=None, timeout=15):
     """Fetch model list from one OpenAI-compatible endpoint.
     Returns a list of {"id", "pricing"} dicts; raises on HTTP/network error."""
     _base = normalize_api_base(api_base)
-    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.2"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.3"}
     _key = api_key if api_key is not None else Config.API_KEY
     if isinstance(_key, str):
         _key = _key.strip()
     if _key:
         h["Authorization"] = f"Bearer {_key}"
-    req = urllib.request.Request(f"{_base}/v1/models", headers=h)
+    # Gemini's OpenAI-compat models list lives at /v1beta/openai/models.
+    if _base.lower().endswith('/v1beta/openai'):
+        req = urllib.request.Request(f"{_base}/models", headers=h)
+    else:
+        req = urllib.request.Request(f"{_base}/v1/models", headers=h)
     with urlopen_with_ssl(req, timeout=timeout) as resp:
         data = json.loads(resp.read().decode())
     models = []
@@ -14383,6 +14696,12 @@ def cmd_provider_remove(name):
                 # a "reset to defaults" — it used to stay active in memory
                 # AND as the persisted top-level api_key.
                 Config.API_KEY = ""
+            # Bugsweep C19: the MODEL used to survive a factory reset too —
+            # 'reset to defaults' kept a custom model wired against the
+            # factory base. Restore the factory model.
+            _rm = (reg.get("model") or "").strip()
+            if _rm:
+                Config.MODEL = _rm
             Config.save_config()
         viz.status(f"{name}: edits reset to built-in defaults", "success")
         return
@@ -14415,6 +14734,11 @@ def _switch_main_provider(name):
     else:
         # Server unreachable AND no saved model: still switch the wiring,
         # the model gets picked once it's up (via /model).
+        # Bugsweep C2: the old code kept the PREVIOUS provider's key active
+        # AND persisted it top-level — switching to a not-yet-running local
+        # server sent the old vendor's credential to it. Mirror the leak
+        # guard _apply_model_selection already has: clear key when the new
+        # provider has none; blank the model until /model picks one.
         Config.PROVIDER = name
         base = reg.get("api_base") or ""
         if base and base != Config.API_BASE:
@@ -14423,7 +14747,9 @@ def _switch_main_provider(name):
         _rk = (reg.get("default_key") or "").strip()
         if _rk:
             Config.API_KEY = _rk
-            Config.SESSION_ONLY_KEYS.discard("api_key")
+        else:
+            Config.API_KEY = ""
+        Config.MODEL = ""
         Config.save_config()
         print(f"  {t['bright']}+ Provider switched: {name}{RST}")
         print(f"  {t['warn']}Its catalog is unreachable — pick a model with /model once it's up.{RST}")
