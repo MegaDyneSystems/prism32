@@ -4386,6 +4386,11 @@ class Config:
     # model's window (up to 1M tokens) — subagent prompts grew linearly
     # (step ~100 re-sent 40-50K tokens/step). This keeps steps flat-cost.
     SUBAGENT_CONTEXT_TOKENS = 32768
+    # Auto-compact the MAIN conversation when its estimated size crosses
+    # this many tokens (0 = off; default 100K). Large-window models never
+    # reach the 75% trim, so a long session re-bills hundreds of K tokens
+    # of prefill every call until it is summarized.
+    AUTO_COMPACT_TOKENS = 100000
     # Per-request timeout for subagent model calls. The main AI_TIMEOUT
     # (3600s, for queued flex tiers) let one pathological subagent step
     # stall for hours; subagents get a tight bound instead.
@@ -4475,6 +4480,7 @@ class Config:
                 "subagent_max_steps": cls.SUBAGENT_MAX_STEPS,
                 "max_concurrent_subagents": cls.MAX_CONCURRENT_SUBAGENTS,
                 "subagent_context_tokens": cls.SUBAGENT_CONTEXT_TOKENS,
+                "auto_compact_tokens": cls.AUTO_COMPACT_TOKENS,
                 "subagent_ai_timeout": cls.SUBAGENT_AI_TIMEOUT,
                 "mission_max_steps": cls.MISSION_MAX_STEPS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
@@ -4573,12 +4579,20 @@ class Config:
                 _safe_write_json(cls.CONFIG_FILE, data, timeout=5)
             if name not in PROVIDER_REGISTRY:
                 PROVIDER_REGISTRY[name] = {}
-            PROVIDER_REGISTRY[name].update({
-                "name": name.replace("_", " ").title(),
-                "api_base": entry.get("api_base", ""),
-                "model": entry.get("model", ""),
-                "description": "Configured by user",
-            })
+            # MERGE, don't clobber (UX audit 2026-11-24, verified broken):
+            # a key-only update on a built-in used to overwrite the
+            # registry row with entry.get("api_base", "") == "" — the
+            # provider then showed '(no url)', /model couldn't see it,
+            # and switching silently kept the dead local endpoint. Unset
+            # entry fields keep the existing registry/built-in values.
+            _reg = PROVIDER_REGISTRY[name]
+            _reg.setdefault("name", name.replace("_", " ").title())
+            _reg.setdefault("api_base", "")
+            _reg.setdefault("model", "")
+            _reg["api_base"] = entry.get("api_base") or _reg["api_base"]
+            _reg["model"] = entry.get("model") or _reg["model"]
+            if not _reg.get("description"):
+                _reg["description"] = "Configured by user"
             if entry.get("api_key"):
                 PROVIDER_REGISTRY[name]["default_key"] = entry["api_key"]
             elif api_key is not None:
@@ -4630,14 +4644,21 @@ class Config:
                 for prov_name, prov_cfg in data["providers"].items():
                     if prov_name not in PROVIDER_REGISTRY:
                         PROVIDER_REGISTRY[prov_name] = {}
-                    PROVIDER_REGISTRY[prov_name].update({
-                        "name": prov_name.replace("_", " ").title(),
-                        "api_base": prov_cfg.get("api_base", cls.API_BASE),
-                        "model": prov_cfg.get("model", cls.MODEL),
-                        "description": "Configured via installer",
-                    })
+                    _p_reg = PROVIDER_REGISTRY[prov_name]
+                    _p_reg.setdefault("name", prov_name.replace("_", " ").title())
+                    _p_reg.setdefault("api_base", "")
+                    _p_reg.setdefault("model", "")
+                    # MERGE (UX audit 2026-11-24): a key-only disk entry used
+                    # to re-clobber the built-in base/model on every boot —
+                    # `prov_cfg.get("api_base", cls.API_BASE)` fell back to
+                    # the dead local URL for built-ins. Fall back to the
+                    # BUILT-IN defaults, never the local placeholder.
+                    _p_reg["api_base"] = prov_cfg.get("api_base") or _p_reg["api_base"]
+                    _p_reg["model"] = prov_cfg.get("model") or _p_reg["model"]
+                    if not _p_reg.get("description"):
+                        _p_reg["description"] = "Configured via installer"
                     if prov_cfg.get("api_key"):
-                        PROVIDER_REGISTRY[prov_name]["default_key"] = prov_cfg["api_key"]
+                        _p_reg["default_key"] = prov_cfg["api_key"]
             if "api_key" in data:
                 _k = data["api_key"]
                 cls.API_KEY = _k.strip() if isinstance(_k, str) else _k
@@ -4701,6 +4722,8 @@ class Config:
                 cls.MAX_CONCURRENT_SUBAGENTS = max(1, _mc)
             if "subagent_context_tokens" in data:
                 cls.SUBAGENT_CONTEXT_TOKENS = max(4096, _tolerant_int(data["subagent_context_tokens"], cls.SUBAGENT_CONTEXT_TOKENS))
+            if "auto_compact_tokens" in data:
+                cls.AUTO_COMPACT_TOKENS = max(0, _tolerant_int(data["auto_compact_tokens"], cls.AUTO_COMPACT_TOKENS))
             if "subagent_ai_timeout" in data:
                 cls.SUBAGENT_AI_TIMEOUT = max(30, _tolerant_int(data["subagent_ai_timeout"], cls.SUBAGENT_AI_TIMEOUT))
             if "mission_max_steps" in data:
@@ -4859,8 +4882,36 @@ def _build_context_refresher_locked(history, keep_count=0):
             break
     if obj:
         parts.append(f"OBJECTIVE: {obj}")
-    
+
+    # USER REQUESTS: preserve EVERY real user message from the dropped
+    # range (owner request 2026-11-24: 'prompts from the user should not
+    # be lost so the agent doesn't forget'). Harness-generated user
+    # messages (Executed:, [QUANTUM UPDATE], notifications) are skipped.
+    _user_reqs = []
     dropped = history[1:-keep_count] if keep_count > 0 else history[1:]
+
+    # USER REQUESTS: preserve EVERY real user message from the dropped
+    # range (owner request 2026-11-24: 'prompts from the user should not
+    # be lost so the agent doesn't forget'). Harness-generated user
+    # messages (Executed:, [QUANTUM UPDATE], notifications) are skipped.
+    _user_reqs = []
+    for m in dropped:
+        if not isinstance(m, dict) or m.get("role") != "user":
+            continue
+        c = m.get("content", "")
+        if not isinstance(c, str) or not c.strip():
+            continue
+        if (c.startswith("Executed:") or c.startswith("[") or
+                c.startswith("GOAL:") or c.startswith("Task:") or
+                c.startswith("You are in")):
+            continue
+        _req = " ".join(c.split())[:200]
+        if _req and _req not in [r[:80] for r in _user_reqs]:
+            _user_reqs.append(_req)
+    if _user_reqs:
+        parts.append("USER REQUESTS (in order; the operator asked for these):")
+        for r in _user_reqs[-10:]:
+            parts.append(f"  - {r}")
     
     # Scan dropped messages for discoveries and errors
     discoveries = list(_SESSION_STATE.get("discoveries", []))
@@ -5014,16 +5065,41 @@ def _trim_history_locked(history, max_tokens, total):
     result.extend(kept)
     return result
 
-def compact_history(history):
+def compact_history(history, budget=None):
     """/compact — manual context squeeze. Compresses old tool turns,
-    then forces a trim down to half the context window (the automatic
-    path only fires at 75% and only trims to the full budget).
+    then forces a trim (default: down to half the context window; a
+    caller-provided budget trims to that instead).
     Mutates `history` in place; returns (before_pct, after_pct)."""
     before = context_pct(history)
     squeezed = compress_tool_turns(list(history))
-    squeezed = trim_history(squeezed, max(2000, Config.resolve_context_window() // 2))
+    target = budget if budget else max(2000, Config.resolve_context_window() // 2)
+    squeezed = trim_history(squeezed, target)
     history[:] = squeezed
     return before, context_pct(history)
+
+def _auto_compact_if_expensive(history):
+    """Owner request 2026-11-24: 'when context gets high, summarize so
+    prefill isn't super expensive'. Large-window models never hit the
+    75% trim (a glm session idles at ~30-50% of 1M tokens = 300-500K
+    tokens re-billed every call), so cross an absolute token threshold
+    instead and compact to half of it. Returns True if it compacted."""
+    threshold = getattr(Config, "AUTO_COMPACT_TOKENS", 0)
+    if threshold <= 0:
+        return False
+    try:
+        total = sum(_msg_tokens(m) for m in history)
+    except Exception:
+        return False
+    if total <= threshold:
+        return False
+    try:
+        before, after = compact_history(history, budget=max(2000, threshold // 2))
+        viz.status(f"Auto-compact: {before}% → {after}% context "
+                   f"(crossed {threshold} tokens — summary preserves objective, "
+                   "user requests and discoveries)", "warning")
+        return True
+    except Exception:
+        return False
 
 def _collapse_text_middle(text, head_lines=5, tail_lines=3, max_chars=400):
     """Collapse the middle of long text, keeping the first/last lines intact.
@@ -10555,11 +10631,13 @@ def get_cmd_help():
    /extend permanent <g> AI-generate/load persistent plugin
 
  {bold}Configuration{reset}
-   /version            Version, Python, platform, and runtime dir
-   /agentname <name>    Set the name shown before assistant responses
-   /provider           Provider manager: pick by number → switch/edit/test
-                       ([l]an scan finds remote llama.cpp/vLLM boxes; also:
-                       add | api | key | test | rm | list)
+    /setup               One-command first-run: provider → key → model → live
+    /version            Version, Python, platform, and runtime dir
+    /agentname <name>    Set the name shown before assistant responses
+    /model [search]      Browse & assign models (main/subagent slots, pricing)
+    /provider           Provider manager: pick by number → switch/edit/test
+                        ([l]an scan finds remote llama.cpp/vLLM boxes; also:
+                        add | api | key | use <name> | test | rm | list)
     /set api_base <url>  Set a custom API base URL (preserved when switching providers)
     /set api_base reset  Revert API base to the current provider's default
     /set subagent_model <m>  Use a cheaper/faster model for subagents (clear = main)
@@ -11317,6 +11395,13 @@ def main():
 
     t = T()
     print(f" {t['bright']}AI:{RST} {Config.MODEL[:40]}  {t['dim']}|{RST}  {t['primary']}theme:{RST} {Config.THEME}")
+    # Cold-start honesty (UX audit 2026-11-24): a fresh package/bootstrap
+    # install booted with a blank model, dead-local defaults and exactly
+    # one cryptic breadcrumb. Say it plainly and name ONE command.
+    if ((Config.PROVIDER or "") == "local" and not (Config.MODEL or "").strip()
+            and not (Config.API_KEY or "").strip()):
+        print(f" {t['warn']}⚠ No AI provider configured yet — run {t['bright']}/setup{RST}"
+              f" {t['warn']}to pick a provider, paste a key, and go live in one command.{RST}")
     display_system_info()
     print()
 
@@ -11618,6 +11703,12 @@ def main():
             print()
             continue
 
+        if cmd == 'setup':
+            # One-command first-run: provider → key → test → model → live.
+            cmd_setup()
+            print()
+            continue
+
         if cmd in ('providers', 'provider'):
             # /provider: interactive manager (numbered picker → switch /
             # edit / test / remove) plus direct subcommands for muscle memory.
@@ -11644,6 +11735,17 @@ def main():
                     # /provider test [name] — full connectivity diagnostic
                     _tname = _p_parts[1] if len(_p_parts) > 1 else Config.PROVIDER
                     cmd_provider_test(_tname)
+                elif subcmd in ('use', 'switch', 'set'):
+                    # /provider use <name> — direct switch (the old flow
+                    # buried switching behind menu row numbers; UX audit
+                    # 2026-11-24).
+                    if len(_p_parts) > 1:
+                        if _p_parts[1] in PROVIDER_REGISTRY:
+                            _switch_main_provider(_p_parts[1])
+                        else:
+                            print(f"  {t['dim']}No provider '{_p_parts[1]}'. Existing: /provider list{RST}")
+                    else:
+                        print(f"  {t['dim']}Usage: provider use <name>{RST}")
                 elif subcmd in ('rm', 'remove', 'delete'):
                     if len(_p_parts) > 1:
                         cmd_provider_remove(_p_parts[1])
@@ -13141,6 +13243,10 @@ def main():
             if _ctx >= 75:
                 viz.status(f"Context at {_ctx}% — compressing with intelligent summary", "warning")
                 history[:] = trim_history(history, Config.resolve_context_window())
+            # Prefill economy: large-window models idle far below 75% while
+            # still re-billing 100K+ tokens every call — compact on the
+            # absolute threshold (objective + user requests preserved).
+            _auto_compact_if_expensive(history)
             # Deliver subagent completion notices: while commands ran (or
             # a /wait blocked) spawned subagents may have finished. Without
             # this the main agent had to poll /subagents (forensics 2026-11:
@@ -13262,7 +13368,7 @@ def main():
                 if _fail is not None:
                     box("AI ERROR", resp or "No response from AI", "err")
                     if _fail == 'auth':
-                        print(f"  {T()['dim']}Tip: /provider key <key> sets it — or pick models/providers with /model{RST}")
+                        print(f"  {T()['dim']}Tip: /provider key <name> <key> sets it — or pick models/providers with /model{RST}")
                     elif _fail == 'empty':
                         print(f"\n  {T()['warn']}No response from AI — press Enter to retry or type /quit to exit{RST}\n")
                     break
@@ -13518,6 +13624,10 @@ def main():
             _capped.extend(history[-_keep:])
             history[:] = _capped
         history[:] = trim_history(history, Config.resolve_context_window())
+
+        # Prefill economy at turn end too (long sessions that grew during
+        # the turn get compacted before the next prefill).
+        _auto_compact_if_expensive(history)
 
         # Turn ended while background work survives — make it LOUD. Live
         # incident 2026-11-15: loop guard ended a turn with 5 subagents
@@ -13885,7 +13995,7 @@ def cmd_model_list(history=None, cmd_log=None, provider=None, search=None):
         print(f"  {t['dim']}⚠ {fname}: {ferr[:80]}{RST}")
 
     if not entries:
-        print(f"  {t['warn']}No models reachable. Check /status and /provider.{RST}")
+        print(f"  {t['warn']}No models reachable. Try /provider test or /setup.{RST}")
         return
 
     if provider:
@@ -14116,6 +14226,142 @@ def _switch_main_provider(name):
         Config.save_config()
         print(f"  {t['bright']}+ Provider switched: {name}{RST}")
         print(f"  {t['warn']}Its catalog is unreachable — pick a model with /model once it's up.{RST}")
+
+
+def cmd_setup(input_fn=input):
+    """/setup — ONE command from a cold start to a working AI call.
+
+    UX audit 2026-11-24 (flagship fix): the old first-run path was 2-3
+    commands + menu navigation + an undocumented ordering rule, and the
+    documented order (`/provider key <builtin> <key>` first) was
+    provably broken by the registry clobber. This wizard is the single
+    recommended entry point: provider preset → key → live test → model
+    → switch, all reusing existing tested machinery."""
+    t = T()
+    print()
+    print(f"  {t['bright']}Prism32 setup — get to your first AI call in one command.{RST}")
+    print(f"  {t['dim']}Anything you skip keeps its current value; nothing here breaks{RST}")
+    print(f"  {t['dim']}an existing working config.{RST}")
+    print()
+
+    # 1. Preset list: built-in registry rows (the single source of truth)
+    rows = []
+    for _pn in sorted(PROVIDER_REGISTRY):
+        _pr = PROVIDER_REGISTRY[_pn]
+        rows.append((_pn, _pr.get('api_base', ''), _pr.get('model', ''),
+                     _pr.get('description', '')))
+    print(f"  {t['bright']}Providers:{RST}")
+    for i, (pn, base, model, desc) in enumerate(rows, 1):
+        _d = f" — {desc[:52]}" if desc else ""
+        print(f"   {i:>2}) {t['bright']}{pn:<14}{RST} {base[:44]}{_d}")
+    print(f"   {len(rows)+1:>2}) {t['bright']}custom{RST} — any OpenAI-compatible base URL")
+    try:
+        _sel = input_fn(f"  Select provider [1-{len(rows)+1}] (Enter = current '{Config.PROVIDER}'): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print(f"\n  {t['dim']}Setup cancelled.{RST}")
+        return
+    if not _sel:
+        print(f"  {t['dim']}Keeping current provider '{Config.PROVIDER}'.{RST}")
+        return
+    try:
+        _idx = int(_sel)
+    except ValueError:
+        print(f"  {t['dim']}Not a number — setup cancelled.{RST}")
+        return
+    if _idx < 1 or _idx > len(rows) + 1:
+        print(f"  {t['dim']}Out of range — setup cancelled.{RST}")
+        return
+    if _idx == len(rows) + 1:
+        try:
+            _base = input_fn("  Base URL (https://host/v1): ").strip()
+            _key = input_fn("  API key: ").strip()
+            _mname = input_fn("  Model name: ").strip() or "model-name"
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {t['dim']}Setup cancelled.{RST}")
+            return
+        if not _base:
+            print(f"  {t['dim']}No base URL — setup cancelled.{RST}")
+            return
+        _pname = _dedupe_provider_name("custom")
+        Config.set_provider_entry(_pname, api_base=_base, model=_mname, api_key=_key or None)
+        PROVIDER_REGISTRY[_pname]["default_key"] = _key
+        _apply_model_selection(_pname, _mname, "main")
+        print(f"  {t['ok'] if 'ok' in t else t['bright']}You're set: {_mname} on {_pname} — try: hello{RST}")
+        return
+    pname, base, model, _ = rows[_idx - 1]
+    reg = PROVIDER_REGISTRY[pname]
+
+    # 2. Key (cloud providers only — local/ollama skip)
+    _needs_key = bool(base) and "127.0.0.1" not in base and "localhost" not in base
+    _key = reg.get("default_key") or ""
+    if _needs_key:
+        try:
+            _entered = input_fn(f"  {pname} API key (Enter = keep {mask_key(_key) if _key else 'none'}): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n  {t['dim']}Setup cancelled.{RST}")
+            return
+        if _entered:
+            _key = _entered
+        if _key:
+            Config.set_provider_entry(pname, api_key=_key)
+        else:
+            print(f"  {t['warn']}No key set for {pname} — cloud calls will 401 until you add one.{RST}")
+
+    # 3. Live test
+    _rbase, _rkey, _rmodel = resolve_runtime(pname)
+    ok, why = check_endpoint_reachable(_rbase)
+    if ok:
+        print(f"  {t['ok'] if 'ok' in t else t['bright']}✓ {pname} reachable at {_rbase}{RST}")
+    else:
+        print(f"  {t['warn']}⚠ {pname} unreachable at {_rbase} ({why}) — you can finish setup anyway.{RST}")
+
+    # 4. Model pick (live catalog, Enter = registry default)
+    _models = []
+    if ok:
+        try:
+            _models = fetch_models_from(_rbase, _rkey, timeout=12)
+        except Exception:
+            _models = []
+    if _models:
+        print(f"  {t['bright']}Models (top 12):{RST}")
+        _ids = [m["id"] for m in _models]
+        for i, mid in enumerate(_ids[:12], 1):
+            print(f"   {i:>2}) {mid}")
+        _default = model if model in _ids else (_ids[0] if _ids else model)
+        try:
+            _m = input_fn(f"  Select model [1-{min(12, len(_ids))}] (Enter = {_default}): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            _m = ""
+        if _m.isdigit() and 1 <= int(_m) <= min(12, len(_ids)):
+            model = _ids[int(_m) - 1]
+        elif not _m:
+            model = _default
+        else:
+            model = _m
+    else:
+        model = model or "model-name"
+        print(f"  {t['dim']}Catalog unreachable — using model '{model}'. Change later with /model.{RST}")
+
+    # 5. Switch (applies provider+base+key+model in one pass)
+    if _key and _needs_key:
+        reg["default_key"] = _key
+    _apply_model_selection(pname, model, "main")
+
+    # 6. Optional subagent slot
+    if _models:
+        try:
+            _sub = input_fn("  Use a cheaper model for subagents? (y/N): ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            _sub = ""
+        if _sub == 'y':
+            _cheap = reg.get("cheap_model") or ""
+            if not _cheap:
+                _cheap_ids = [i for i in _models if any(w in i.lower() for w in ("flash", "mini", "small", "fast", "free"))]
+                _cheap = _cheap_ids[0] if _cheap_ids else _ids[0]
+            _apply_model_selection(pname, _cheap, "subagent")
+
+    print(f"  {t['ok'] if 'ok' in t else t['bright']}You're set: {model} on {pname} — try: hello{RST}")
+    print(f"  {t['dim']}Verify anytime with /provider test{RST}")
 
 
 def _dedupe_provider_name(base_name):

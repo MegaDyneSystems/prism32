@@ -654,6 +654,81 @@ def test_run_cmd_silent_command_still_dies():
     assert "[TIMEOUT]" in out and "silent" in out, out[:120]
 
 
+# ── provider registry merge (UX audit critical fix) ────────────────
+
+def test_provider_key_on_builtin_keeps_base_and_model():
+    """Regression (UX audit 2026-11-24, verified broken): a key-only
+    update on a built-in provider used to clobber the registry's
+    api_base/model to '' — the documented '/provider key <builtin> <key>'
+    then '/model' path dead-ended fresh installs."""
+    from prism32 import PROVIDER_REGISTRY, Config
+    old = prism32.Config.CONFIG_FILE
+    import tempfile as _tf, os as _os
+    prism32.Config.CONFIG_FILE = _os.path.join(_tf.mkdtemp(), "config.json")
+    try:
+        base_before = PROVIDER_REGISTRY["neuralwatt"].get("api_base")
+        model_before = PROVIDER_REGISTRY["neuralwatt"].get("model")
+        assert base_before, "neuralwatt built-in must have a base"
+        Config.set_provider_entry("neuralwatt", api_key="sk-merge-test")
+        reg = PROVIDER_REGISTRY["neuralwatt"]
+        assert reg.get("api_base") == base_before, \
+            f"key-only update must not clobber base (got {reg.get('api_base')!r})"
+        assert reg.get("model") == model_before, \
+            f"key-only update must not clobber model (got {reg.get('model')!r})"
+        assert reg.get("default_key") == "sk-merge-test"
+    finally:
+        prism32.Config.CONFIG_FILE = old
+
+
+# ── user-prompt preservation ─────────────────────────────────────
+
+def test_user_requests_survive_summarization():
+    prism32._ACTIVE_GOAL = ""
+    hist = [{"role": "system", "content": "sys"},
+            {"role": "user", "content": "Design the quantum dot spidroin"},
+            {"role": "assistant", "content": "on it"}]
+    for i in range(30):
+        hist.append({"role": "user", "content": f"Executed: cmd{i}\nResult:\nr{i}"})
+    hist.append({"role": "user", "content": "also make it beat kevlar in tensile tests"})
+    for i in range(10):
+        hist.append({"role": "user", "content": f"Executed: tail{i}\nResult:\nt{i}"})
+    summary = prism32._build_context_refresher(hist, keep_count=8)
+    assert "USER REQUESTS" in summary
+    assert "quantum dot spidroin" in summary
+    assert "beat kevlar" in summary, "later user prompts must survive too"
+
+
+# ── auto-compact threshold ───────────────────────────────────────
+
+def test_auto_compact_fires_on_threshold():
+    old_threshold = prism32.Config.AUTO_COMPACT_TOKENS
+    prism32.Config.AUTO_COMPACT_TOKENS = 4000  # tiny for the test
+    try:
+        hist = [{"role": "system", "content": "s"}]
+        for i in range(80):
+            hist.append({"role": "user", "content": f"Executed: c{i}\nResult:\n" + "x" * 400})
+            hist.append({"role": "assistant", "content": "ok " * 50})
+        before_tokens = sum(prism32._msg_tokens(m) for m in hist)
+        assert before_tokens > 4000
+        compacted = prism32._auto_compact_if_expensive(hist)
+        after_tokens = sum(prism32._msg_tokens(m) for m in hist)
+        assert compacted is True
+        assert after_tokens < before_tokens
+    finally:
+        prism32.Config.AUTO_COMPACT_TOKENS = old_threshold
+
+
+def test_auto_compact_off_when_below_threshold():
+    old_threshold = prism32.Config.AUTO_COMPACT_TOKENS
+    prism32.Config.AUTO_COMPACT_TOKENS = 1_000_000
+    try:
+        hist = [{"role": "system", "content": "s"},
+                {"role": "user", "content": "hi"}]
+        assert prism32._auto_compact_if_expensive(hist) is False
+    finally:
+        prism32.Config.AUTO_COMPACT_TOKENS = old_threshold
+
+
 # ── result cap disclosure ─────────────────────────────────────────
 
 def test_cap_result_discloses_skipped_volume():

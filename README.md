@@ -593,15 +593,23 @@ Arrow keys are handled as escape sequences, so normal arrow-key editing does not
 
 ## First Run Setup
 
-Recommended first commands:
+Fastest path — one command:
 
 ```text
+/setup                 Provider → key → live test → model → go live
+```
+
+`/setup` lists every built-in provider (plus custom URLs and any detected local servers), takes your key, tests the endpoint, offers the live model catalog, and switches you in one pass. The boot banner reminds you if nothing is configured yet.
+
+Manual equivalents:
+
+```text
+/provider use <name>   Switch provider directly (no menus)
+/provider key <name> <key>   Set a provider's key (safe on fresh installs)
 /provider             Interactive manager: pick by number → switch/edit/test
-/provider add         Template wizard: preset → name → key → live test → model
-/model                Browse every provider's models; assign main/subagent
+/model [search]       Browse every provider's models; assign main/subagent
 /config               Show active config
-/memory path
-/help
+/provider test        Connectivity + auth + model diagnostic
 ```
 
 Provider management examples:
@@ -1284,6 +1292,26 @@ def register(api):
 
 The repository also includes `plugins/web_scraper.py` as a sample plugin. To use it, copy it into `~/.prism32/plugins/` and restart Prism32.
 
+## Firefox Web Browsing (firefox_browser plugin)
+
+Drives your REAL Firefox session — logged-in sites, cookies, no re-login — so the agent is as powerful as a normal user: it can make posts, do paperwork, run research across any search engine, and read pages behind logins. Built on Firefox's built-in Marionette remote-control protocol (pure stdlib, no extension, no async frameworks).
+
+```text
+/fox start default      Attach, or launch Firefox with Marionette enabled on
+                        your default profile (close Firefox fully first — one
+                        instance per profile). All your logins apply.
+/fox open <url>         Navigate and report title
+/fox read [max_chars]   Page text for the agent to reason over
+/fox find <css> / click <css> [n] / type <css> <text> / key <Enter>
+/fox js <script>        Run sync JavaScript in the page
+/fox shot [name]        Screenshot to ~/.prism32/firefox/
+/fox tabs | tab <n> | closetab <n>
+/fox search <engine> <query>   ddg | google | startpage | marginalia | mojeek | wiby
+/fox status | stop | help
+```
+
+Every command prints its result (the agent sees it in the conversation); errors are reported inline and never crash the session. Marionette listens on localhost only, with no auth — while it is enabled, any local process can drive the browser; run `/fox stop` and close Firefox to end that.
+
 ## Plugin Cheat Sheet For Any AI Chatbot
 
 Paste this into another AI chatbot when you want it to create a Prism32 extension on the fly:
@@ -1421,6 +1449,7 @@ Important settings:
 - `subagent_max_steps`: step budget for `/spawn` and `/delegate` subagents (default 200; see `/maxsteps sub`).
 - `max_concurrent_subagents`: max simultaneously running async subagents (default 6); further spawns queue.
 - `subagent_context_tokens`: bounded working context per subagent (default 32768) — keeps per-step prompt cost flat instead of growing linearly.
+- `auto_compact_tokens`: when the MAIN conversation's estimated size crosses this many tokens it is summarized automatically (objective, user requests, and discoveries preserved) so prefill stays cheap (default 100000; 0 disables). `/compact` does it on demand.
 - `subagent_ai_timeout`: per-request timeout for subagent model calls (default 300s; the main `ai_timeout` of 3600s exists for queued flex tiers, not swarm work).
 - `max_memory_ctx`: character limit for injected memory context.
 - `subagent_model`: optional model override for subagents.
