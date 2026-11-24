@@ -4386,11 +4386,11 @@ class Config:
     # model's window (up to 1M tokens) — subagent prompts grew linearly
     # (step ~100 re-sent 40-50K tokens/step). This keeps steps flat-cost.
     SUBAGENT_CONTEXT_TOKENS = 32768
-    # Auto-compact the MAIN conversation when its estimated size crosses
-    # this many tokens (0 = off; default 100K). Large-window models never
-    # reach the 75% trim, so a long session re-bills hundreds of K tokens
-    # of prefill every call until it is summarized.
-    AUTO_COMPACT_TOKENS = 100000
+    # Auto-compact the MAIN conversation when it approaches the model's
+    # ACTUAL context window (percentage) — or an optional absolute token
+    # cap for tiny-window models (0 = off).
+    AUTO_COMPACT_PCT = 80
+    AUTO_COMPACT_TOKENS = 0
     # Per-request timeout for subagent model calls. The main AI_TIMEOUT
     # (3600s, for queued flex tiers) let one pathological subagent step
     # stall for hours; subagents get a tight bound instead.
@@ -4481,6 +4481,7 @@ class Config:
                 "max_concurrent_subagents": cls.MAX_CONCURRENT_SUBAGENTS,
                 "subagent_context_tokens": cls.SUBAGENT_CONTEXT_TOKENS,
                 "auto_compact_tokens": cls.AUTO_COMPACT_TOKENS,
+                "auto_compact_pct": cls.AUTO_COMPACT_PCT,
                 "subagent_ai_timeout": cls.SUBAGENT_AI_TIMEOUT,
                 "mission_max_steps": cls.MISSION_MAX_STEPS,
                 "auto_save_interval": cls.AUTO_SAVE_INTERVAL,
@@ -4724,6 +4725,8 @@ class Config:
                 cls.SUBAGENT_CONTEXT_TOKENS = max(4096, _tolerant_int(data["subagent_context_tokens"], cls.SUBAGENT_CONTEXT_TOKENS))
             if "auto_compact_tokens" in data:
                 cls.AUTO_COMPACT_TOKENS = max(0, _tolerant_int(data["auto_compact_tokens"], cls.AUTO_COMPACT_TOKENS))
+            if "auto_compact_pct" in data:
+                cls.AUTO_COMPACT_PCT = max(10, min(100, _tolerant_int(data["auto_compact_pct"], cls.AUTO_COMPACT_PCT)))
             if "subagent_ai_timeout" in data:
                 cls.SUBAGENT_AI_TIMEOUT = max(30, _tolerant_int(data["subagent_ai_timeout"], cls.SUBAGENT_AI_TIMEOUT))
             if "mission_max_steps" in data:
@@ -5078,24 +5081,34 @@ def compact_history(history, budget=None):
     return before, context_pct(history)
 
 def _auto_compact_if_expensive(history):
-    """Owner request 2026-11-24: 'when context gets high, summarize so
-    prefill isn't super expensive'. Large-window models never hit the
-    75% trim (a glm session idles at ~30-50% of 1M tokens = 300-500K
-    tokens re-billed every call), so cross an absolute token threshold
-    instead and compact to half of it. Returns True if it compacted."""
-    threshold = getattr(Config, "AUTO_COMPACT_TOKENS", 0)
-    if threshold <= 0:
-        return False
+    """Summarize the conversation when it approaches the model's ACTUAL
+    context window (owner request 2026-11-24: 'compact at 80% of how much
+    context the model actually has'). Fires at AUTO_COMPACT_PCT of the
+    resolved window, compacting to ~40% so prefill cost halves; an
+    optional absolute AUTO_COMPACT_TOKENS cap ORs in for tiny-window
+    models. Summary preserves objective, user requests and discoveries."""
+    pct_threshold = max(10, getattr(Config, "AUTO_COMPACT_PCT", 80))
+    token_threshold = max(0, getattr(Config, "AUTO_COMPACT_TOKENS", 0))
     try:
         total = sum(_msg_tokens(m) for m in history)
     except Exception:
         return False
-    if total <= threshold:
+    window = Config.resolve_context_window()
+    _why = None
+    if window > 0 and (total / window * 100) >= pct_threshold:
+        _why = f"{pct_threshold}% of the {window//1000}K-token window"
+        _budget = max(2000, int(window * 0.40))
+    elif token_threshold > 0 and total > token_threshold:
+        _why = f"{token_threshold} tokens"
+        _budget = max(2000, token_threshold // 2)
+    else:
         return False
     try:
-        before, after = compact_history(history, budget=max(2000, threshold // 2))
+        before = context_pct(history)
+        compact_history(history, budget=_budget)
+        after = context_pct(history)
         viz.status(f"Auto-compact: {before}% → {after}% context "
-                   f"(crossed {threshold} tokens — summary preserves objective, "
+                   f"(crossed {_why} — summary preserves objective, "
                    "user requests and discoveries)", "warning")
         return True
     except Exception:
@@ -5476,6 +5489,28 @@ def _no_braces(s):
 
 def strip_ansi(text):
     return _RE_ANSI.sub('', text)
+
+def _vis_cap(s, limit):
+    """Truncate to `limit` ANSI-visible columns, appending … when cut.
+    Escape codes pass through (never counting toward width) so escape
+    fragments in command output cannot break scroll-region alignment."""
+    s = s or ""
+    if len(strip_ansi(s)) <= limit:
+        return s
+    out = []
+    vis = 0
+    i = 0
+    stop = max(1, limit - 1)
+    while i < len(s) and vis < stop:
+        m = _RE_ANSI.match(s, i)
+        if m:
+            out.append(m.group(0))
+            i = m.end()
+            continue
+        out.append(s[i])
+        vis += 1
+        i += 1
+    return "".join(out) + RST + "…"
 
 def _supports_ansi():
     """Check if terminal supports ANSI escape codes."""
@@ -6509,6 +6544,61 @@ def get_session_stats(session_data):
 
 # ── Visual Feedback ────────────────────────────────────────────
 
+_RE_CTRL_STRIP = re.compile(r'[\x00-\x08\x0b-\x1f\x7f]')
+
+def _sanitize_chat_line(s):
+    """One chat line safe to print mid-turn: ANSI sequences and raw
+    control/ESC bytes removed, so command output can never move the
+    cursor or break scroll-region alignment."""
+    return _RE_CTRL_STRIP.sub('', strip_ansi(s or ""))
+
+def _cmd_action_tag(cmd):
+    """Classify an execute-block command for the pretty action line.
+    Returns (icon, subject): icon is None for read-only commands;
+    subject is the file/path the command mutates (or a short label)
+    so code changes are instantly visible in the chat."""
+    if not cmd:
+        return None, ""
+    c = cmd.strip()
+    low = c.lower()
+    try:
+        toks = shlex.split(c)
+    except ValueError:
+        toks = c.split()
+
+    def _nonswitch(seq):
+        return [a for a in seq if not a.startswith('-')]
+
+    if re.search(r'\bgit\b[^;|&]*\bcommit\b', low):
+        return "\u270f", "git commit"
+    if re.search(r'(^|[;&|\s])patch\s', low):
+        return "\u270f", "patch"
+    if re.search(r'\bsed\s+(-[a-z]*i[a-z]*\s+|--in-place\S*\s+)', low):
+        for a in reversed(_nonswitch(toks)):
+            if a not in ("sed",) and "s/" not in a:
+                return "\u270f", a
+        return "\u270f", "sed edit"
+    if re.search(r'(^|[;&|\s])tee\s', low):
+        for a in toks[1:]:
+            if not a.startswith('-'):
+                return "\u270f", a
+    for verb in ('mv', 'cp'):
+        if re.search(r'(^|[;&|\s])' + verb + r'\s', low):
+            ns = _nonswitch(toks)
+            if len(ns) >= 2:
+                return "\u270f", ns[-1]
+    if re.search(r'(^|[;&|\s])rm\s', low):
+        for a in toks[1:]:
+            if not a.startswith('-'):
+                return "\u270f", a
+    m = re.search(r'(?<![0-9<>])>>?\s*([^\s;|&]+)', c)
+    if m:
+        return "\u270f", m.group(1)
+    m = re.search(r"open\(\s*['\"]([^'\"]+)['\"]\s*,\s*['\"][wa+]", c)
+    if m and re.search(r'\bpython[23]?\s+(-c|-m)\b', low):
+        return "\u270f", m.group(1)
+    return None, ""
+
 class ToolVisualizer:
     def __init__(self):
         self.thinking_chars = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
@@ -6523,17 +6613,38 @@ class ToolVisualizer:
         self.thinking_idx += 1
         sys.stdout.write(f"\r {self.t['dim']}{char} {message}...{RST}{CLR_LINE}")
         sys.stdout.flush()
-    
+
     def tool_call(self, tool_name, args=""):
+        """Pretty one-line action panel: left rail + gear/edit mark,
+        then the command in bright (distinct from primary-colored prose).
+        Commands that mutate files get the ✏ mark and their target
+        path promoted to accent color."""
         t = self.t
-        args_preview = args[:50] + "..." if len(args) > 50 else args
-        print(f"\n {t['accent']}\U0001f527 {t['bright']}{tool_name}{RST} {t['dim']}{args_preview}{RST}")
-    
+        flat = " ".join((args or "").split())
+        args_preview = _vis_cap(_sanitize_chat_line(flat), 70)
+        icon, subject = _cmd_action_tag(flat)
+        with stdout_lock:
+            if icon:
+                subj = _vis_cap(subject, 40)
+                print(f" {t['accent']}▌{RST} {t['accent']}{icon}{RST} "
+                      f"{t['accent']}{subj}{RST}  {t['bright']}{args_preview}{RST}")
+            else:
+                print(f" {t['accent']}▌{RST} {t['accent']}\u2699{RST} "
+                      f"{t['dim']}{tool_name}{RST}  {t['bright']}{args_preview}{RST}")
+
     def tool_result(self, success=True, preview=""):
+        """One-line result: ✓ in theme ok / ✗ in theme err; preview dim on
+        success, first error line in err color on failure. Control chars
+        are neutralized and width capped so raw command output can never
+        break scroll-region alignment."""
         t = self.t
-        icon = f"{t.get('ok', t['bright'])}\u2713{RST}" if success else f"{t['err']}\u2717{RST}"
-        preview_trunc = preview[:80] + "..." if len(preview) > 80 else preview
-        print(f"   {icon} {t['dim']}{preview_trunc}{RST}")
+        prev = _sanitize_chat_line((preview or "").split("\n", 1)[0]).strip()
+        prev_line = _vis_cap(prev, 72)
+        with stdout_lock:
+            if success:
+                print(f"   {t.get('ok', t['bright'])}\u2713{RST} {t['dim']}{prev_line}{RST}")
+            else:
+                print(f"   {t['err']}\u2717{RST} {t['err']}{prev_line}{RST}")
     
     def thinking_start(self):
         self.thinking_idx = 0
@@ -6824,8 +6935,7 @@ def cmd_session_list():
     if not sessions:
         viz.status("No saved sessions", "info")
         return
-    print(f"\n {t['bright']}SAVED SESSIONS{RST}")
-    print(f" {t['dim']}{'─' * 60}{RST}")
+    lines = []
     for s in sessions[:10]:
         sid = s['id']
         title = s.get('title', sid)[:50]
@@ -6833,10 +6943,10 @@ def cmd_session_list():
         msgs = s.get('messages', 0)
         cmds = s.get('commands', 0)
         model = s.get('model', 'unknown')[:20]
-        print(f" {t['primary']}{title}{RST}")
-        print(f"   {t['dim']}{sid}  |  {ts}  |  {msgs} msgs  |  {cmds} cmds  |  {model}{RST}")
-    print(f" {t['dim']}{'─' * 60}{RST}")
-    print(f" {t['dim']}Total: {len(sessions)} sessions{RST}")
+        lines.append(f"{t['primary']}{title}{RST}")
+        lines.append(f"{t['dim']}{sid}  |  {ts}  |  {msgs} msgs  |  {cmds} cmds  |  {model}{RST}")
+    lines.append(f"{t['dim']}Total: {len(sessions)} sessions{RST}")
+    box("SAVED SESSIONS", "\n".join(lines), "primary")
 
 def cmd_session_delete(session_id):
     t = T()
@@ -11527,10 +11637,13 @@ def main():
             continue
 
         if cmd == 'version':
-            print(f"\n  Prism32 v7.3.0 — MegaDyne Systems")
-            print(f"  Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})")
-            print(f"  Runtime dir: {_PRISM32_HOME}")
-            print(f"  Config: {os.path.join(_PRISM32_HOME, 'config.json')}\n")
+            box("VERSION", "\n".join([
+                f"{t['bright']}Prism32 v7.3.0 — MegaDyne Systems{RST}",
+                f"Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})",
+                f"{t['dim']}Runtime dir: {_PRISM32_HOME}{RST}",
+                f"{t['dim']}Config: {os.path.join(_PRISM32_HOME, 'config.json')}{RST}",
+            ]), "primary")
+            print()
             continue
 
         if cmd == 'clear':
@@ -12515,7 +12628,14 @@ def main():
             # Operator-side mirror of the agent /wait: block until
             # subagents/background jobs finish (default: indefinitely). Escape during
             # the wait is handled by the cancel check inside _wait_for_work.
-            print(_wait_for_work(args_str))
+            _wait_result = _wait_for_work(args_str)
+            print(_wait_result)
+            if _wait_result.startswith("[CANCELLED]"):
+                # Escape during an OPERATOR-typed wait set the sticky cancel
+                # flag; nothing in this path cleared it, so the user's NEXT
+                # chat message died instantly with "STOPPED" (render-drive
+                # finding 2026-11-24).
+                clear_agent_cancel()
             print()
             continue
 
@@ -12614,7 +12734,10 @@ def main():
                     except ValueError:
                         print(f"  {t['dim']}Usage: maxsteps mission <count>{RST}")
                 else:
-                    print(f"  Mission shard max steps: {t['bright']}{Config.MISSION_MAX_STEPS}{RST}")
+                    box("MAX STEPS", "\n".join([
+                        f"Mission shard max steps: {t['bright']}{Config.MISSION_MAX_STEPS}{RST}",
+                        f"{t['dim']}Set: maxsteps mission <count>{RST}",
+                    ]), "primary")
                 print()
                 continue
             if parts and parts[0].lower() in ('sub', 'subagents', 'subagent'):
@@ -12630,7 +12753,10 @@ def main():
                     except ValueError:
                         print(f"  {t['dim']}Usage: maxsteps sub <count>{RST}")
                 else:
-                    print(f"  Subagent max steps: {t['bright']}{Config.SUBAGENT_MAX_STEPS}{RST}")
+                    box("MAX STEPS", "\n".join([
+                        f"Subagent max steps: {t['bright']}{Config.SUBAGENT_MAX_STEPS}{RST}",
+                        f"{t['dim']}Set: maxsteps sub <count>{RST}",
+                    ]), "primary")
                 print()
                 continue
             if args_str:
@@ -12645,8 +12771,11 @@ def main():
                 except ValueError:
                     print(f"  {t['dim']}Usage: maxsteps <count>{RST}")
             else:
-                print(f"  Goal max steps:      {t['bright']}{Config.GOAL_MAX_STEPS}{RST}")
-                print(f"  Subagent max steps:  {t['bright']}{Config.SUBAGENT_MAX_STEPS}{RST} (maxsteps sub <n>)")
+                box("MAX STEPS", "\n".join([
+                    f"Goal max steps:      {t['bright']}{Config.GOAL_MAX_STEPS}{RST}",
+                    f"Subagent max steps:  {t['bright']}{Config.SUBAGENT_MAX_STEPS}{RST}",
+                    f"{t['dim']}Set: maxsteps <n>  |  maxsteps sub <n>  |  maxsteps mission <n>{RST}",
+                ]), "primary")
             print()
             continue
 
@@ -12803,6 +12932,9 @@ def main():
                     history.append({"role": "user",
                         "content": f"[Subagent {sa.id} cancelled by operator]\nPartial result: {(sa.result or '')[:800]}"})
                     box("STOPPED", f"Subagent {sa.id} cancelled by Escape", "warn")
+                    # Same sticky-cancel bug as the operator /wait path: the
+                    # next chat message would die instantly otherwise.
+                    clear_agent_cancel()
                     continue
                 _quantum.put(f"subagent_{sa.id}_result", sa.result)
                 if sa.result:
@@ -14132,20 +14264,17 @@ def reset_api_base():
 def cmd_provider_list():
     """List all configured providers."""
     t = T()
-    print(f"\n {t['bright']}MODEL PROVIDERS{RST}")
-    print(f" {t['dim']}{'─' * 60}{RST}")
-
+    lines = []
     for key, prov in PROVIDER_REGISTRY.items():
         marker = f"{t['bright']}*{RST}" if key == Config.PROVIDER else " "
-        print(f" {marker} {t['primary']}{key:<12}{RST} {t['dim']}{prov.get('display_name', prov.get('name', ''))}{RST}")
+        lines.append(f"{marker} {t['primary']}{key:<12}{RST} {t['dim']}{prov.get('display_name', prov.get('name', ''))}{RST}")
         key_state = mask_key(prov.get("default_key")) if prov.get("default_key") else "(no stored key)"
         base_state = prov.get('api_base', '') or "(not set — /provider api {} <url>)".format(key)
-        print(f"   {t['dim']}Key: {key_state}   API: {base_state}{RST}")
-        print(f"   {t['dim']}Model: {prov.get('model', '')[:40]}{RST}")
-        print()
-
-    print(f" {t['dim']}{'─' * 60}{RST}")
-    print(f" {t['dim']}* = current provider  |  Pick models (main/subagent) with {t['bright']}/model{RST}")
+        lines.append(f"   {t['dim']}Key: {key_state}   API: {base_state}{RST}")
+        lines.append(f"   {t['dim']}Model: {prov.get('model', '')[:40]}{RST}")
+        lines.append("")
+    lines.append(f"{t['dim']}* = current provider  |  Pick models (main/subagent) with {t['bright']}/model{RST}")
+    box("MODEL PROVIDERS", "\n".join(lines), "primary")
     print()
     print(f" {t['bright']}The interactive manager does all of this by number:{RST}")
     print(f"  {t['dim']}Switch / edit / test / remove . {t['bright']}/provider{RST}{t['dim']} (Enter picks, s=switch, e=edit){RST}")

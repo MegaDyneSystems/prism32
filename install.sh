@@ -106,15 +106,25 @@ else
 fi
 
 # ── ANSI + log helpers (needed early for macOS SSL fix) ──
-RST='\033[0m'; BLD='\033[1m'; DIM='\033[2m'
-G='\033[92m'; Y='\033[93m'; CY='\033[96m'; R='\033[91m'
+# Colors only on a real terminal with NO_COLOR unset; piped/non-tty
+# output (curl | sh, CI logs) stays plain ASCII.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  RST='\033[0m'; BLD='\033[1m'; DIM='\033[2m'
+  G='\033[92m'; Y='\033[93m'; CY='\033[96m'; R='\033[91m'
+else
+  RST=''; BLD=''; DIM=''; G=''; Y=''; CY=''; R=''
+fi
 
-log()   { echo -e "$(date '+%H:%M:%S') $*" >> "$LOG_FILE"; echo -e "$*"; }
-ok()    { log "  ${G}*${RST} $*"; }
-warn()  { log "  ${Y}w${RST} $*"; }
-fail()  { log "  ${R}!${RST} $*"; }
-header(){ echo -e "\n${CY}${BLD}--- $*${RST}"; }
-sub()   { echo -e "  ${DIM}|${RST}  $*"; }
+# printf %b emitters: bash/dash/busybox-ash agree on %b (echo -e does not),
+# paths and messages pass through untouched, and install.log gets plain
+# text instead of escape soup.
+log()   { printf '%s %s\n' "$(date '+%H:%M:%S')" "$*" >> "$LOG_FILE"; }
+emit()  { printf '%b\n' "$*"; }
+ok()    { log "ok: $*";   emit "  ${G}✔${RST} $*"; }
+warn()  { log "warn: $*"; emit "  ${Y}⚠${RST} $*"; }
+fail()  { log "fail: $*"; emit "  ${R}✗${RST} $*"; }
+header(){ printf '\n%b\n' "  ${CY}${BLD}── $* ──${RST}"; }
+sub()   { emit "  ${DIM}|${RST}  $*"; }
 
 # ── macOS: fix SSL certificates ──
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -160,10 +170,10 @@ EP_MODELS_FALLBACK=(
 #  BANNER
 # ═══════════════════════════════════════════════════════════════
 echo ""
-echo -e "${CY}${BLD}  +========================================+${RST}"
-echo -e "${CY}${BLD}  |       Prism32 Installer v7.2           |${RST}"
-echo -e "${CY}${BLD}  |   MegaDyne Systems (MDS) Edition       |${RST}"
-echo -e "${CY}${BLD}  +========================================+${RST}"
+emit "  ${CY}${BLD}══════════════════════════════════════════════════════════${RST}"
+emit "  ${CY}${BLD}                    Prism32 Installer v7.2${RST}"
+emit "  ${CY}${BLD}                MegaDyne Systems (MDS) Edition${RST}"
+emit "  ${CY}${BLD}══════════════════════════════════════════════════════════${RST}"
 echo ""
 
 rm -f "$LOG_FILE"
@@ -172,7 +182,7 @@ mkdir -p "$RUNTIME_DIR" 2>/dev/null || true
 # ═══════════════════════════════════════════════════════════════
 #  1. Validate source
 # ═══════════════════════════════════════════════════════════════
-header "Step 1/9 - Validating Source"
+header "Step 1/9: Validating Source"
 
 if [ ! -f "$SRC_FILE" ]; then
   fail "Source not found: $SRC_FILE"
@@ -215,7 +225,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 #  2. Platform check
 # ═══════════════════════════════════════════════════════════════
-header "Step 2/9 - Platform Check"
+header "Step 2/9: Platform Check"
 
 echo -e "  ${DIM}OS:${RST}     $(uname -s)  $(uname -m)"
 echo -e "  ${DIM}Python:${RST}  $("$PY3" --version 2>&1)${DIM} ($PY3)${RST}"
@@ -230,7 +240,7 @@ if [ ! -w "${PREFIX:-/usr/local}/bin" ]; then
   NEED_ROOT=1
   if [ "$AUTO" = "0" ] && [ -z "${SU_PASS+x}" ] && [ -t 0 ]; then
     echo ""
-    echo -e "  ${Y}w${RST} Root access required for symlink in ${PREFIX:-/usr/local}/bin/"
+    echo -e "  ${Y}⚠${RST} Root access required for symlink in ${PREFIX:-/usr/local}/bin/"
     echo -n "  Root password: "; read -rs SU_PASS || true; echo ""
   fi
 fi
@@ -254,7 +264,7 @@ root() {
 # ═══════════════════════════════════════════════════════════════
 #  3. Backup
 # ═══════════════════════════════════════════════════════════════
-header "Step 3/9 - Backing Up"
+header "Step 3/9: Backing Up"
 
 backups=0
 if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
@@ -283,7 +293,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 #  4. Symlink + directories
 # ═══════════════════════════════════════════════════════════════
-header "Step 4/9 - Installing"
+header "Step 4/9: Installing"
 
 _install_wrapper() {
   local target="$1"
@@ -403,7 +413,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 #  5. API config (multi-provider) — skipped in auto mode if config exists
 # ═══════════════════════════════════════════════════════════════
-header "Step 5/9 - API Configuration"
+header "Step 5/9: API Configuration"
 
 # In auto-update mode, preserve existing config — don't clobber provider info
 if [ "$AUTO" = "1" ] && [ -f "$CONFIG_FILE" ]; then
@@ -496,7 +506,7 @@ except Exception:
   local model_name=""
   if [ "$models_raw" = "FAIL" ] || [ -z "$models_raw" ]; then
     local fb="${EP_MODELS_FALLBACK[$pidx]}"
-    echo -e "  ${Y}w${RST} Could not fetch models — enter manually"
+    echo -e "  ${Y}⚠${RST} Could not fetch models — enter manually"
     if [ -t 0 ]; then
       read -r -p "  Model name [$fb]: " model_name || model_name=""
     fi
@@ -579,7 +589,7 @@ fi  # end of else (non-auto or no config)
 # ═══════════════════════════════════════════════════════════════
 #  6. Connection test
 # ═══════════════════════════════════════════════════════════════
-header "Step 6/9 - Connection Test"
+header "Step 6/9: Connection Test"
 
 _test_url() {
   "$PY3" -c "
@@ -605,7 +615,7 @@ rc="$(_test_url "${API_BASE}/models")"
 #  7. Write config
 # ═══════════════════════════════════════════════════════════════
 
-header "Step 7/9 - Writing Config"
+header "Step 7/9: Writing Config"
 
 if [ "$skip_config_write" = "1" ]; then
   ok "Config preserved (auto-update mode)"
@@ -681,7 +691,7 @@ c['root_pass'] = pw
 json.dump(c, open(path, 'w'), indent=2)
 PYEOF
       chmod 600 "$CONFIG_FILE" 2>/dev/null || true
-      echo -e "  ${G}+${RST} Root password stored in config (chmod 600) — agent su/sudo now work"
+      echo -e "  ${G}✔${RST} Root password stored in config (chmod 600) — agent su/sudo now work"
       ;;
   esac
 fi
@@ -701,7 +711,7 @@ for k, v in c.items():
 # ═══════════════════════════════════════════════════════════════
 #  8. Dependencies
 # ═══════════════════════════════════════════════════════════════
-header "Step 8/9 - Dependencies"
+header "Step 8/9: Dependencies"
 
 "$PY3" -c "import urllib.request, json, subprocess, shutil, socket, threading, queue" 2>/dev/null \
   && ok "All stdlib modules available" \
@@ -722,7 +732,7 @@ echo -e "  ${DIM}Refreshing startup memory, harness scan, and evolve baseline...
 # ═══════════════════════════════════════════════════════════════
 #  9. Verify
 # ═══════════════════════════════════════════════════════════════
-header "Step 9/9 - Verification"
+header "Step 9/9: Verification"
 
 hash -r 2>/dev/null || true
 # Verify the wrapper THIS install actually wrote — `command -v` alone reports
@@ -778,9 +788,9 @@ sub "Log:        $LOG_FILE"
 #  SUMMARY
 # ═══════════════════════════════════════════════════════════════
 echo ""
-echo -e "${G}${BLD}  +========================================+${RST}"
-echo -e "${G}${BLD}  |      Installation Complete             |${RST}"
-echo -e "${G}${BLD}  +========================================+${RST}"
+emit "  ${G}${BLD}══════════════════════════════════════════════════════════${RST}"
+emit "  ${G}${BLD}                    Installation Complete${RST}"
+emit "  ${G}${BLD}══════════════════════════════════════════════════════════${RST}"
 echo ""
 # Find provider display name from PROV key
 for i in "${!EP_KEYS[@]}"; do
@@ -801,12 +811,12 @@ echo -e "  ${CY}Help: prism32 --help${RST}"
 echo ""
 
 if [ -n "${api_key:-}" ]; then
-  echo -e "  ${G}+${RST} API key saved to ${CY}$CONFIG_FILE${RST} (top-level + providers.$PROV)"
+  echo -e "  ${G}✔${RST} API key saved to ${CY}$CONFIG_FILE${RST} (top-level + providers.$PROV)"
   echo ""
 fi
 
 if [ "$LOW_RAM" = "1" ]; then
-  echo -e "  ${Y}w${RST} Low-RAM device detected."
+  echo -e "  ${Y}⚠${RST} Low-RAM device detected."
   echo -e "     Compile .pyc on a machine with more RAM:"
   echo -e "     ${CY}python3.7 -m py_compile prism32.py${RST}"
   echo -e "     Then copy ${CY}prism32.pyc${RST} to this device and run:"

@@ -1297,9 +1297,17 @@ The repository also includes `plugins/web_scraper.py` as a sample plugin. To use
 Drives your REAL Firefox session — logged-in sites, cookies, no re-login — so the agent is as powerful as a normal user: it can make posts, do paperwork, run research across any search engine, and read pages behind logins. Built on Firefox's built-in Marionette remote-control protocol (pure stdlib, no extension, no async frameworks).
 
 ```text
+/fox enable [now]       ONE-TIME setup: if Firefox is already controllable it
+                        just attaches; otherwise it asks for ONE graceful
+                        restart (session restore brings your tabs back) and
+                        relaunches Firefox with Marionette, then patches your
+                        launcher (.desktop) so every future start is
+                        controllable. 'now' skips the Enter confirmation.
+                        Non-interactive contexts never close Firefox.
+                        No other /fox command ever closes Firefox or tabs.
 /fox start default      Attach, or launch Firefox with Marionette enabled on
-                        your default profile (close Firefox fully first — one
-                        instance per profile). All your logins apply.
+                        your default profile. If Firefox is already running
+                        without control, it just says to run /fox enable.
 /fox open <url>         Navigate and report title
 /fox read [max_chars]   Page text for the agent to reason over
 /fox find <css> / click <css> [n] / type <css> <text> / key <Enter>
@@ -1310,7 +1318,7 @@ Drives your REAL Firefox session — logged-in sites, cookies, no re-login — s
 /fox status | stop | help
 ```
 
-Every command prints its result (the agent sees it in the conversation); errors are reported inline and never crash the session. Marionette listens on localhost only, with no auth — while it is enabled, any local process can drive the browser; run `/fox stop` and close Firefox to end that.
+Every command prints its result (the agent sees it in the conversation); errors are reported inline and never crash the session. Marionette listens on localhost only, with no auth — while it is enabled, any local process can drive the browser; run `/fox stop` and close Firefox to end that. Undo the launcher patch by deleting the patched file it names (~/.local/share/applications/firefox.desktop).
 
 ## Plugin Cheat Sheet For Any AI Chatbot
 
@@ -1449,7 +1457,8 @@ Important settings:
 - `subagent_max_steps`: step budget for `/spawn` and `/delegate` subagents (default 200; see `/maxsteps sub`).
 - `max_concurrent_subagents`: max simultaneously running async subagents (default 6); further spawns queue.
 - `subagent_context_tokens`: bounded working context per subagent (default 32768) — keeps per-step prompt cost flat instead of growing linearly.
-- `auto_compact_tokens`: when the MAIN conversation's estimated size crosses this many tokens it is summarized automatically (objective, user requests, and discoveries preserved) so prefill stays cheap (default 100000; 0 disables). `/compact` does it on demand.
+- `auto_compact_pct`: when the MAIN conversation reaches this percent of the model's actual context window it is summarized automatically (objective, user requests, and discoveries preserved), compacting to ~40% so prefill stays cheap (default 80). `/compact` does it on demand.
+- `auto_compact_tokens`: optional absolute token cap that ORs in for tiny-window models (default 0 = off).
 - `subagent_ai_timeout`: per-request timeout for subagent model calls (default 300s; the main `ai_timeout` of 3600s exists for queued flex tiers, not swarm work).
 - `max_memory_ctx`: character limit for injected memory context.
 - `subagent_model`: optional model override for subagents.

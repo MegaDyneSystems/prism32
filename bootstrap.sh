@@ -44,24 +44,29 @@ fi
 RUNTIME_DIR="$HOME/.prism32"
 
 # ── ANSI ──
-if [ -t 1 ]; then
+# Colors only on a real terminal with NO_COLOR unset; curl|sh pipes
+# and CI logs stay plain ASCII.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
   RST='\033[0m'; BLD='\033[1m'; DIM='\033[2m'
   G='\033[92m'; Y='\033[93m'; CY='\033[96m'; R='\033[91m'
 else
   RST=''; BLD=''; DIM=''; G=''; Y=''; CY=''; R=''
 fi
 
-log()   { echo -e "$*"; }
-ok()    { echo -e "  ${G}*${RST} $*"; }
-warn()  { echo -e "  ${Y}w${RST} $*"; }
-fail()  { echo -e "  ${R}!${RST} $*"; }
-header(){ echo -e "\n${CY}${BLD}--- $*${RST}"; }
+# printf %b emitters: POSIX sh (dash/busybox ash) agree on %b where
+# echo -e behavior varies; message text passes through untouched.
+emit()  { printf '%b\n' "$*"; }
+log()   { emit "$*"; }
+ok()    { emit "  ${G}✔${RST} $*"; }
+warn()  { emit "  ${Y}⚠${RST} $*"; }
+fail()  { emit "  ${R}✗${RST} $*"; }
+header(){ printf '\n%b\n' "  ${CY}${BLD}── $* ──${RST}"; }
 
 echo ""
-echo -e "${CY}${BLD}  +========================================+${RST}"
-echo -e "${CY}${BLD}  |  Prism32 Universal Bootstrap Installer  |${RST}"
-echo -e "${CY}${BLD}  |  MegaDyne Systems (MDS) Edition         |${RST}"
-echo -e "${CY}${BLD}  +========================================+${RST}"
+emit "  ${CY}${BLD}══════════════════════════════════════════════════════════${RST}"
+emit "  ${CY}${BLD}            Prism32 Universal Bootstrap Installer${RST}"
+emit "  ${CY}${BLD}                MegaDyne Systems (MDS) Edition${RST}"
+emit "  ${CY}${BLD}══════════════════════════════════════════════════════════${RST}"
 echo ""
 
 # ── Detect platform ──

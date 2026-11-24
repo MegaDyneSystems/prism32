@@ -700,6 +700,22 @@ def test_user_requests_survive_summarization():
 
 # ── auto-compact threshold ───────────────────────────────────────
 
+def test_auto_compact_fires_on_pct_of_window(monkeypatch):
+    """Owner spec 2026-11-24: compact at 80% of the model's ACTUAL context."""
+    monkeypatch.setattr(prism32.Config, "resolve_context_window", lambda: 20000)
+    prism32.Config.AUTO_COMPACT_PCT = 80
+    prism32.Config.AUTO_COMPACT_TOKENS = 0
+    hist = [{"role": "system", "content": "s"}]
+    for i in range(120):
+        hist.append({"role": "user", "content": f"Executed: c{i}\nResult:\n" + "x" * 400})
+        hist.append({"role": "assistant", "content": "ok " * 50})
+    total = sum(prism32._msg_tokens(m) for m in hist)
+    assert total >= 16000, f"test history must be over 80% of the window (got {total})"
+    compacted = prism32._auto_compact_if_expensive(hist)
+    assert compacted is True
+    assert sum(prism32._msg_tokens(m) for m in hist) < total
+
+
 def test_auto_compact_fires_on_threshold():
     old_threshold = prism32.Config.AUTO_COMPACT_TOKENS
     prism32.Config.AUTO_COMPACT_TOKENS = 4000  # tiny for the test

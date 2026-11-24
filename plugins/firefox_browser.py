@@ -107,14 +107,37 @@ Profile flags (from `firefox --help`, verified text):
                           operator's real logins/cookies apply.
     -P <name>          -> select profile by NAME from profiles.ini.
     --profile <path>   -> use profile at PATH (throwaway/test profiles).
+
+ENABLE (one-time, permanent):
+    `/fox enable` is the ONLY flow that ever closes Firefox — and it
+    does so ONCE, gracefully (SIGTERM = clean shutdown; Firefox saves
+    the session, and session restore brings the tabs back). Steps:
+    (1) if a Marionette port is already live it just attaches
+    ("already enabled"); (2) else, if a Firefox is running without
+    Marionette it prints the honest one-time notice and waits for Enter
+    (interactive stdin only — 'now' skips the wait for automation;
+    non-tty contexts never kill anything, they print instructions);
+    (3) SIGTERM Firefox, wait for a clean exit; (4) relaunch detached
+    with --marionette (default profile — tabs return); (5) patch a
+    user-level .desktop copy of the Firefox launcher so every FUTURE
+    normal launch keeps Marionette (marker-guarded, idempotent; on
+    macOS/Windows or odd setups it prints manual instructions); (6)
+    persist {"enabled": true} in state.json and print status. No other
+    command ever calls pkill/kill — /fox start never closes Firefox: if
+    the everyday Firefox is running without control it says exactly one
+    line ("run /fox enable"). SIGTERM is never escalated to SIGKILL: a
+    Firefox that refuses to exit within ~20s is left alone with an
+    honest message.
 """
 
 import base64
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
+import sys
 import threading
 import time
 from urllib.parse import quote_plus
@@ -129,6 +152,20 @@ STATE_FILE = os.path.join(FOX_DIR, "state.json")
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 2828
 W3C_ELEM_KEY = "element-6066-11e4-a52e-4f735466cecf"
+
+# How long /fox enable waits for a SIGTERMed Firefox to exit cleanly
+# (never escalated to SIGKILL — an exit dialog gets an honest message).
+TERM_WAIT_SEC = 20.0
+
+# The honest one-time notice /fox enable prints before the ONE restart.
+ENABLE_NOTICE = (
+    "Enabling browser control requires ONE Firefox restart (session "
+    "restore brings all your tabs back — nothing is lost). Save any "
+    "unsaved work in Firefox, then press Enter (Ctrl-C to cancel).")
+
+# Marker comment placed in the patched user-level .desktop — the guard
+# that makes the patch idempotent (never double-append).
+DESKTOP_MARKER = "# prism32-fox"
 
 # Socket timeouts: attach attempts fail fast; command I/O allows for a
 # slow page load (Marionette's pageLoadStrategy normal blocks Navigate
@@ -282,14 +319,30 @@ def _read_state():
     return {}
 
 
-def _write_state(port, pid, profile=""):
+def _dump_state(st):
     try:
         os.makedirs(FOX_DIR, exist_ok=True)
         with open(STATE_FILE, "w", encoding="utf-8") as fh:
-            json.dump({"port": port, "pid": pid, "profile": profile,
-                       "started": time.strftime("%Y-%m-%d %H:%M:%S")}, fh)
+            json.dump(st, fh)
     except OSError:
         pass  # state file is a convenience, never fatal
+
+
+def _write_state(port, pid, profile=""):
+    """Rewrite the volatile fields; PRESERVE other keys (e.g. the
+    'enabled' flag persisted by /fox enable) across rewrites."""
+    st = _read_state()
+    st.update({"port": port, "pid": pid, "profile": profile,
+               "started": time.strftime("%Y-%m-%d %H:%M:%S")})
+    _dump_state(st)
+
+
+def _update_state(**fields):
+    """Merge fields into state.json (used for /fox enable's
+    {"enabled": true} — keeps port/pid/profile/started intact)."""
+    st = _read_state()
+    st.update(fields)
+    _dump_state(st)
 
 
 def _pid_alive(pid):
@@ -300,6 +353,115 @@ def _pid_alive(pid):
         return True
     except (OSError, ValueError, TypeError):
         return False
+
+
+# ── Running-Firefox detection + graceful close (ENABLE flow ONLY) ────
+# No command other than /fox enable may ever signal Firefox; /fox start
+# uses _firefox_running() purely to CHOOSE between attaching, launching,
+# and printing one honest line — it never kills anything.
+
+def _pgrep(args):
+    """Run pgrep; return int pids ([] when pgrep is missing/fails —
+    e.g. on Windows, where enable degrades to manual instructions)."""
+    try:
+        out = subprocess.run(["pgrep"] + args, capture_output=True,
+                             text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [int(p) for p in out.split() if p.isdigit()]
+
+
+def _proc_comm(pid):
+    """Process name from /proc/<pid>/comm ('' if unreadable/non-Linux).
+    Content processes have comms like 'Web Content'/'Socket Process';
+    the browser MAIN process is 'firefox' — so a comm check keeps
+    profile-scoped kills away from shells (or this REPL!) that merely
+    mention a profile path on their command line."""
+    try:
+        with open(f"/proc/{pid}/comm", "r", encoding="utf-8",
+                  errors="replace") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def _firefox_running():
+    """True if any Firefox main process is running (pgrep firefox —
+    also covers firefox-esr/firefox-bin name variants)."""
+    return bool(_pgrep(["firefox"]))
+
+
+def _firefox_pids_for_cmdline(pattern):
+    """Firefox MAIN-process pids whose command line contains `pattern`
+    (a --profile PATH or a '-P name'). pgrep -f happily matches shells
+    and even this REPL's own command line when they mention the path —
+    so keep only pids whose comm starts with 'firefox', never our own
+    pid/parent. The '--' guard matters: a '-P name' pattern would
+    otherwise be eaten as pgrep OPTIONS (procps -P = parent-pid!)."""
+    me, parent = os.getpid(), os.getppid()
+    pids = []
+    for pid in _pgrep(["-f", "--", pattern]):
+        if pid in (me, parent):
+            continue
+        if _proc_comm(pid).startswith("firefox"):
+            pids.append(pid)
+    return pids
+
+
+def _pid_gone(pid):
+    """True when pid no longer exists OR is a zombie (a dead child we
+    haven't reaped would otherwise make the exit-poll hang)."""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as fh:
+            stat = fh.read()
+        tail = stat[stat.rindex(b")") + 2:]
+        return tail.startswith(b"Z")
+    except (OSError, ValueError):
+        return False
+
+
+def _graceful_close_firefox(pattern=None):
+    """SIGTERM Firefox and wait for a CLEAN exit (up to TERM_WAIT_SEC;
+    never SIGKILL — Firefox saves the session on SIGTERM, which is what
+    makes the enable restart tab-safe). pattern=None -> every Firefox
+    instance via `pkill -TERM firefox` (the default-profile enable);
+    a pattern (profile path / '-P name') -> only instances whose
+    command line matches it, so throwaway profiles never touch the
+    operator's everyday browser. Returns True if all exited in time."""
+    if pattern is None:
+        try:
+            subprocess.run(["pkill", "-TERM", "firefox"], timeout=10)
+        except (OSError, subprocess.SubprocessError) as exc:
+            print(f"firefox: could not signal Firefox: {exc}")
+            return False
+        time.sleep(0.3)
+    else:
+        for pid in _firefox_pids_for_cmdline(pattern):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        time.sleep(0.3)
+    deadline = time.time() + TERM_WAIT_SEC
+    while time.time() < deadline:
+        if pattern is None:
+            alive = [p for p in _pgrep(["firefox"]) if not _pid_gone(p)]
+        else:
+            alive = [p for p in _firefox_pids_for_cmdline(pattern)
+                     if not _pid_gone(p)]
+        if not alive:
+            return True
+        for pid in alive:
+            try:
+                os.waitpid(pid, os.WNOHANG)   # reap if it's OUR child
+            except (ChildProcessError, OSError):
+                pass
+        time.sleep(0.5)
+    return False
 
 
 def _default_port():
@@ -422,11 +584,83 @@ def _trim(text, limit=160):
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+# ── Shared attach/launch plumbing (start + enable) ───────────────────
+
+def _attach_candidates(port=None):
+    """Ports to try attaching to (explicit > env > state file > 2828)."""
+    if port is not None:
+        return [port]
+    candidates = []
+    env = os.environ.get("PRISM32_FOX_PORT", "").strip()
+    if env.isdigit():
+        candidates.append(int(env))
+    st_port = _read_state().get("port")
+    if isinstance(st_port, int) and st_port not in candidates:
+        candidates.append(st_port)
+    if DEFAULT_PORT not in candidates:
+        candidates.append(DEFAULT_PORT)
+    return candidates
+
+
+def _try_attach(candidates):
+    """Attach to the first live Marionette port among `candidates`.
+    Sets _CONN/_LAUNCH_PID on success; leaves everything clean on
+    failure. Returns the port or None."""
+    global _CONN, _LAUNCH_PID
+    for cand in candidates:
+        try:
+            with _LOCK:
+                _close_conn()
+                _CONN = _Marionette(DEFAULT_HOST, cand)
+            _LAUNCH_PID = _read_state().get("pid")
+            return cand
+        except (MarionetteError, OSError, EOFError):
+            _close_conn()
+    return None
+
+
+def _firefox_binary():
+    return "/usr/bin/firefox" if os.path.exists("/usr/bin/firefox") else "firefox"
+
+
+def _spawn_firefox(argv):
+    """Detach-launch Firefox (new session: it survives the REPL)."""
+    try:
+        return subprocess.Popen(
+            argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL, start_new_session=True)
+    except OSError as exc:
+        print(f"firefox: failed to launch Firefox: {exc}")
+        return None
+
+
+def _wait_attach(port, timeout=25.0, proc=None):
+    """Poll until Marionette answers on `port`; sets _CONN. Returns
+    True/False. Gives up early if the launcher process itself died
+    (e.g. 'Firefox is already running' delegation exits instantly)."""
+    global _CONN
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with _LOCK:
+                _close_conn()
+                _CONN = _Marionette(DEFAULT_HOST, port)
+            return True
+        except (MarionetteError, OSError, EOFError):
+            _close_conn()
+            if proc is not None and proc.poll() is not None:
+                return False
+            time.sleep(0.5)
+    return False
+
+
 # ── Command bodies (each PRINTS its result, returns None) ──────────
 
 def _fox_start(rest):
     """Attach to a running Marionette port, else launch Firefox with
-    --marionette and attach to that."""
+    --marionette and attach to that. NEVER closes Firefox: if the
+    everyday Firefox is running without control, say the one honest
+    line and stop."""
     global _CONN, _LAUNCH_PID
     tokens = rest.split()
     profile = None
@@ -450,36 +684,16 @@ def _fox_start(rest):
             profile = tok
         i += 1
 
-    # Candidate ports to try attaching to (explicit > env/state > 2828).
-    if port is not None:
-        candidates = [port]
-    else:
-        candidates = []
-        env = os.environ.get("PRISM32_FOX_PORT", "").strip()
-        if env.isdigit():
-            candidates.append(int(env))
-        st_port = _read_state().get("port")
-        if isinstance(st_port, int) and st_port not in candidates:
-            candidates.append(st_port)
-        if DEFAULT_PORT not in candidates:
-            candidates.append(DEFAULT_PORT)
+    cand = _try_attach(_attach_candidates(port))
+    if cand is not None:
+        _write_state(cand, _LAUNCH_PID,
+                     profile if profile else _read_state().get("profile", ""))
+        print(f"firefox: attached to running Firefox on port {cand}")
+        _print_status_body()
+        _print_real_session_hint()
+        return
 
-    for cand in candidates:
-        try:
-            with _LOCK:
-                _close_conn()
-                _CONN = _Marionette(DEFAULT_HOST, cand)
-            _LAUNCH_PID = _read_state().get("pid")
-            _write_state(cand, _LAUNCH_PID, profile or _read_state().get("profile", ""))
-            print(f"firefox: attached to running Firefox on port {cand}")
-            _print_status_body()
-            _print_real_session_hint()
-            return
-        except (MarionetteError, OSError, EOFError):
-            _close_conn()
-            continue
-
-    # Nothing to attach to — launch.
+    # Nothing to attach to.
     is_default = profile in (None, "default")
     is_path = (profile is not None and not is_default
                and os.path.isdir(profile))
@@ -491,19 +705,26 @@ def _fox_start(rest):
               "port= to use 2828.")
         return
 
+    # The everyday Firefox is already running WITHOUT control: never
+    # launch into it, never close it — just the one honest line.
+    if is_default and _firefox_running():
+        print("firefox: Firefox is running without control enabled — run "
+              "`/fox enable` (one-time; tabs are restored)")
+        return
+
     if is_path:
         # Only explicit throwaway paths may pick a port (we write the
         # marionette.port pref into that profile's user.js — the CLI
         # --marionette-port flag is ignored by Firefox 158, verified).
         launch_port = port if port is not None else (
-            candidates[0] if candidates else DEFAULT_PORT)
+            _attach_candidates()[0] if _attach_candidates() else DEFAULT_PORT)
     else:
         # 'default' / named profiles: never modified, so their port is
         # always the pref default (2828). An env-var port only helps
         # the ATTACH step above, never the launch.
         launch_port = DEFAULT_PORT
 
-    ff = "/usr/bin/firefox" if os.path.exists("/usr/bin/firefox") else "firefox"
+    ff = _firefox_binary()
     argv = [ff, "--marionette"]
 
     if is_default:
@@ -526,36 +747,23 @@ def _fox_start(rest):
     if gui is False:
         argv += ["--headless"]
 
-    try:
-        proc = subprocess.Popen(
-            argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL, start_new_session=True)
-    except OSError as exc:
-        print(f"firefox: failed to launch Firefox: {exc}")
+    proc = _spawn_firefox(argv)
+    if proc is None:
         return
 
     print(f"firefox: launching: {' '.join(argv[1:])} "
           f"(pid {proc.pid}); waiting for port {launch_port}...")
-    deadline = time.time() + 25
-    attached = False
-    while time.time() < deadline:
-        try:
-            with _LOCK:
-                _close_conn()
-                _CONN = _Marionette(DEFAULT_HOST, launch_port)
-            attached = True
-            break
-        except (MarionetteError, OSError, EOFError):
-            _close_conn()
-            if proc.poll() is not None:
-                break
-            time.sleep(0.5)
+    attached = _wait_attach(launch_port, proc=proc)
 
     if not attached:
         _close_conn()
-        hint = ("If Firefox was already running WITHOUT remote control, the "
-                "launch just opened a window in that instance — close "
-                "Firefox completely and run /fox start again.")
+        if is_default:
+            hint = ("run /fox enable (one-time) — it restarts Firefox "
+                    "once, with your tabs restored, and never again.")
+        else:
+            hint = ("a Firefox with that profile may already be running "
+                    "without control — close it yourself, or run "
+                    "/fox enable <profile-path>.")
         print(f"firefox: could not reach Marionette on port {launch_port} "
               f"after 25s. {hint}")
         return
@@ -590,9 +798,348 @@ def _write_port_pref(profile_path, port):
               f"{profile_path}: {exc}")
 
 
+# ── Desktop-entry patch (make --marionette PERMANENT, one-time) ──────
+# Copy the system firefox .desktop into the user applications dir
+# (same filename => overrides the system entry) with ` --marionette`
+# added to every Exec line. Guarded by the DESKTOP_MARKER comment so a
+# second run never double-appends; refuses to touch a user file it did
+# not create; prints manual instructions on macOS/Windows or when no
+# .desktop exists.
+
+_DESKTOP_NAMES = (
+    "firefox.desktop", "org.mozilla.firefox.desktop",
+    "firefox-esr.desktop", "org.mozilla.firefox_esr.desktop",
+    "mozilla-firefox.desktop", "firefox snap.desktop",
+)
+
+
+def _desktop_data_dirs():
+    """System application dirs to search (honors XDG_DATA_DIRS so this
+    is testable with a staged dummy tree)."""
+    dirs = []
+    xdd = os.environ.get("XDG_DATA_DIRS", "")
+    for d in (xdd.split(os.pathsep) if xdd else []):
+        if d:
+            dirs.append(os.path.join(d, "applications"))
+    for d in ("/usr/local/share/applications", "/usr/share/applications"):
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _user_applications_dir():
+    """Where the patched override goes (honors XDG_DATA_HOME)."""
+    xdh = os.environ.get("XDG_DATA_HOME", "").strip()
+    base = xdh if xdh else os.path.join(os.path.expanduser("~"),
+                                        ".local", "share")
+    return os.path.join(base, "applications")
+
+
+def _find_system_desktop():
+    """Locate the system firefox .desktop; None if there isn't one."""
+    for d in _desktop_data_dirs():
+        for name in _DESKTOP_NAMES:
+            path = os.path.join(d, name)
+            if os.path.isfile(path):
+                return path
+    # Fallback: any .desktop in a system dir whose Exec runs firefox.
+    for d in _desktop_data_dirs():
+        try:
+            names = sorted(os.listdir(d))
+        except OSError:
+            continue
+        for name in names:
+            if not name.endswith(".desktop"):
+                continue
+            path = os.path.join(d, name)
+            try:
+                with open(path, "r", encoding="utf-8",
+                          errors="replace") as fh:
+                    text = fh.read(200000)
+            except OSError:
+                continue
+            if re.search(r"^Exec=\S*firefox\b", text, re.M):
+                return path
+    return None
+
+
+def _marionette_exec(line):
+    """One 'Exec=...' line with ` --marionette` inserted at the right
+    position: right after the executable — or, for wrappers, after the
+    real target:  env VAR=V /snap/bin/firefox  ->  after that firefox;
+    flatpak run --flags org.mozilla.firefox  ->  after the app id (a
+    flag before the id would go to flatpak itself). Already-flagged
+    lines and non-Exec lines pass through unchanged."""
+    if not line.startswith("Exec=") or "--marionette" in line:
+        return line
+    tokens = line[len("Exec="):].split()
+    if not tokens:
+        return line
+    i = 0
+    if os.path.basename(tokens[0]) == "env":     # env VAR=VAL <cmd> ...
+        i = 1
+        while i < len(tokens) and "=" in tokens[i]:
+            i += 1
+    if i < len(tokens) and os.path.basename(tokens[i]) in ("flatpak",
+                                                           "snap"):
+        i += 1
+        while i < len(tokens) and (tokens[i] == "run"
+                                   or tokens[i].startswith("-")):
+            i += 1
+        i += 1                                  # after the app id
+    else:
+        i += 1                                  # after the executable
+    tokens.insert(min(i, len(tokens)), "--marionette")
+    return "Exec=" + " ".join(tokens)
+
+
+def _print_manual_launcher_instructions():
+    """What we print where the .desktop patch can't apply (macOS,
+    Windows, unusual Linux setups): honest, actionable, undo-free."""
+    plat = sys.platform
+    if plat.startswith("win") or plat == "cygwin":
+        print("firefox: no automatic launcher patch on Windows — one-time")
+        print("  manual step: right-click your Firefox shortcut ->")
+        print("  Properties -> Target field, append:  --marionette")
+        print('  e.g.  "C:\\Program Files\\Mozilla Firefox\\firefox.exe"'
+              " --marionette")
+    elif plat == "darwin":
+        print("firefox: no automatic launcher patch on macOS — one-time")
+        print("  manual step: launch Firefox with control enabled via")
+        print("      open -a Firefox --args --marionette")
+        print("  (save that as a small .command file / Dock item to make")
+        print("  it permanent; undo = launch normally again)")
+    else:
+        print("firefox: no firefox .desktop found — one-time manual step:")
+        print("  add ` --marionette` to your Firefox launcher command so")
+        print("  future starts have control enabled. Undo: remove it.")
+
+
+def _patch_desktop_entry():
+    """The permanence step of /fox enable. PRINTS what happened (or the
+    manual instructions); never raises; idempotent via DESKTOP_MARKER."""
+    if not sys.platform.startswith("linux"):
+        _print_manual_launcher_instructions()
+        return
+    src = _find_system_desktop()
+    if src is None:
+        _print_manual_launcher_instructions()
+        return
+    dest = os.path.join(_user_applications_dir(), os.path.basename(src))
+    if os.path.exists(dest):
+        try:
+            with open(dest, "r", encoding="utf-8", errors="replace") as fh:
+                current = fh.read()
+        except OSError as exc:
+            print(f"firefox: could not check existing launcher: {exc}")
+            return
+        if DESKTOP_MARKER in current:
+            print(f"firefox: launcher already patched — nothing to do "
+                  f"({dest})")
+            print("  undo: delete that file (the system launcher takes "
+                  "over again)")
+        else:
+            print(f"firefox: {dest} already exists and was NOT created by "
+                  "/fox enable — leaving it alone.")
+            print("  to make control permanent, add ` --marionette` to its "
+                  "Exec line(s) yourself.")
+        return
+    try:
+        with open(src, "r", encoding="utf-8", errors="replace") as fh:
+            text = fh.read()
+    except OSError as exc:
+        print(f"firefox: could not read {src}: {exc}")
+        return
+    out_lines = [_marionette_exec(ln) for ln in text.splitlines()]
+    patched = sum(1 for a, b in zip(text.splitlines(), out_lines)
+                  if a != b)
+    new_text = "\n".join(out_lines) + (
+        f"\n{DESKTOP_MARKER}: --marionette added by /fox enable "
+        "(delete this file to undo)\n")
+    try:
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        with open(dest, "w", encoding="utf-8") as fh:
+            fh.write(new_text)
+    except OSError as exc:
+        print(f"firefox: could not write {dest}: {exc}")
+        return
+    print(f"firefox: launcher patched (permanent): {dest}")
+    print(f"  (copied from {src}; added --marionette to {patched} "
+          "Exec line(s))")
+    print("  undo: delete that file — the system launcher takes over "
+          "again; or remove the flag from its Exec lines.")
+
+
 def _print_real_session_hint():
-    print("  Drive YOUR real Firefox (logins/cookies intact): close Firefox")
-    print("  completely, then run:  /fox start default")
+    """Post-attach/launch tip. After /fox enable the state file says so
+    and this stays silent — the tip only nudges the ONE-TIME enable."""
+    if _read_state().get("enabled"):
+        return
+    print("  tip: /fox enable (one-time) makes your normal Firefox launcher")
+    print("  start with control enabled — your tabs and logins stay put.")
+
+
+def _fox_enable(rest):
+    """/fox enable — the ONE-TIME permanent enable. The ONLY flow that
+    ever closes Firefox, and it does it exactly once, gracefully. For
+    the default profile it drives the operator's EVERYDAY Firefox (all
+    logins, all tabs); a --profile PATH (or '-P name') scopes the
+    restart to that profile's instances, so throwaway profiles never
+    touch the everyday browser."""
+    global _LAUNCH_PID
+    tokens = rest.split()
+    profile = None
+    port = None
+    gui = None
+    now = False
+    i = 0
+    while i < len(tokens):
+        tok = tokens[i]
+        if tok == "now":
+            now = True               # skip the Enter confirmation (automation)
+        elif tok.startswith("port="):
+            if not tok[5:].isdigit():
+                print(f"firefox: bad port '{tok[5:]}'")
+                return
+            port = int(tok[5:])
+        elif tok in ("headless", "gui", "visible"):
+            gui = tok in ("gui", "visible")
+        else:
+            if profile is not None:
+                print(f"firefox: unexpected extra argument '{tok}' "
+                      "(usage: /fox enable [now] "
+                      "[default|<profile-path>] [port=N])")
+                return
+            profile = tok
+        i += 1
+
+    is_default = profile in (None, "default")
+    is_path = (profile is not None and not is_default
+               and os.path.isdir(profile))
+
+    if port is not None and not is_path:
+        print("firefox: a custom port (port=N) can only be used with an "
+              "explicit profile PATH (we won't write prefs into your real "
+              "profile). Run /fox enable <profile-path> port=N, or omit "
+              "port= to use 2828.")
+        return
+
+    # (a) A Marionette port is already live: already enabled — attach,
+    # keep it permanent (idempotent patch), persist, done.
+    cand = _try_attach(_attach_candidates(port))
+    if cand is not None:
+        label = profile if is_path else (
+            _read_state().get("profile") or "default")
+        _write_state(cand, _read_state().get("pid"), label)
+        _update_state(enabled=True)
+        print(f"firefox: already enabled — attached to running Firefox "
+              f"on port {cand}")
+        _print_status_body()
+        _patch_desktop_entry()
+        return
+
+    # (b) Firefox running WITHOUT control? Scope the check to the
+    # profile we were asked about (default = any firefox process).
+    if is_path:
+        pattern = profile
+        running = bool(_firefox_pids_for_cmdline(pattern))
+    elif profile is not None:
+        pattern = f"-P {profile}"
+        running = bool(_firefox_pids_for_cmdline(pattern))
+    else:
+        pattern = None
+        running = _firefox_running()
+
+    if running and not now:
+        if not sys.stdin.isatty():
+            # Non-interactive context: NEVER kill anything. Instruct.
+            print(f"firefox: {ENABLE_NOTICE}")
+            print("  (stdin is not interactive, so Firefox was NOT "
+                  "closed — re-run /fox enable in your terminal to "
+                  "confirm the one-time restart, or use '/fox enable "
+                  "now' to skip the confirmation)")
+            return
+        print(f"firefox: {ENABLE_NOTICE}")
+        try:
+            input()
+        except KeyboardInterrupt:
+            print("firefox: cancelled — Firefox was NOT closed")
+            return
+        except (EOFError, OSError) as exc:
+            print(f"firefox: could not read confirmation ({exc!r}) — "
+                  "Firefox was NOT closed; retry /fox enable")
+            return
+
+    # (c) Graceful close — SIGTERM, wait for a CLEAN exit (session
+    # saved; never SIGKILL, never from any other command).
+    if running:
+        print("firefox: closing Firefox gracefully (SIGTERM — session "
+              "saved, tabs come back on the relaunch)...")
+        if not _graceful_close_firefox(pattern):
+            print(f"firefox: Firefox did not finish exiting within "
+                  f"{int(TERM_WAIT_SEC)}s (a save dialog?). Nothing was "
+                  "relaunched — close it and run /fox enable again.")
+            return
+
+    # (d) Relaunch detached WITH control (default profile: the visible
+    # everyday browser; explicit path: headless unless asked otherwise).
+    argv = [_firefox_binary(), "--marionette",
+            "--marionette-allow-origins", "*"]
+    if is_default:
+        label = "default"
+        gui = True
+    elif is_path:
+        argv += ["--profile", profile]
+        label = profile
+        if port is not None and port != DEFAULT_PORT:
+            _write_port_pref(profile, port)
+        if gui is None:
+            gui = False               # throwaway/test profiles: headless
+    else:
+        argv += ["-P", profile]       # named profile
+        label = profile
+        if gui is None:
+            gui = True                # a real profile — show the window
+    if gui is False:
+        argv += ["--headless"]
+
+    if is_path:
+        launch_port = port if port is not None else (
+            _attach_candidates()[0] if _attach_candidates()
+            else DEFAULT_PORT)
+    else:
+        launch_port = DEFAULT_PORT
+
+    proc = _spawn_firefox(argv)
+    if proc is None:
+        return
+    verb = ("relaunched" if running else "launched")
+    print(f"firefox: {verb} with control enabled: "
+          f"{' '.join(argv[1:])} (pid {proc.pid}); waiting for port "
+          f"{launch_port}...")
+    attached = _wait_attach(launch_port, proc=proc)
+
+    # (f) Persist the enable the moment control is verified live.
+    if attached:
+        _LAUNCH_PID = proc.pid
+        _write_state(launch_port, proc.pid, label)
+        _update_state(enabled=True)
+
+    # (e) Make it PERMANENT for future normal launches (idempotent;
+    # prints what was patched or the manual instructions).
+    _patch_desktop_entry()
+
+    if attached:
+        print(f"firefox: enabled — attached to Firefox on port "
+              f"{launch_port} (pid {proc.pid}); enabled for good: future "
+              "normal launches have control too")
+        _print_status_body()
+    else:
+        _close_conn()
+        print(f"firefox: Firefox {verb}, but Marionette on port "
+              f"{launch_port} did not answer within 25s. The launcher is "
+              "patched, so its next start has control — attach later "
+              "with /fox start.")
 
 
 def _print_status_body():
@@ -629,6 +1176,9 @@ def _fox_status(rest):
         if port:
             alive = "running" if _pid_alive(pid) else "not running"
             print(f"  (state file: port {port}, pid {pid or '?'} — {alive})")
+    if st.get("enabled"):
+        print("  enabled: launcher starts Firefox with control "
+              "(/fox enable was run)")
 
 
 def _fox_open(rest):
@@ -1082,13 +1632,29 @@ def _fox_help(rest):
 
 
 _USAGE = """firefox browser commands (/fox or /firefox):
+  enable [now] [default|<profile-path>] [port=N]
+                              ONE-TIME permanent enable. If Firefox is
+                              already controllable: 'already enabled' +
+                              attach. If Firefox is running without
+                              control: asks (Enter) for ONE graceful
+                              restart — session restore brings your
+                              tabs back — then relaunches it with
+                              --marionette and patches your launcher
+                              (.desktop) so every future start has
+                              control. 'now' skips the Enter wait
+                              (automation). Non-interactive contexts
+                              never close Firefox. No other /fox command
+                              ever closes Firefox. Undo: delete the
+                              patched launcher file (path is printed).
   start [default|<profile-path>] [port=N] [gui|headless]
                               attach to a running Marionette port, else
                               launch Firefox with --marionette. 'default'
                               or no argument = your real default profile
-                              (logins/cookies apply — close Firefox fully
-                              first). A profile PATH is headless by
-                              default and may set port=N (via user.js).
+                              (logins/cookies apply). If Firefox is
+                              already running WITHOUT control it just
+                              says to run /fox enable once. A profile
+                              PATH is headless by default and may set
+                              port=N (via user.js).
   status                      honest connection report (url/title/pid)
   open <url>                  navigate; waits for load; prints url+title
   back | forward | reload | stop load
@@ -1117,6 +1683,7 @@ _USAGE = """firefox browser commands (/fox or /firefox):
 
 _SUBCOMMANDS = {
     "start": _fox_start,
+    "enable": _fox_enable,
     "status": _fox_status,
     "open": _fox_open,
     "nav": _fox_open,          # friendly alias
@@ -1180,9 +1747,13 @@ ADVERTISEMENT = (
     "over Marionette (their profile's logins/cookies apply — no "
     "re-authentication needed; works for posts, paperwork, research, any "
     "search engine). Run /fox status first: it reports the honest "
-    "connection state. /fox start [default|<profile-path>] attaches or "
-    "launches ('default' = operator's own profile — close Firefox fully "
-    "first). Commands: /fox open <url>, /fox back|forward|reload|stop, "
+    "connection state. ONE-TIME setup: /fox enable attaches if possible, "
+    "else restarts Firefox ONCE (gracefully — session restore brings "
+    "every tab back) and patches the launcher so future normal launches "
+    "are controllable; after that /fox start just attaches, and NO "
+    "command ever closes tabs or Firefox outside that one enable "
+    "restart. /fox start [default|<profile-path>] attaches or launches. "
+    "Commands: /fox open <url>, /fox back|forward|reload|stop, "
     "/fox url, /fox title, /fox text [css], /fox read [max_chars], "
     "/fox find <css> [text|count|href|value], /fox click <css> [n] "
     "(1-based), /fox type <css> <text>, /fox key <Enter|Tab|Esc>, "
