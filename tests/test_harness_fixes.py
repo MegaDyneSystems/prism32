@@ -745,6 +745,28 @@ def test_auto_compact_off_when_below_threshold():
         prism32.Config.AUTO_COMPACT_TOKENS = old_threshold
 
 
+# ── opencode zen go-plan routing ─────────────────────────────────
+
+def test_headers_include_opencode_session():
+    from prism32 import build_headers
+    h = build_headers(api_key="k", api_base="https://opencode.ai/zen/v1")
+    assert "x-opencode-session" in h, "zen requests need the session routing header"
+    h2 = build_headers(api_key="k", api_base="https://api.neuralwatt.com/v1")
+    assert "x-opencode-session" not in h2
+
+
+def test_friendly_402_hints_go_namespace():
+    body = ('{"error":{"type":"invalid_request_error","message":"Insufficient balance. '
+            'This request is pay-as-you-go, billed to OpenCode Models credits. Top up '
+            'at https://opencode.ai/console/org_X/billing?credits=1. OpenCode Go covers '
+            'only requests to the OpenCode Go provider."}}')
+    msg = prism32._friendly_402(body, "https://opencode.ai/zen/v1")
+    assert "402" in msg
+    assert "opencode-go/" in msg, "must point at the Go-covered model namespace"
+    assert "https://opencode.ai/console/org_X/billing?credits=1" in msg, "URL kept whole"
+    assert "Invalid credential" not in msg
+
+
 # ── result cap disclosure ─────────────────────────────────────────
 
 def test_cap_result_discloses_skipped_volume():

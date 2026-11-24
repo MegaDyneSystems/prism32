@@ -5340,7 +5340,7 @@ register_provider("groq", display_name="Groq", api_base="https://api.groq.com/op
 register_provider("together", display_name="Together AI", api_base="https://api.together.xyz/v1", model="meta-llama/Llama-3-70b-chat-hf", cheap_model="meta-llama/Llama-3-8b-chat-hf", description="Together AI inference", cache_support=None)
 register_provider("openrouter", display_name="OpenRouter", api_base="https://openrouter.ai/api/v1", model="deepseek/deepseek-v4-flash", cheap_model="deepseek/deepseek-v4-flash", description="OpenRouter multi-model gateway (set API key via /provider key or --api-key)", cache_support=None)
 register_provider("neuralwatt", display_name="Neuralwatt Cloud", api_base="https://api.neuralwatt.com/v1", model="glm-5.2", cheap_model="qwen3.6-35b-fast", description="Neuralwatt Cloud — energy-priced OpenAI-compatible inference (requires API key)", cache_support=None)
-register_provider("opencode", display_name="OpenCode Zen", api_base="https://opencode.ai/zen/v1", model="glm-5.3-flash", cheap_model="glm-5.3-flash", description="OpenCode Zen models gateway — Claude/GPT/Gemini/Grok/Qwen/free tiers, OpenAI-compatible (oc_sk_... key from opencode.ai/console)", cache_support=None)
+register_provider("opencode", display_name="OpenCode Zen", api_base="https://opencode.ai/zen/v1", model="opencode-go/glm-5.3-flash", cheap_model="opencode-go/glm-5.3-flash", description="OpenCode Zen models gateway — Claude/GPT/Gemini/Grok/Qwen/free tiers, OpenAI-compatible (oc_sk_... key from opencode.ai/console). OpenCode Go plans cover the opencode-go/ model namespace; plain ids bill credits", cache_support=None)
 register_provider("deepseek", display_name="DeepSeek", api_base="https://api.deepseek.com/v1", model="deepseek-chat", cheap_model="deepseek-chat", description="DeepSeek V3 / R1 (requires API key)", cache_support="deepseek_auto")
 register_provider("llamacpp-remote", display_name="llama.cpp (remote server)", api_base="", model="", description="Remote llama.cpp server (OpenAI-compatible). Set its address first: /provider api llamacpp-remote http://<host>:8080/v1", cache_support=None)
 register_provider("custom", display_name="Custom", api_base="http://localhost:8080", model="model-name", description="Custom provider (configure below)", cache_support=None)
@@ -9424,6 +9424,13 @@ def _ask_anthropic_native(message_list, stream, retry, base_delay, cancel_event,
             if e.code == 401:
                 last_error = "[HTTP ERROR 401] Anthropic auth failed. Set a valid API key via /provider key or --api-key"
                 learn_error(last_error, f"HTTP 401: {body[:100]}")
+            elif e.code == 402:
+                # Payment Required — parse the gateway's JSON into a clean
+                # human line instead of dumping raw JSON in a tall box with
+                # the billing URL split mid-word (owner report 2026-11-24:
+                # 'what's this?').
+                last_error = _friendly_402(body, _api_base)
+                learn_error(last_error, "HTTP 402: billing")
             else:
                 last_error = f"[HTTP ERROR {e.code}] {body}"
             if e.code in (400, 413, 429, 503) and attempt < retry:
@@ -9552,6 +9559,52 @@ _NATIVE_TOOLS_SCHEMA = [{
         }
     }
 }]
+
+def _friendly_402(body, api_base=""):
+    """HTTP 402 → a clean, human-readable billing error.
+
+    OpenCode Zen (verified live 2026-11-24) returns JSON like:
+      {"error":{"message":"Insufficient balance. ... Top up at
+      https://opencode.ai/console/<org>/billing?credits=1. OpenCode Go
+      covers only requests to the OpenCode Go provider."}}
+    The old path dumped the raw JSON into a tall box with the billing URL
+    split mid-word (owner report: 'what's this?'). Extract the message
+    and URL, and say the actionable thing: the opencode-go/ namespace
+    rides the Go subscription; plain ids bill the credits wallet."""
+    msg = ""
+    try:
+        d = json.loads(body or "{}")
+        err = d.get("error")
+        if isinstance(err, dict):
+            msg = str(err.get("message") or "")
+        elif isinstance(err, str):
+            msg = err
+    except Exception:
+        msg = (body or "")[:200]
+    url = ""
+    m = re.search(r'https?://\S+', msg)
+    if m:
+        url = m.group(0).rstrip('.,)"')
+        msg = msg.replace(url, "").strip()
+    gateway = "the gateway"
+    try:
+        from urllib.parse import urlparse
+        gateway = (urlparse(api_base or "").hostname or "") or gateway
+    except Exception:
+        pass
+    lines = [f"[HTTP ERROR 402] Payment required ({gateway}) — pay-as-you-go "
+             "credits are empty for this account."]
+    if "opencode" in gateway or "opencode" in (url or ""):
+        lines.append("Your OpenCode Go plan covers the 'opencode-go/' model "
+                     "namespace — e.g.: /set model opencode-go/glm-5.3-flash "
+                     "(plain ids like 'glm-5.3' bill credits).")
+    elif msg:
+        lines.append(msg[:200])
+    if url:
+        lines.append(f"Top up: {url}")
+    lines.append("Or switch provider: /provider use <name>   (list: /provider list)")
+    return "\n".join(lines)
+
 
 def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
             api_base=None, api_key=None, model=None, timeout=None):
@@ -9712,6 +9765,11 @@ def ask_ai(messages, stream=None, retry=2, base_delay=2, cancel_event=None,
                                   f"If that is an old/rotated key, update it: /provider key <key> "
                                   f"(persistent) or --api-key <key> (this session only)")
                 learn_error(last_error, f"HTTP 401: {body[:100]}")
+            elif e.code == 402:
+                # Payment Required — clean human line, not a raw-JSON box
+                # (owner report 2026-11-24).
+                last_error = _friendly_402(body, _api_base)
+                learn_error(last_error, "HTTP 402: billing")
             else:
                 last_error = f"[HTTP ERROR {e.code}] {body}"
             if e.code in (400, 413, 429, 503) and attempt < retry:
@@ -13941,7 +13999,7 @@ def fetch_models_from(api_base, api_key=None, timeout=15):
 
 
 def build_headers(extra=None, api_key=None, api_base=None):
-    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.2"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.3"}
     _key = api_key if api_key is not None else Config.API_KEY
     if isinstance(_key, str):
         _key = _key.strip()
@@ -13951,6 +14009,12 @@ def build_headers(extra=None, api_key=None, api_base=None):
     if "openrouter" in _base:
         h["HTTP-Referer"] = "https://github.com/MegaDyneSystems/prism32"
         h["X-Title"] = "Prism32"
+    if "opencode.ai" in _base:
+        # OpenCode Zen routing requirement (verified live 2026-11-24): the
+        # Go-plan namespace (opencode-go/<model>) demands a session id
+        # header — without it the gateway rejects with MissingSessionID.
+        # Stable per process: routing affinity without leaking a real id.
+        h["x-opencode-session"] = f"prism32-{os.getpid()}"
     if extra:
         h.update(extra)
     return h
@@ -13999,7 +14063,15 @@ def _fetch_catalog_entries():
         try:
             ms = fetch_models_from(base, key, timeout=12)
             for m in ms:
-                entries.append({"id": m["id"], "provider": name, "pricing": m.get("pricing")})
+                mid = m["id"]
+                if name == "opencode":
+                    # OpenCode Zen namespace split (verified live 2026-11-24):
+                    # plain ids bill the pay-as-you-go credits wallet (402 on
+                    # Go-plan accounts); the 'opencode-go/' prefix rides the
+                    # OpenCode Go subscription. Present the catalog in the
+                    # Go namespace so /model picks just work on Go plans.
+                    mid = f"opencode-go/{mid}" if "/" not in mid else mid
+                entries.append({"id": mid, "provider": name, "pricing": m.get("pricing")})
         except Exception as e:
             failures.append((name, str(e)))
 

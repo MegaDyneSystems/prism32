@@ -673,7 +673,7 @@ The built-in provider registry contains:
 - `together`: `https://api.together.xyz/v1`.
 - `openrouter`: `https://openrouter.ai/api/v1`.
 - `neuralwatt`: `https://api.neuralwatt.com/v1`.
-- `opencode`: `https://opencode.ai/zen/v1` — the OpenCode Zen models gateway (Claude, GPT, Gemini, Grok, Qwen, and free tiers); get an `oc_sk_...` key at https://opencode.ai/console. Free models are rate-limited; paid models bill OpenCode Models credits — a 402 response fails fast with a top-up hint instead of retrying.
+- `opencode`: `https://opencode.ai/zen/v1` — the OpenCode Zen models gateway (Claude, GPT, Gemini, Grok, Qwen, and free tiers); get an `oc_sk_...` key at https://opencode.ai/console. **OpenCode Go subscriptions cover the `opencode-go/` model namespace** (e.g. `opencode-go/glm-5.3-flash`) — the app's own plan; Prism32 sends the required `x-opencode-session` routing header automatically and its `/model` catalog presents Zen entries in the Go namespace. Plain model ids bill OpenCode Models credits (a 402 fails fast with the top-up link and the Go-namespace hint).
 - `deepseek`: `https://api.deepseek.com/v1`.
 - `llamacpp-remote`: no default host — configure its address with `/provider api llamacpp-remote http://<host>:8080/v1`.
 - `custom`: operator-specified.
