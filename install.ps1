@@ -17,7 +17,7 @@ $Target = Join-Path $InstallDir "prism32.py"
 $CmdShim = Join-Path $InstallDir "prism32.cmd"
 
 Write-Host ""
-Write-Host "  Prism32 Windows Installer v7.3.0"
+Write-Host "  Prism32 Windows Installer v7.4.0"
 Write-Host ""
 
 if (!(Test-Path $Source)) {
@@ -75,6 +75,114 @@ try {
     else { Ok "Runtime memory/harness/evolve setup complete" }
 } catch {
     Warn "Runtime setup skipped; run prism32 --setup-runtime later"
+}
+
+# ── Scan for remote llama.cpp instances on the local network ──
+$ConfigFile = Join-Path $Runtime "config.json"
+if (-not (Test-Path $ConfigFile)) {
+    Write-Host ""
+    Info "Scanning network for remote llama.cpp instances..."
+    $ScanResult = try {
+        & $Python -c @'
+import socket, urllib.request, json, concurrent.futures, sys
+
+def probe(ip, port):
+    try:
+        url = "http://{0}:{1}/v1/models".format(ip, port)
+        req = urllib.request.Request(url, headers={"User-Agent": "Prism32-Installer"})
+        with urllib.request.urlopen(req, timeout=2) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+            models = [m.get("id", "") for m in data.get("data", [])]
+            return {"ip": ip, "port": port, "models": models[:8]}
+    except Exception:
+        return None
+
+# Get local subnet via socket
+subnet = None
+try:
+    h = socket.gethostname()
+    ip = socket.gethostbyname(h)
+    octets = ip.split(".")
+    if len(octets) == 4 and not ip.startswith("127."):
+        subnet = ".".join(octets[:3])
+except Exception:
+    pass
+
+if not subnet:
+    print("[]")
+    sys.exit(0)
+
+PORTS = [8080, 8000, 8081, 5000, 11434]
+ips = ["{0}.{1}".format(subnet, i) for i in list(range(1, 31)) + list(range(100, 121))]
+found = []
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
+    futures = {ex.submit(probe, ip, p): (ip, p) for ip in ips for p in PORTS}
+    for f in concurrent.futures.as_completed(futures, timeout=10):
+        try:
+            r = f.result(timeout=2)
+            if r:
+                found.append(r)
+        except Exception:
+            pass
+
+seen = set()
+unique = []
+for r in found:
+    key = "{0}:{1}".format(r["ip"], r["port"])
+    if key not in seen:
+        seen.add(key)
+        unique.append(r)
+print(json.dumps(unique))
+'@ 2>$null
+    } catch { "[]" }
+
+    $ScanCount = try { ($ScanResult | ConvertFrom-Json).Count } catch { 0 }
+    if ($ScanCount -gt 0) {
+        Ok "Found $ScanCount remote llama.cpp instance(s)"
+        $ScanResult | ConvertFrom-Json | ForEach-Object {
+            $url = "http://$($_.ip):$($_.port)"
+            $model = if ($_.models.Count -gt 0) { $_.models[0] } else { "default" }
+            Write-Host "  [$($url)]  model: $model"
+        }
+
+        # Build config with scanned providers
+        $Providers = @{}
+        $FirstUrl = ""
+        $FirstModel = "default"
+        $i = 1
+        $ScanResult | ConvertFrom-Json | ForEach-Object {
+            $key = "llama_remote_$i"
+            $url = "http://$($_.ip):$($_.port)"
+            $model = if ($_.models.Count -gt 0) { $_.models[0] } else { "default" }
+            $Providers[$key] = @{ api_base = $url; model = $model; api_key = "" }
+            if ($i -eq 1) { $FirstUrl = $url; $FirstModel = $model }
+            $i++
+        }
+
+        $Config = @{
+            theme = "phosphor"
+            provider = "llama_remote_1"
+            model = $FirstModel
+            api_base = $FirstUrl
+            api_key = ""
+            max_history = 2000
+            max_response_tokens = 8192
+            cmd_timeout = 600
+            goal_max_steps = 1000
+            stream = $false
+            max_memory_ctx = 1024
+            subagent_model = ""
+            verify_ssl = $true
+            agent_name = "MDS"
+            providers = $Providers
+        }
+        $Config | ConvertTo-Json -Depth 5 | Set-Content -Path $ConfigFile
+        Ok "Config created (provider: llama_remote_1 @ $FirstUrl)"
+    } else {
+        Warn "No remote llama.cpp instances found on local network"
+        Warn "No AI provider configured — run 'prism32' then /setup to configure one"
+    }
 }
 
 $PathUser = [Environment]::GetEnvironmentVariable("Path", "User")

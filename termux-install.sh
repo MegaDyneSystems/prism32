@@ -85,30 +85,143 @@ chmod +x "$BIN"
 
 ok "Installed: $BIN"
 
+# ── Scan for remote llama.cpp instances ──
+_scan_llama() {
+  "$PY3" -c "
+import socket, urllib.request, json, concurrent.futures, sys
+
+def probe(ip, port):
+    try:
+        url = 'http://{0}:{1}/v1/models'.format(ip, port)
+        req = urllib.request.Request(url, headers={'User-Agent': 'Prism32-Installer'})
+        with urllib.request.urlopen(req, timeout=2) as r:
+            data = json.loads(r.read().decode('utf-8', errors='replace'))
+            models = [m.get('id', '') for m in data.get('data', [])]
+            return {'ip': ip, 'port': port, 'models': models[:8]}
+    except Exception:
+        return None
+
+# Get local subnet
+subnet = None
+try:
+    import subprocess
+    out = subprocess.check_output(['ip', 'route', 'show', 'default'], stderr=subprocess.DEVNULL, timeout=3).decode()
+    for line in out.splitlines():
+        if 'src' in line:
+            src = line.split('src')[1].strip().split()[0]
+            octets = src.split('.')
+            subnet = '.'.join(octets[:3])
+            break
+except Exception:
+    pass
+
+if not subnet:
+    try:
+        h = socket.gethostname()
+        ip = socket.gethostbyname(h)
+        octets = ip.split('.')
+        if len(octets) == 4 and not ip.startswith('127.'):
+            subnet = '.'.join(octets[:3])
+    except Exception:
+        pass
+
+if not subnet:
+    print('[]')
+    sys.exit(0)
+
+PORTS = [8080, 8000, 8081, 5000, 11434]
+ips = ['{0}.{1}'.format(subnet, i) for i in list(range(1, 31)) + list(range(100, 121))]
+found = []
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
+    futures = {ex.submit(probe, ip, p): (ip, p) for ip in ips for p in PORTS}
+    for f in concurrent.futures.as_completed(futures, timeout=10):
+        try:
+            r = f.result(timeout=2)
+            if r:
+                found.append(r)
+        except Exception:
+            pass
+
+seen = set()
+unique = []
+for r in found:
+    key = '{0}:{1}'.format(r['ip'], r['port'])
+    if key not in seen:
+        seen.add(key)
+        unique.append(r)
+print(json.dumps(unique))
+"
+}
+
 # Preserve existing config
 if [ -f "$RUNTIME_DIR/config.json" ]; then
   ok "Config preserved"
 else
-  # Create default config for Termux (local model or ask)
-  cat > "$RUNTIME_DIR/config.json" << JSONEOF
-{
-  "theme": "phosphor",
-  "provider": "local",
-  "model": "model-name",
-  "api_base": "http://127.0.0.1:8080",
-  "api_key": "",
-  "max_history": 2000,
-  "max_response_tokens": 8192,
-  "cmd_timeout": 600,
-  "goal_max_steps": 1000,
-  "stream": false,
-  "max_memory_ctx": 1024,
-  "subagent_model": "",
-  "verify_ssl": true,
-  "agent_name": "MDS"
+  # Scan network for remote llama.cpp instances
+  echo ""
+  echo "  Scanning network for remote llama.cpp instances..."
+  SCAN="$(_scan_llama 2>/dev/null || echo '[]')"
+  SCAN_N="$("$PY3" -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$SCAN" 2>/dev/null || echo 0)"
+  if [ "$SCAN_N" != "0" ]; then
+    echo "  Found $SCAN_N remote instance(s)"
+    "$PY3" -c "
+import json, sys
+for i, inst in enumerate(json.loads(sys.argv[1])):
+    url = 'http://{0}:{1}'.format(inst['ip'], inst['port'])
+    m = inst.get('models', [])
+    print('  [{0}] {1}  (model: {2})'.format(i + 1, url, m[0] if m else 'default'))
+" "$SCAN"
+    # Use first found instance as default
+    BASE="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); print('http://{0}:{1}'.format(d[0]['ip'], d[0]['port']) if d else '')" "$SCAN")"
+    MODEL="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); m=d[0].get('models',[]) if d else []; print(m[0] if m else 'default')" "$SCAN")"
+    PROVIDER="llama_remote_1"
+    # Build all_providers JSON
+    ALL_P="$("$PY3" -c "
+import json, sys
+scan = json.loads(sys.argv[1])
+all_p = {}
+for i, inst in enumerate(scan):
+    key = 'llama_remote_{0}'.format(i + 1)
+    url = 'http://{0}:{1}'.format(inst['ip'], inst['port'])
+    models = inst.get('models', [])
+    model = models[0] if models else 'default'
+    all_p[key] = {'api_base': url, 'model': model, 'api_key': ''}
+print(json.dumps(all_p))
+" "$SCAN")"
+  else
+    echo "  No remote llama.cpp instances found"
+    PROVIDER="local"
+    BASE="http://127.0.0.1:8080"
+    MODEL=""
+    ALL_P="{}"
+  fi
+
+  # Create config with scanned/default provider
+  "$PY3" -c "
+import json, sys
+config = {
+    'theme': 'phosphor',
+    'provider': sys.argv[1],
+    'model': sys.argv[2],
+    'api_base': sys.argv[3],
+    'api_key': '',
+    'max_history': 2000,
+    'max_response_tokens': 8192,
+    'cmd_timeout': 600,
+    'goal_max_steps': 1000,
+    'stream': False,
+    'max_memory_ctx': 1024,
+    'subagent_model': '',
+    'verify_ssl': True,
+    'agent_name': 'MDS'
 }
-JSONEOF
-  ok "Default config created"
+all_p = json.loads(sys.argv[4]) if sys.argv[4] else {}
+if all_p:
+    config['providers'] = all_p
+print(json.dumps(config, indent=2))
+" "$PROVIDER" "$MODEL" "$BASE" "$ALL_P" > "$RUNTIME_DIR/config.json"
+  ok "Config created (provider: $PROVIDER)"
 fi
 
 # Setup runtime
@@ -126,5 +239,5 @@ echo ""
 echo -e "  \033[2mTo use a cloud provider (OpenRouter/Groq/etc.):${RST:-}"
 echo -e "  \033[2m  prism32  then inside: /provider key openrouter sk-or-...${RST:-}"
 echo ""
-echo -e "  \033[2mMegaDyne Systems (MDS) — Prism32 v7.3.0\033[0m"
+echo -e "  \033[2mMegaDyne Systems (MDS) — Prism32 v7.4.0\033[0m"
 echo ""

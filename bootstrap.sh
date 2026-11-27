@@ -83,8 +83,9 @@ PY3=""
 for py in python3 python3.11 python3.10 python3.9 python3.8 python3.7 \
          /usr/pkg/bin/python3 /usr/pkg/bin/python3.12 /usr/pkg/bin/python3.11 \
          /usr/local/bin/python3 /usr/local/bin/python3.11; do
-  if command -v "$py" >/dev/null 2>&1 && [ -x "$py" ]; then
-    PY3="$py"
+  _p="$(command -v "$py" 2>/dev/null)"
+  if [ -n "$_p" ] && [ -x "$_p" ]; then
+    PY3="$_p"
     break
   fi
 done

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Prism32 v7.3.0 - MegaDyne Systems Terminal Agent
+Prism32 v7.4.0 - MegaDyne Systems Terminal Agent
 Orange phosphor vibes. Pure terminal energy.
 """
 import urllib.request
@@ -7248,7 +7248,7 @@ def banner():
     c = t['bright']
     d = t['dim']
     if _LOW_RAM:
-        print(f"\n{c}Prism32 v7.3.0 — MegaDyne Systems{RST}")
+        print(f"\n{c}Prism32 v7.4.0 — MegaDyne Systems{RST}")
         return
     art = [
         " ____  ____  ___ ____  __  __ _________  ",
@@ -7259,12 +7259,12 @@ def banner():
         "                                         ",
     ]
     print(c + "\n".join(f"  {line}" for line in art) + RST)
-    print(f"{d}  v7.3.0 - MegaDyne Systems MDS{RST}")
+    print(f"{d}  v7.4.0 - MegaDyne Systems MDS{RST}")
     print(f"{d}  {'='*80}{RST}")
 def boot_sequence():
     t = T()
     if _LOW_RAM:
-        print(f"\n {t['dim']}Prism32 v7.3.0 — MegaDyne Systems (low-RAM mode){RST}")
+        print(f"\n {t['dim']}Prism32 v7.4.0 — MegaDyne Systems (low-RAM mode){RST}")
         return
     model_str = str(Config.MODEL or "")
     subagent_str = str(Config.SUBAGENT_MODEL or "")
@@ -11723,7 +11723,7 @@ def main():
     _check_stale_pyc()
 
     if args.version:
-        print("Prism32 v7.3.0 — MegaDyne Systems")
+        print("Prism32 v7.4.0 — MegaDyne Systems")
         sys.exit(0)
 
     # Auto-load saved config, then CLI args override
@@ -11970,7 +11970,7 @@ def main():
 
         if cmd == 'version':
             box("VERSION", "\n".join([
-                f"{t['bright']}Prism32 v7.3.0 — MegaDyne Systems{RST}",
+                f"{t['bright']}Prism32 v7.4.0 — MegaDyne Systems{RST}",
                 f"Python {sys.version.split()[0]} on {platform.system()} {platform.release()} ({platform.machine()})",
                 f"{t['dim']}Runtime dir: {_PRISM32_HOME}{RST}",
                 f"{t['dim']}Config: {os.path.join(_PRISM32_HOME, 'config.json')}{RST}",
@@ -14143,7 +14143,7 @@ def main():
 
 # ── HTTP Helpers ────────────────────────────────────────────
 
-PRISM32_USER_AGENT = "Prism32/7.3"
+PRISM32_USER_AGENT = "Prism32/7.4"
 PRISM32_DEFAULT_HEADERS = {
     "User-Agent": PRISM32_USER_AGENT,
     "Accept": "application/json, text/plain, text/html, */*",
@@ -14281,7 +14281,7 @@ def fetch_models_from(api_base, api_key=None, timeout=15):
     """Fetch model list from one OpenAI-compatible endpoint.
     Returns a list of {"id", "pricing"} dicts; raises on HTTP/network error."""
     _base = normalize_api_base(api_base)
-    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.3"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.4"}
     _key = api_key if api_key is not None else Config.API_KEY
     if isinstance(_key, str):
         _key = _key.strip()
@@ -14309,7 +14309,7 @@ def fetch_models_from(api_base, api_key=None, timeout=15):
 
 
 def build_headers(extra=None, api_key=None, api_base=None):
-    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.3"}
+    h = {"Content-Type": "application/json", "User-Agent": "Prism32/7.4"}
     _key = api_key if api_key is not None else Config.API_KEY
     if isinstance(_key, str):
         _key = _key.strip()

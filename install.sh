@@ -84,20 +84,31 @@ if ! command -v python3 &>/dev/null; then
     /opt/local/bin/python3 \
     /Library/Frameworks/Python.framework/Versions/*/bin/python3 \
     /usr/pkg/bin/python3.[0-9]* \
+    /usr/local/bin/python3.[0-9]* \
+    /usr/bin/python3.[0-9]* \
     /usr/local/bin/python3 \
     /usr/bin/python3 \
   ; do
     [ -x "$py" ] && PY3="$py" && break
   done
+  # Also try bare versioned names in PATH (e.g. python3.7 on Debian/CentOS)
+  if [ -z "${PY3:-}" ]; then
+    for v in 3.13 3.12 3.11 3.10 3.9 3.8 3.7; do
+      if command -v "python$v" &>/dev/null; then
+        PY3="python$v"
+        break
+      fi
+    done
+  fi
   if [ -z "${PY3:-}" ]; then
     _os="$(uname -s)"
     case "$_os" in
-      Darwin)  echo "Python 3 not found. Install via: brew install python3" ;;
-      FreeBSD) echo "Python 3 not found. Install via: sudo pkg install python3" ;;
-      NetBSD)  echo "Python 3 not found. Install via: pkgin install python312" ;;
-      OpenBSD) echo "Python 3 not found. Install via: pkg_add python3" ;;
-      Linux)   echo "Python 3 not found. Install via your package manager (apt/pacman/dnf/yum)" ;;
-      *)       echo "Python 3 not found. Install from https://python.org" ;;
+      Darwin)  echo "Python 3.7+ not found. Install via: brew install python3" ;;
+      FreeBSD) echo "Python 3.7+ not found. Install via: sudo pkg install python37" ;;
+      NetBSD)  echo "Python 3.7+ not found. Install via: pkgin install python37" ;;
+      OpenBSD) echo "Python 3.7+ not found. Install via: pkg_add python3" ;;
+      Linux)   echo "Python 3.7+ not found. Install via your package manager (apt/pacman/dnf/yum)" ;;
+      *)       echo "Python 3.7+ not found. Install from https://python.org" ;;
     esac
     exit 1
   fi
@@ -360,6 +371,14 @@ if [ "$AUTO" = "1" ] && [ "$NEED_ROOT" = "1" ]; then
     [ -n "$ALT_HOME" ] && _persist_path_line "$ALT_HOME/.profile"
     _persist_path_line "$HOME/.profile"
     _persist_path_line "$HOME/.bashrc"
+    # zsh (macOS default) / bash login / fish
+    _persist_path_line "$HOME/.zshrc"
+    [ -f "$HOME/.zprofile" ] && _persist_path_line "$HOME/.zprofile"
+    [ -f "$HOME/.bash_profile" ] && _persist_path_line "$HOME/.bash_profile"
+    [ -d "$HOME/.config/fish" ] && _persist_path_line "$HOME/.config/fish/config.fish"
+    # Current-shell hint (export above only affects this process)
+    echo ""
+    warn "To use 'prism32' in THIS terminal, run:  source ~/.zshrc   (or ~/.bashrc, or open a new terminal)"
   else
     _install_wrapper_runonly=1
     mkdir -p "$RUNTIME_DIR"
@@ -445,6 +464,101 @@ print('API_BASE=' + shlex.quote(str(c.get('api_base', ''))))
 else
   skip_config_write=0
   ALL_PROVIDERS="{}"
+
+# ── Auto-scan for remote llama.cpp instances on the local network ──
+# Probes common llama.cpp server ports on the local subnet and nearby
+# hosts. Returns a JSON array of discovered instances.
+_scan_remote_llama() {
+  "$PY3" << 'PYEOF'
+import socket, struct, sys, urllib.request, json, concurrent.futures, os
+
+def _probe(ip, port, timeout=1.5):
+    """Return (ip, port, models_list, banner) if a llama.cpp/OpenAI-compatible server is found."""
+    url = "http://{0}:{1}/v1/models".format(ip, port)
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Prism32-Installer"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", errors="replace"))
+            models = [m.get("id", "") for m in data.get("data", [])]
+            # llama.cpp returns a bare model list; OpenAI-compatible returns data[]
+            # Also try /health for llama.cpp-specific banner
+            banner = ""
+            try:
+                req2 = urllib.request.Request("http://{0}:{1}/health".format(ip, port),
+                                              headers={"User-Agent": "Prism32-Installer"})
+                with urllib.request.urlopen(req2, timeout=1) as r2:
+                    h = r2.read().decode("utf-8", errors="replace")
+                    if "llama" in h.lower() or "model" in h.lower():
+                        banner = h[:120]
+            except Exception:
+                pass
+            return {"ip": ip, "port": port, "models": models[:8], "banner": banner}
+    except Exception:
+        return None
+
+# Determine local subnet from routing table
+subnet_base = None
+try:
+    import subprocess
+    out = subprocess.check_output(["ip", "route", "show", "default"], stderr=subprocess.DEVNULL, timeout=3).decode()
+    for line in out.splitlines():
+        parts = line.split()
+        if "src" in parts:
+            src = parts[parts.index("src") + 1]
+            octets = src.split(".")
+            subnet_base = ".".join(octets[:3])
+            break
+except Exception:
+    pass
+
+# Fallback: derive from hostname
+if not subnet_base:
+    try:
+        h = socket.gethostname()
+        ip = socket.gethostbyname(h)
+        octets = ip.split(".")
+        if len(octets) == 4 and not ip.startswith("127."):
+            subnet_base = ".".join(octets[:3])
+    except Exception:
+        pass
+
+if not subnet_base:
+    print("[]")
+    sys.exit(0)
+
+# Common llama.cpp / local LLM server ports
+PORTS = [8080, 8000, 8081, 5000, 11434, 8082, 8090]
+
+# Scan .1 through .30 (routers, servers, workstations) + .100-.120 (DHCP range)
+ips = ["{0}.{1}".format(subnet_base, i) for i in list(range(1, 31)) + list(range(100, 121))]
+found = []
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=50) as ex:
+    futures = {}
+    for ip in ips:
+        for port in PORTS:
+            f = ex.submit(_probe, ip, port)
+            futures[f] = (ip, port)
+    for f in concurrent.futures.as_completed(futures, timeout=12):
+        try:
+            result = f.result(timeout=2)
+            if result:
+                found.append(result)
+        except Exception:
+            pass
+
+# Deduplicate by ip:port
+seen = set()
+unique = []
+for r in found:
+    key = "{0}:{1}".format(r["ip"], r["port"])
+    if key not in seen:
+        seen.add(key)
+        unique.append(r)
+
+print(json.dumps(unique))
+PYEOF
+}
 
 _configure_provider() {
   echo ""
@@ -561,16 +675,80 @@ print(json.dumps(all_p))
 
 # First provider
 if [ "$AUTO" = "1" ]; then
-  # Auto mode, no existing config: write neutral local defaults. Previously
-  # the interactive menu ran anyway — piped/non-tty installs dumped the whole
-  # 9-provider menu to the pipe and silently configured a dead endpoint.
-  ok "Auto mode: skipping interactive provider setup"
-  sub "Defaults: local provider @ http://127.0.0.1:8080"
-  sub "Run 'prism32' then /provider to configure a real endpoint"
-  PROV="local"
-  API_BASE="http://127.0.0.1:8080"
-  MODEL=""
-  api_key=""
+  # Auto mode: scan for remote llama.cpp instances on the local network.
+  # If found, auto-configure them as available providers. If no other API
+  # is set as main, use the first found instance as default.
+  echo ""
+  echo -e "  ${DIM}Scanning network for remote llama.cpp instances...${RST}"
+  SCAN_RESULT="$(_scan_remote_llama 2>/dev/null || echo '[]')"
+  SCAN_COUNT="$("$PY3" -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$SCAN_RESULT" 2>/dev/null || echo 0)"
+  if [ "$SCAN_COUNT" != "0" ] && [ "$SCAN_COUNT" != "0" ]; then
+    ok "Found $SCAN_COUNT remote llama.cpp instance(s)"
+    # Auto-configure each discovered instance as a provider
+    "$PY3" << PYEOF
+import json, sys
+scan = json.loads(sys.argv[1])
+all_p = {}
+for i, inst in enumerate(scan):
+    key = "llama_remote_{0}".format(i + 1)
+    url = "http://{0}:{1}".format(inst["ip"], inst["port"])
+    models = inst.get("models", [])
+    model = models[0] if models else "default"
+    all_p[key] = {"api_base": url, "model": model, "api_key": ""}
+    print("  + {0}: {1} (model: {2})".format(key, url, model), file=sys.stderr)
+# Set first as default if no provider configured yet
+if scan:
+    first = scan[0]
+    url = "http://{0}:{1}".format(first["ip"], first["port"])
+    models = first.get("models", [])
+    model = models[0] if models else "default"
+    print(json.dumps({"providers": all_p, "default_provider": "llama_remote_1",
+                       "default_base": url, "default_model": model}))
+else:
+    print(json.dumps({"providers": {}, "default_provider": "", "default_base": "", "default_model": ""}))
+PYEOF
+    # Parse the scan results and set up providers
+    SCAN_JSON="$("$PY3" -c "
+import json, sys
+scan = json.loads(sys.argv[1])
+all_p = {}
+for i, inst in enumerate(scan):
+    key = 'llama_remote_{0}'.format(i + 1)
+    url = 'http://{0}:{1}'.format(inst['ip'], inst['port'])
+    models = inst.get('models', [])
+    model = models[0] if models else 'default'
+    all_p[key] = {'api_base': url, 'model': model, 'api_key': ''}
+print(json.dumps(all_p))
+" "$SCAN_RESULT")"
+    ALL_PROVIDERS="$SCAN_JSON"
+    # Use first found instance as default
+    FIRST_IP="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); print(d[0]['ip'] if d else '')" "$SCAN_RESULT")"
+    FIRST_PORT="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); print(d[0]['port'] if d else '')" "$SCAN_RESULT")"
+    FIRST_MODEL="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); m=d[0].get('models',[]) if d else []; print(m[0] if m else 'default')" "$SCAN_RESULT")"
+    if [ -n "$FIRST_IP" ]; then
+      PROV="llama_remote_1"
+      API_BASE="http://${FIRST_IP}:${FIRST_PORT}"
+      MODEL="$FIRST_MODEL"
+      api_key=""
+      ok "Auto-configured remote llama.cpp as default provider"
+      sub "Provider: llama_remote_1 @ $API_BASE"
+      sub "Model: $MODEL"
+      sub "Additional instances available via /provider list"
+    else
+      PROV="local"
+      API_BASE="http://127.0.0.1:8080"
+      MODEL=""
+      api_key=""
+    fi
+  else
+    ok "Auto mode: no remote llama.cpp instances found on network"
+    warn "No AI provider configured — run 'prism32' then /setup to configure one"
+    warn "Or set provider manually: prism32 /provider add <name> <base_url> <api_key>"
+    PROV="local"
+    API_BASE="http://127.0.0.1:8080"
+    MODEL=""
+    api_key=""
+  fi
 else
   _configure_provider
 
@@ -582,6 +760,58 @@ else
     [ "$more" != "y" ] && [ "$more" != "Y" ] && [ "$more" != "yes" ] && break
     _configure_provider
   done
+
+  # Also scan for remote llama.cpp instances and offer to add them
+  echo ""
+  echo -e "  ${DIM}Scanning network for remote llama.cpp instances...${RST}"
+  SCAN_RESULT="$(_scan_remote_llama 2>/dev/null || echo '[]')"
+  SCAN_COUNT="$("$PY3" -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$SCAN_RESULT" 2>/dev/null || echo 0)"
+  if [ "$SCAN_COUNT" != "0" ]; then
+    ok "Found $SCAN_COUNT remote llama.cpp instance(s)"
+    "$PY3" -c "
+import json, sys
+scan = json.loads(sys.argv[1])
+for i, inst in enumerate(scan):
+    url = 'http://{0}:{1}'.format(inst['ip'], inst['port'])
+    models = inst.get('models', [])
+    model = models[0] if models else 'default'
+    print('  [{0}] {1}  (model: {2})'.format(i + 1, url, model))
+" "$SCAN_RESULT"
+    if [ -t 0 ]; then
+      read -r -p "  Add these as providers? (Y/n): " add_scan || add_scan=""
+      add_scan="${add_scan:-Y}"
+      if [ "$add_scan" = "y" ] || [ "$add_scan" = "Y" ] || [ "$add_scan" = "yes" ]; then
+        # Add each discovered instance as a provider
+        for i in $(seq 1 "$SCAN_COUNT"); do
+          INST_IP="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); print(d[$2-1]['ip'])" "$SCAN_RESULT" "$i")"
+          INST_PORT="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); print(d[$2-1]['port'])" "$SCAN_RESULT" "$i")"
+          INST_MODEL="$("$PY3" -c "import json,sys; d=json.loads(sys.argv[1]); m=d[$2-1].get('models',[]); print(m[0] if m else 'default')" "$SCAN_RESULT" "$i")"
+          _pname="llama_remote_$i"
+          _pjson="$("$PY3" -c "
+import json, sys
+d = {'api_base': sys.argv[1], 'model': sys.argv[2], 'api_key': ''}
+print(json.dumps(d))
+" "http://${INST_IP}:${INST_PORT}" "$INST_MODEL")"
+          ALL_PROVIDERS="$("$PY3" -c "
+import json, sys
+all_p = json.loads(sys.argv[1])
+all_p[sys.argv[2]] = json.loads(sys.argv[3])
+print(json.dumps(all_p))
+" "$ALL_PROVIDERS" "$_pname" "$_pjson")"
+          ok "Added provider: $_pname @ http://${INST_IP}:${INST_PORT} (model: $INST_MODEL)"
+          # Set first as default if none set
+          if [ -z "${PROV:-}" ]; then
+            PROV="$_pname"
+            API_BASE="http://${INST_IP}:${INST_PORT}"
+            MODEL="$INST_MODEL"
+            api_key=""
+          fi
+        done
+      fi
+    fi
+  else
+    sub "No remote llama.cpp instances found on local network"
+  fi
 fi
 
 fi  # end of else (non-auto or no config)

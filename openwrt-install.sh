@@ -47,7 +47,7 @@ sub()   { printf "  ${DIM}|${RST}  %s\n" "$*"; }
 # ── Banner ──
 printf "\n"
 printf "  ${BLD}+========================================+${RST}\n"
-printf "  ${BLD}|  Prism32 OpenWrt Installer v7.3.0      |${RST}\n"
+printf "  ${BLD}|  Prism32 OpenWrt Installer v7.4.0      |${RST}\n"
 printf "  ${BLD}|  MegaDyne Systems Edition             |${RST}\n"
 printf "  ${BLD}+========================================+${RST}\n"
 printf "\n"
@@ -341,7 +341,7 @@ fi
 # ═══════════════════════════════════════════════════════════════
 header "Step 6/6 - Complete"
 
-printf "  ${BLD}Prism32 v7.3.0 installed!${RST}\n"
+printf "  ${BLD}Prism32 v7.4.0 installed!${RST}\n"
 printf "\n"
 printf "  ${DIM}Install location:${RST}  $RUNTIME_DIR\n"
 printf "  ${DIM}Wrapper:${RST}           $WRAPPER\n"
