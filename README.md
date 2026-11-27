@@ -694,7 +694,7 @@ Prism32 sends OpenAI-style `/chat/completions` requests (protocol is routed by e
 
 All commands require the `/` prefix. Bare text is sent to the AI.
 
-Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/skill-create`, `/auto delete|pause|resume|show`, `/shard reset`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks. (`/delegate`, `/spawn`, `/subagents`, `/collect`, `/wait`, `/bg`, `/bgs`, `/board`, `/remember`, `/recall`, `/memories`, `/forget`, `/json`, `/quantum`, and plugin commands are exceptions — they work for both the operator and from execute blocks.)
+Not all commands are available to both the operator and the model. Commands that manage the session, config, providers, models, and system state (`/config`, `/savecfg`, `/provider`, `/model`, `/theme`, `/stream`, `/help`, `/quit`, `/clear`, `/save`, `/load`, `/resume`, `/sessions`, `/skill-create`, `/auto delete|pause|resume|show`, `/shard reset`, `/memory edit`, `/plugins`, `/usage`, and similar session/config commands) are operator-side only. The model cannot issue them from `execute` blocks. (`/delegate`, `/spawn`, `/subagents`, `/collect`, `/wait`, `/bg`, `/interject`, `/board`, `/remember`, `/recall`, `/memories`, `/forget`, `/json`, `/quantum`, and plugin commands are exceptions — they work for both the operator and from execute blocks.)
 
 Core:
 
@@ -804,7 +804,6 @@ Subagents, background jobs, and shared context:
 /interject <id> <msg> Steer a running subagent mid-task (no restart)
 /bg <cmd>             Run a long shell command in the background
 /bg                   List background jobs
-/bgs                  List background jobs (alias)
 /subagents            List running/completed subagents
 /collect <id>         Show a completed subagent's or job's result (records stay for re-reads)
 /pause | /unpause    Freeze/resume the whole swarm between steps (Ctrl+P too)
@@ -906,10 +905,10 @@ The model can use any shell command plus these Prism32-native commands:
 | `/subagents` | List subagents |
 | `/wait [id] [--timeout s]` | Block until subagents/background jobs finish |
 | `/interject <id> <msg>` | Steer a running subagent mid-task |
-| `/bg <cmd>` / `/bgs` | Start/list background shell jobs |
-| `/pause` / `/unpause` (Ctrl+P) | Non-destructive swarm pause/resume |
-| `/compact` | Manually compact the session context now |
+| `/bg <cmd>` | Start background shell jobs (bare `/bg` lists) |
 | `/collect <id>` | Show a completed subagent's or job's result |
+| `/json <file> [--key <path>]` | Read JSON files with pretty-printing |
+| `/memory path` | Locate memory files |
 | `/remember`, `/recall`, `/memories`, `/forget` | Long-term memory |
 | `/auto create|list|run` | Create, list, or run automations |
 | `/skill-list`, `/skill-load <name>` | List/inject skills |

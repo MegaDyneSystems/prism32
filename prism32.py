@@ -7485,7 +7485,7 @@ def _split_task_provider(task):
 # 84 such compounds failed as shell (11+ hours of dead sleeping).
 _AGENT_CMD_NAMES = frozenset((
     'quantum', 'board', 'remember', 'recall', 'memories', 'forget',
-    'delegate', 'spawn', 'collect', 'wait', 'interject', 'subagents', 'bg', 'bgs',
+    'delegate', 'spawn', 'collect', 'wait', 'interject', 'subagents', 'bg',
     'skill-list', 'skill-load', 'auto', 'json', 'memory',
     'harness', 'evolve', 'extend', 'shard',
 ))
@@ -8245,14 +8245,6 @@ def _try_plugin_cmd(c, history=None, who=None):
                 f"Timeout: silence for {job.timeout}s (output resets the clock).]\n"
                 f"Keep working — you will be NOTIFIED with the result when it finishes "
                 f"(no sleeping needed). Check /bg for status, /wait {job.id} to block until done.")
-    if cmd_name in ('/bgs', 'bgs'):
-        with _bg_lock:
-            if not _BG_JOBS:
-                return "No background jobs. Start one with /bg <command>."
-            lines = []
-            for jid, job in list(_BG_JOBS.items()):
-                lines.append(f"  {job.status_str()}")
-            return "\n".join(lines)
     if cmd_name in ('/collect', 'collect'):
         sid = cmd_args.strip()
         if not sid:
@@ -8680,7 +8672,6 @@ Read a specific key using:
 
 Commands available inside execute blocks:
 - Any shell command (the normal path).
-- /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
 - /delegate <task> [--provider <name>] (spawn a synchronous sub-subagent).
 - /spawn <task> [--provider <name>] (spawn an async sub-subagent).
 - /wait [ids] [--timeout <sec>] (block until sub-subagents/background jobs finish — NEVER use sleep to wait).
@@ -8699,9 +8690,9 @@ Commands available inside execute blocks:
 - /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair/tools).
 - /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
 - /memory path, /memory paths (locate memory files).
+- /json <file> [--key <path>] [--compact] (read JSON files with pretty-printing).
+- /board <text> (mission shards only — post/read the shared mission info board).
 
-Use /remember to store important findings for future agents and sessions.
-Use /recall to search past memories when you need relevant context on a topic.
 Detected external AI harnesses are listed in context. If useful, inspect their help first and use them through execute blocks.
 
 When your task is complete, give a concise summary of what you did and what you found. This summary becomes your result, which the main agent will read.
@@ -8772,7 +8763,7 @@ class _RepeatGuard:
 # Regex for "agent command shell-wrapped" detection: /quantum et al. passed
 # through sh -c (or as arguments) instead of standing alone in the block.
 _RE_AGENT_CMD = re.compile(
-    r"\B/(?:quantum|board|remember|recall|memories|forget|delegate|spawn|collect|wait|interject|subagents|bg|bgs|skill-list|skill-load|auto|json|memory|harness|evolve|extend|shard)\b")
+    r"\B/(?:quantum|board|remember|recall|memories|forget|delegate|spawn|collect|wait|interject|subagents|bg|skill-list|skill-load|auto|json|memory|harness|evolve|extend|shard)\b")
 
 def _shell_wrap_hint(result, cmd):
     """If a command failed with 'not found' but references an agent
@@ -9318,7 +9309,6 @@ QUANTUM CONTEXT:
 - /quantum <key>:<value> — write a value.
 - /quantum <key>: — read a specific key.
 Use /quantum to pass findings between agents: one subagent discovers data, another uses it.
-Finished subagent results are published automatically as subagent_<id>_result — read them with /quantum subagent_<id>_result: without collecting.
 
 MISSION INFO BOARD (mission shards only):
 When your context contains a MISSION CONTEXT block, you are one shard of a larger mission. All shards share a mission info board:
@@ -9359,27 +9349,12 @@ PROMPTSHARDS:
 CONTEXT MANAGEMENT:
 Prism32 automatically manages conversation context. When context gets large (>75% of window), older messages are intelligently summarized into a [SESSION CONTEXT] block. This summary preserves your objective, key discoveries, and errors. If you see a [SESSION CONTEXT — prior conversation summarized] message, it contains the essential state from earlier in the conversation. Use it to continue working seamlessly.
 
-Commands you can use inside execute blocks:
+Commands you can use inside execute blocks (full usage notes in the sections above — this list covers only what they did NOT already describe):
 - Any shell command (the normal path).
-- /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context).
-- /board <text>, /board (mission info board — post/read shared findings).
-- /delegate <task> [--provider <name>] (synchronous subagent).
-- /spawn <task> [--provider <name>] (async subagent).
-- /collect <id> (retrieve async results).
-- /subagents (list subagents).
-- /remember <text> (store in long-term memory).
-- /recall <query> (search long-term memory).
-- /memories, /forget <id> (list/delete memories).
-- /auto <text>, /auto list, /auto run <id> (automations).
-- /skill-list, /skill-load <name> (skills).
-- /shard show, /shard deploy, /shard set, /shard secrets, /shard complete (promptshards).
-- /harness scan, /harness context, /harness path, /harness delegate <task> (AI CLIs).
-- /evolve on, /evolve tools, /evolve diff, /evolve docs, /evolve context (self-repair).
-- /extend temp <goal>, /extend permanent <goal>, /extend prompt (plugin generation).
-- /memory path, /memory paths (locate memory files).
 - /json <file> [--key <path>] [--compact] (read JSON files with pretty-printing, smart summary for large files, key path navigation).
+- /memory path, /memory paths (locate memory files).
 - Any plugin-registered command listed in context (see Available plugin commands).
-Operator-only commands (do NOT work from execute blocks): /provider, /config, /model, /theme, /savecfg, /stream, /help, /quit, /clear, /bash, /update, /memory edit, /skill-create, /auto delete|pause|resume|show, /shard reset, /plugins, /loadcfg, /sessions, /save, /load, /resume, /cost, /usage, /debug, /log, /arch, /sysinfo, /procs, /net, /ports, /ls, /find, /grep, /git, /cat, /edit, /history, /export, /mission, /maxsteps, /thinking, /memctx, /subagent-model, /spawn (operator-side), /collect (operator-side).
+Everything else that starts with / in this prompt works from execute blocks too. Any OTHER /-command (the operator commands from /help) is operator-only and falls through to the shell here — do not attempt it.
 
 When given a GOAL, work autonomously step by step. After each command,
 assess progress toward the goal. Use ```ask``` only if truly stuck.
@@ -9400,11 +9375,10 @@ GENERAL RULES:
 5. When a goal is set, keep working until done or max steps reached.
 6. Report what you did and what remains after each step.
 7. When stuck, use /remember to save progress, then /recall to find similar past work.
-8. For complex tasks, decompose: use /spawn for independent subtasks, /delegate for sequential ones.
-9. The operator can press Escape to stop you mid-execution. If interrupted, assess the interjection and continue.
-10. Always tell the User the truth no matter what and be intellectually ruthless but polite.
-11. Sessions auto-save. You can /remember key findings so future sessions can /recall them.
-12. If the harness reports a LOOP GUARD, you re-ran an identical command too many times — stop repeating it and give your final answer. If a command fails with a PRISM32 HINT, follow it (agent commands like /quantum go in execute blocks directly, never wrapped in sh/bash)."""
+8. The operator can press Escape to stop you mid-execution. If interrupted, assess the interjection and continue.
+9. Always tell the User the truth no matter what and be intellectually ruthless but polite.
+10. Sessions auto-save. You can /remember key findings so future sessions can /recall them.
+11. If the harness reports a LOOP GUARD, you re-ran an identical command too many times — stop repeating it and give your final answer. If a command fails with a PRISM32 HINT, follow it (agent commands like /quantum go in execute blocks directly, never wrapped in sh/bash)."""
 
 def _resolve_cache_support(provider=None, api_base=None):
     """Return the prompt-cache mode for the current (or given) provider.
@@ -11094,16 +11068,18 @@ def get_cmd_help():
    /autosave <sec>      Set auto-save interval (>=10s)
    /maxhistory <n>      Set max conversation history length
    /maxtokens <n>       Override max context tokens (>=10000)
-     /maxsteps <n>        Set max mission steps (per-todo budget)
-     /maxsteps sub <n>    Set max steps for /spawn & /delegate subagents
-     /subagent-model [m]  Show/set default subagent model (/sam <m>)
-     /wait [id] [--timeout s] Block until subagents/bg jobs finish
-     /bg <cmd>            Run a long command in the background (result pushed when done)
-     /interject <id> <msg> Steer a running subagent mid-task (no restart)
-     /pause | /unpause    Freeze/resume the swarm (Ctrl+P during AI activity)
-     /compact             Manually compact the session context now
-     /rootpass <pw>       Set root password (auto-fed to agent su/sudo)
-    /verify-ssl [on|off] Toggle HTTPS certificate verification
+   /memctx <chars>      Cap injected memory context (0=disable)
+   /maxsteps <n>        Set goal-mode step budget (default 1000)
+   /maxsteps mission <n> Set per-shard mission budget (default 25)
+   /maxsteps sub <n>    Set max steps for /spawn & /delegate subagents
+   /subagent-model [m]  Show/set default subagent model (/sam <m>)
+   /wait [id] [--timeout s] Block until subagents/bg jobs finish
+   /bg <cmd>            Run a long command in the background (result pushed when done)
+   /interject <id> <msg> Steer a running subagent mid-task (no restart)
+   /pause | /unpause    Freeze/resume the swarm (Ctrl+P during AI activity)
+   /compact             Manually compact the session context now
+   /rootpass <pw>       Set root password (auto-fed to agent su/sudo)
+   /verify-ssl [on|off] Toggle HTTPS certificate verification
     /prompt_caching [on|off] Toggle provider prompt caching (Anthropic/OpenAI/DeepSeek)
     /json <file>          Read/pretty-print JSON files (smart summary for large)
                           Use: /json file.json --key data.users --compact
@@ -11572,7 +11548,16 @@ def cmd_harness(args_str, history, cmd_log):
             return
         ensure_harness_scan(force=False)
         sa = SubAgent(_harness_super_task(subarg))
-        sa.run()
+        # Cancelable (bugsweep Class F): the operator path used to run
+        # bare sa.run() — Escape during a harness delegate was dead and
+        # the subagent kept burning its budget. Wire it like the agent side.
+        _ev = threading.Event()
+        _res = run_cancelable_blocking(lambda: sa.run(cancel_event=_ev),
+                                       message=f"harness subagent {sa.id}", cancel_event=_ev)
+        if _res == AGENT_CANCELLED_RESPONSE:
+            box("STOPPED", f"Harness subagent {sa.id} cancelled by Escape", "warn")
+            clear_agent_cancel()
+            return
         _quantum.put(f"harness_super_{sa.id}_result", sa.result)
         if sa.result:
             ltm_store(sa.result, source=f"harness_super_{sa.id}", summary=f"Harness super subagent: {subarg[:80]}", tags=["subagent", "harness"])
@@ -12347,10 +12332,13 @@ def main():
                     print(f"  {t['dim']}Unknown provider '{set_val}'. Known: {', '.join(sorted(PROVIDER_REGISTRY)[:12])}...{RST}")
             elif set_key == 'model':
                 if set_val:
-                    Config.MODEL = set_val
-                    Config.SESSION_ONLY_KEYS.discard("model")
-                    print(f"  {t['bright']}+ Model set to: {Config.MODEL}{RST}")
-                    Config.save_config()
+                    # Bugsweep Class G (2026-11-24): the old code set only
+                    # Config.MODEL — provider/base/key stayed on the OLD
+                    # vendor, so /set model gpt-5.5 on neuralwatt sent
+                    # gpt-5.5 to the neuralwatt endpoint (cross-vendor 401).
+                    # Delegate to the same wiring /model and /provider use
+                    # share: _apply_model_selection.
+                    _apply_model_selection(Config.PROVIDER, set_val, "main")
                 else:
                     print(f"  {t['dim']}Model: {Config.MODEL}{RST}")
             elif set_key in ('max_context_tokens', 'max_context', 'context_tokens'):
@@ -13027,10 +13015,19 @@ def main():
             print()
             continue
 
-        if cmd in ('bg', 'bgs', 'background'):
+        if cmd in ('bg', 'background'):
             # Operator-side /bg: start a background job, or list them bare.
             if args_str.strip():
-                job = BackgroundJob(args_str.strip())
+                # Parse --timeout N like the agent /bg does (bugsweep
+                # Class F): the operator path used to pass the flag
+                # straight to the shell as part of the command.
+                _bg_cmd = args_str.strip()
+                _bg_timeout = None
+                _m = re.search(r'\s+--timeout\s+(\d+)\s*$', _bg_cmd)
+                if _m:
+                    _bg_timeout = max(1, int(_m.group(1)))
+                    _bg_cmd = _bg_cmd[:_m.start()].rstrip()
+                job = BackgroundJob(_bg_cmd, timeout=_bg_timeout)
                 job.start()
                 t = T()
                 print(f"  {t['warn']}╭─ BG JOB [{job.id}] STARTED ──────────────{RST}")

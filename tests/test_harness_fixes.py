@@ -767,6 +767,54 @@ def test_friendly_402_hints_go_namespace():
     assert "Invalid credential" not in msg
 
 
+# ── redundant-command cleanup (efficiency pass) ──────────────────
+
+def test_bgs_removed_from_agent_names():
+    from prism32 import _AGENT_CMD_NAMES
+    assert 'bgs' not in _AGENT_CMD_NAMES, "/bgs was removed as redundant with bare /bg"
+    assert 'bg' in _AGENT_CMD_NAMES
+
+
+def test_set_model_delegates_to_apply_selection():
+    """Class G fix: /set model must wire the full provider context
+    (base+key+model), not just Config.MODEL — the old code set only
+    Config.MODEL and left provider/base/key on the old vendor."""
+    # Source-level contract: the /set model branch must call
+    # _apply_model_selection (the same wiring /model and /provider use share).
+    import inspect
+    src = inspect.getsource(prism32)
+    # Find the /set model dispatch block
+    idx = src.find("elif set_key == 'model':")
+    assert idx != -1, "/set model handler must exist"
+    block = src[idx:idx+600]
+    assert "_apply_model_selection" in block, \
+        "/set model must delegate to _apply_model_selection (wires base+key)"
+
+
+def test_system_prompt_execute_table_is_deduplicated():
+    """Class A: the execute-block table must not restate the prose
+    sections (it was 1,286 chars of duplication re-billed per request)."""
+    from prism32 import SYSTEM_PROMPT
+    # The deduplicated table keeps only the unique rows
+    assert "Commands you can use inside execute blocks" in SYSTEM_PROMPT
+    # The old duplicated rows must be gone (covered by prose sections)
+    assert "- /quantum <key>:<value>, /quantum <key>:, /quantum (shared agent context)." not in SYSTEM_PROMPT
+    assert "- /delegate <task> [--provider <name>] (synchronous subagent)." not in SYSTEM_PROMPT
+    # But the unique rows survive
+    assert "/json <file>" in SYSTEM_PROMPT
+    assert "/memory path" in SYSTEM_PROMPT
+
+
+def test_subagent_prompt_has_json_and_board():
+    """I-9: subagent prompt must cover /json and /board (dispatcher handles
+    both; the prompt omitted them)."""
+    prompt = prism32._get_subagent_system_prompt()
+    assert "/json <file>" in prompt
+    assert "/board" in prompt
+    # Quantum tutorial survived (the fenced examples are kept)
+    assert "/quantum <key>:<value>" in prompt
+
+
 # ── result cap disclosure ─────────────────────────────────────────
 
 def test_cap_result_discloses_skipped_volume():
